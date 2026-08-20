@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VECTOR</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; background: #070707; color: #e8e4dc; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; overflow: hidden; }
+    .deck { height: 100%; }
+    .slide {
+      display: none; height: 100%;
+      grid-template-rows: 1fr auto;
+    }
+    .slide.on { display: grid; }
+    .slide img {
+      width: 100%; height: 100%; object-fit: contain; background: #070707;
+    }
+    footer {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 14px 28px 22px;
+      font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+      color: #8a8478; border-top: 1px solid #1c1c1c;
+    }
+    footer b { color: #d4af77; font-weight: 500; }
+    kbd { border: 1px solid #333; padding: 1px 6px; font-size: 10px; color: #aaa; }
+  </style>
+</head>
+<body>
+  <div class="deck" id="deck"></div>
+  <script>
+    const slides = [
+      ["slide-01-cover.png", "VECTOR · Telegram desk"],
+      ["slide-02-home.png", "Стол · три режима кнопками"],
+      ["slide-03-ticket.png", "Сигнал · кликаешь цифры на бирже"],
+      ["slide-04-auto.png", "Авто · бот открывает paper/demo, ты можешь дублировать"],
+      ["slide-05-params.png", "Мои параметры · твои цифры, дальше сам"],
+      ["slide-06-flow.png", "Схема · сигнал → решение → исход"],
+    ];
+    const deck = document.getElementById("deck");
+    slides.forEach(([src, cap], i) => {
+      const el = document.createElement("section");
+      el.className = "slide" + (i === 0 ? " on" : "");
+      el.innerHTML = `<img src="${src}" alt="${cap}" /><footer><span><b>VECTOR</b>  ${String(i+1).padStart(2,"0")} / ${String(slides.length).padStart(2,"0")}</span><span>${cap} &nbsp; <kbd>←</kbd> <kbd>→</kbd></span></footer>`;
+      deck.appendChild(el);
+    });
+    const all = [...document.querySelectorAll(".slide")];
+    let i = 0;
+    const go = n => {
+      all[i].classList.remove("on");
+      i = (n + all.length) % all.length;
+      all[i].classList.add("on");
+    };
+    addEventListener("keydown", e => {
+      if (e.key === "ArrowRight" || e.key === " ") go(i + 1);
+      if (e.key === "ArrowLeft") go(i - 1);
+    });
+    addEventListener("click", e => go(e.clientX > innerWidth / 2 ? i + 1 : i - 1));
+  </script>
+</body>
+</html>

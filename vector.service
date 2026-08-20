@@ -1,0 +1,17 @@
+[Unit]
+Description=VECTOR Telegram desk (separate from USPEX)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vector
+WorkingDirectory=/opt/vector
+EnvironmentFile=/opt/vector/.env
+ExecStart=/opt/vector/venv/bin/python /opt/vector/main.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
