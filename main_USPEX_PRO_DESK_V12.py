@@ -39,6 +39,12 @@ from uspex_core.modes import (
 )
 from uspex_core.reconcile import evaluate_exchange_absence, classify_restart_positions
 from uspex_core.validation import validate_mode_settings as core_validate_mode_settings, validate_positive_number
+from uspex_core.latency import LatencyRegistry, PipelineTrace, latency_bucket_from_ms
+from uspex_core.signal_ttl import evaluate_signal_ttl, adaptive_ttl_ms
+from uspex_core.coalesce import CandidateCoalescer
+from uspex_core.ai_context import AiContextCache, AiContext
+from uspex_core.entry_window import classify_entry_window
+from uspex_core.latency_decay import write_latency_decay_report
 
 def _clean_env_secret(name):
     # Windows/Notepad/copy-paste can inject BOM, CR/LF, NBSP, zero-width chars,
@@ -179,6 +185,9 @@ scanner_metrics=defaultdict(lambda:{
 })
 FUNNEL = FunnelTelemetry()
 SAFE_MODE = SafeMode()
+LATENCY_REG = LatencyRegistry()
+AI_CACHE = AiContextCache()
+COALESCER = CandidateCoalescer(window_sec=4.0, cooldown_sec=8.0)
 demo_positions_cache={"ts":0.0,"positions":[],"ok":False}
 demo_positions_cache_lock=asyncio.Lock()
 
@@ -2878,6 +2887,10 @@ async def system_health_text(s,cid):
     lines.append(f"⏱ Council last/avg/p50/p95: {cl['last']:.2f}/{cl['avg']:.2f}/{cl['p50']:.2f}/{cl['p95']:.2f}s • timeouts {cl['timeouts']}")
     lines.append(f"⏱ Cursor last/avg/p50/p95: {cu['last']:.2f}/{cu['avg']:.2f}/{cu['p50']:.2f}/{cu['p95']:.2f}s • timeouts {cu['timeouts']}")
     lines.append(f"⏱ Grok last/avg/p50/p95: {cg['last']:.2f}/{cg['avg']:.2f}/{cg['p50']:.2f}/{cg['p95']:.2f}s • timeouts {cg['timeouts']}")
+    lines.append("⏱ E2E PIPELINE LATENCY")
+    for ln in LATENCY_REG.health_lines():
+        lines.append("  "+ln)
+    lines.append(f"🧠 AI context cache: cursor_age={(now()-AI_CACHE.last_cursor_refresh) if AI_CACHE.last_cursor_refresh else -1:.0f}s • grok_age={(now()-AI_CACHE.last_grok_refresh) if AI_CACHE.last_grok_refresh else -1:.0f}s")
     lines.append(SAFE_MODE.status_text())
     lines.append(f"👻 Shadow Mode: {'ON (zero orders)' if SHADOW_MODE else 'OFF'}")
     lines.append(f"🛡 Execution Shield: singleton • fill-confirm • {EXCHANGE_RECONCILE_GRACE:.0f}s reconcile • {EXCHANGE_MISSING_CONFIRMATIONS} confirmations")
@@ -3766,8 +3779,9 @@ async def cursor_trade_vote(cid,sym,sig,execution_mode_name,margin,lev,pos,cfg,p
         "max_chase_bps": tol["max_chase_bps"],
         "memory": mem_short,
     }
-    snap = build_council_snapshot(facts)
-    prompt = cursor_vote_prompt(snap, profile)
+    layer_a = AI_CACHE.snapshot_for_prompt(sym)
+    snap = build_council_snapshot(facts) + " | LAYER_A: " + layer_a
+    prompt = cursor_vote_prompt(snap, profile) + "\nUse LAYER_A cached structure as prior; confirm ONLY with live FACTS. Cached context is NOT final approval."
     return await ask_cursor_vote_raw(prompt, CURSOR_VOTE_TIMEOUT_SEC)
 
 async def grok_trade_vote(session,cid,sym,sig,execution_mode_name,margin,lev,pos,cfg,profile="medium"):
@@ -3793,8 +3807,9 @@ async def grok_trade_vote(session,cid,sym,sig,execution_mode_name,margin,lev,pos
         "max_chase_bps": tol["max_chase_bps"],
         "memory": mem_short,
     }
-    snap = build_council_snapshot(facts)
-    prompt = grok_vote_prompt(snap, profile)
+    layer_a = AI_CACHE.snapshot_for_prompt(sym)
+    snap = build_council_snapshot(facts) + " | LAYER_A: " + layer_a
+    prompt = grok_vote_prompt(snap, profile) + "\nUse LAYER_A regime/risk cache as prior; confirm ONLY with live FACTS. Cache is NOT final approval."
     headers={"Authorization":f"Bearer {XAI_API_KEY}","Content-Type":"application/json"}
     payload={"model":XAI_MODEL,"input":[{"role":"system","content":GROK_VOTE_SYSTEM},{"role":"user","content":prompt}],
              "max_output_tokens":180}
@@ -3878,6 +3893,23 @@ async def scanner(s):
                             if not sig: continue
                             sm["candidates"]+=1; FUNNEL.funnel(cid).bump("candidates"); sm["last_candidate_ts"]=now(); sm["last_candidate"]=f"{sym} {sig.get('side','')} {float(sig.get('score',0)):.0f}"; sm["last_event"]="candidate -> quality gate"
                             FUNNEL.funnel(cid).last_candidate=sm["last_candidate"]; FUNNEL.funnel(cid).last_candidate_ts=sm["last_candidate_ts"]
+                            # Layer B trigger + candidate coalescing (avoid multi-Council on same impulse)
+                            px=float(sig.get('entry') or mid(states[sym]['bybit']) or 0)
+                            live_c, start_council = COALESCER.upsert(
+                                chat_id=cid, symbol=sym, side=sig['side'], mode=prof, price=px,
+                                residual_edge=float(sig.get('residual_edge') or 0),
+                                uspex_score=float(sig.get('score') or 0),
+                                data_quality=float(sig.get('data_quality') or 0),
+                                payload=sig,
+                            )
+                            sig['candidate_id']=live_c.candidate_id
+                            sig['candidate_ts']=live_c.first_detect_ts
+                            sig['first_detect_price']=live_c.first_detect_price
+                            sig['best_price_since_detect']=live_c.best_price_since_detect
+                            sig['peak_edge']=live_c.peak_edge
+                            if not start_council and prof in AUTO_COUNCIL_PROFILES and em=="demo":
+                                sm["last_event"]="coalesced refresh "+live_c.candidate_id
+                                continue
 
                             if prof=="manual":
                                 last_signal[(cid,sym)]=now()
@@ -3917,6 +3949,9 @@ async def scanner(s):
                                 risk_usd=float(cfg["sl"]); stop_pct=(risk_usd/max(pos,1e-9))*100.0
 
                             fn=FUNNEL.funnel(cid); fn.bump("quality_pass")
+                            trace=PipelineTrace(str(sig.get('candidate_id') or f"{sym}-{now()}"), sym, sig['side'], prof)
+                            trace.mark("signal_detected", float(sig.get('candidate_ts') or now()))
+                            trace.mark("quality_pass")
                             if not SAFE_MODE.allow_new_entries():
                                 log_trade_event(cid,JournalCode.SAFE_MODE,SAFE_MODE.reason,sym=sym,profile=prof)
                                 sm["last_event"]="SAFE_MODE block"; continue
@@ -3925,23 +3960,37 @@ async def scanner(s):
                             council_gate=""
                             if prof in AUTO_COUNCIL_PROFILES and em=="demo":
                                 # Fast Triple AI: parallel votes, hard council budget, fail-closed timeouts.
-                                fn.bump("council_started"); council_t0=now()
+                                fn.bump("council_started"); council_t0=now(); trace.mark("council_start"); COALESCER.mark_council_start(cid,sym,sig['side'])
+                                cursor_task=asyncio.create_task(cursor_trade_vote(cid,sym,sig,em,margin,lev,pos,cfg,prof))
+                                grok_task=asyncio.create_task(grok_trade_vote(s,cid,sym,sig,em,margin,lev,pos,cfg,prof))
                                 try:
-                                    cursor_vote,grok_vote=await asyncio.wait_for(
-                                        asyncio.gather(
-                                            cursor_trade_vote(cid,sym,sig,em,margin,lev,pos,cfg,prof),
-                                            grok_trade_vote(s,cid,sym,sig,em,margin,lev,pos,cfg,prof)
-                                        ),
+                                    done, pending = await asyncio.wait(
+                                        {cursor_task, grok_task},
                                         timeout=COUNCIL_BUDGET_SEC,
+                                        return_when=asyncio.ALL_COMPLETED,
                                     )
-                                except asyncio.TimeoutError:
+                                    for p in pending:
+                                        p.cancel()
+                                        try: await p
+                                        except Exception: pass
+                                    if pending:
+                                        FUNNEL.council.record(COUNCIL_BUDGET_SEC, True)
+                                        cursor_vote = cursor_task.result() if cursor_task in done and not cursor_task.cancelled() else timeout_vote("Cursor", lev)
+                                        grok_vote = grok_task.result() if grok_task in done and not grok_task.cancelled() else timeout_vote("Grok", lev)
+                                        if cursor_task in pending: fn.bump("cursor_timeout"); log_trade_event(cid,JournalCode.COUNCIL_DEADLINE,"cursor cancelled by budget",sym=sym,profile=prof)
+                                        if grok_task in pending: fn.bump("grok_timeout"); log_trade_event(cid,JournalCode.COUNCIL_DEADLINE,"grok cancelled by budget",sym=sym,profile=prof)
+                                    else:
+                                        cursor_vote=cursor_task.result(); grok_vote=grok_task.result()
+                                        FUNNEL.council.record(now()-council_t0, False)
+                                except Exception as e:
                                     FUNNEL.council.record(COUNCIL_BUDGET_SEC, True)
                                     cursor_vote=timeout_vote("Cursor", lev); grok_vote=timeout_vote("Grok", lev)
-                                    fn.bump("cursor_timeout"); fn.bump("grok_timeout")
-                                    log_trade_event(cid,JournalCode.AI_TIMEOUT_CURSOR,f"council budget {COUNCIL_BUDGET_SEC}s",sym=sym,profile=prof)
+                                    log_trade_event(cid,JournalCode.COUNCIL_DEADLINE,f"council error {type(e).__name__}",sym=sym,profile=prof)
                                     save_ai_council_skip(cid,sym,sig['side'],sig['score'],cursor_vote,grok_vote,"AI_TIMEOUT_COUNCIL",prof)
+                                    COALESCER.mark_council_done(cid,sym,sig['side'])
                                     sm["council_reject"]+=1; fn.bump("council_reject"); continue
-                                FUNNEL.council.record(now()-council_t0, False)
+                                trace.mark("cursor_done"); trace.mark("grok_done"); trace.mark("council_done")
+                                COALESCER.mark_council_done(cid,sym,sig['side'])
                                 if (cursor_vote or {}).get("timeout"):
                                     fn.bump("cursor_timeout"); log_trade_event(cid,JournalCode.AI_TIMEOUT_CURSOR,(cursor_vote or {}).get("reason",""),sym=sym,profile=prof)
                                 if (grok_vote or {}).get("timeout"):
@@ -3965,9 +4014,36 @@ async def scanner(s):
                                             + f"━━━━━━━━━━━━━━━━━━━━\n"
                                             + f"🛡 Veto принят. Никакого входа ради количества сделок.")
                                     continue
-                                # Structural revalidation — do NOT require literal second-impulse candidate().
+                                # TTL / half-life + structural revalidation — never trade a dead micro impulse on stale APPROVE.
                                 fn.bump("council_approve")
                                 live_ref=mid(states[sym]["bybit"]) or decision_ref
+                                age_ms=(now()-float(sig.get('candidate_ts') or decision_started))*1000.0
+                                # temporary residual estimate for TTL; refined below
+                                ttl=evaluate_signal_ttl(prof, age_ms=age_ms, residual_edge=float(sig.get('residual_edge') or 0),
+                                    min_residual=ENTRY_TOLERANCE.get(prof,ENTRY_TOLERANCE['medium'])['min_residual_edge'],
+                                    original_lag_pct=float(sig.get('residual_edge') or 0),
+                                    spread_bps=_spread_bps(states[sym]['bybit']))
+                                if not ttl.ok:
+                                    sm["revalidation_reject"]+=1; sm["last_event"]="TTL "+ttl.code
+                                    log_trade_event(cid, ttl.code, ttl.detail, sym=sym, profile=prof)
+                                    LATENCY_REG.ingest(trace); continue
+                                live_c=COALESCER.get(cid,sym,sig['side'])
+                                if live_c:
+                                    ew=classify_entry_window(
+                                        side=sig['side'], first_detect_price=live_c.first_detect_price,
+                                        best_price_since_detect=live_c.best_price_since_detect,
+                                        current_price=float(live_ref or live_c.current_price),
+                                        peak_edge=live_c.peak_edge, residual_edge=float(sig.get('residual_edge') or live_c.residual_edge),
+                                        max_chase_bps=ENTRY_TOLERANCE.get(prof,ENTRY_TOLERANCE['medium'])['max_chase_bps'],
+                                        max_adverse_bps=ENTRY_TOLERANCE.get(prof,ENTRY_TOLERANCE['medium'])['max_adverse_bps'],
+                                        min_residual=ENTRY_TOLERANCE.get(prof,ENTRY_TOLERANCE['medium'])['min_residual_edge'],
+                                    )
+                                    if not ew.ok:
+                                        code=JournalCode.REVALIDATION_CHASE if ew.code=="PRICE_RAN_AWAY" else (
+                                            JournalCode.REVALIDATION_REVERSAL if ew.code=="REVERSAL" else JournalCode.REVALIDATION_EDGE_GONE)
+                                        sm["revalidation_reject"]+=1; fn.bump("revalidation_chase" if "CHASE" in code or ew.code=="PRICE_RAN_AWAY" else "revalidation_edge_gone")
+                                        log_trade_event(cid, code, ew.detail, sym=sym, profile=prof)
+                                        LATENCY_REG.ingest(trace); continue
                                 gguard=PROFILE_GUARDS.get(prof,PROFILE_GUARDS['medium'])
                                 ages={ex:_quote_age(states[sym][ex]) for ex in ("binance","bybit","okx")}
                                 fresh_n=sum(1 for a in ages.values() if a<=gguard['fresh_age'])
@@ -4009,7 +4085,7 @@ async def scanner(s):
                                     log_trade_event(cid,code,rv.detail+f" latency={now()-decision_started:.1f}s",sym=sym,profile=prof)
                                     if SHOW_GUARD_REJECTS:await send(s,cid,f"🕒 REVALIDATION • {sym} {rv.code}\n{rv.detail}")
                                     continue
-                                fn.bump("revalidation_pass")
+                                fn.bump("revalidation_pass"); trace.mark("revalidation_done")
                                 log_trade_event(cid,JournalCode.REVALIDATION_PASS,rv.detail,sym=sym,profile=prof)
                                 ok_guard2,guard_detail2,dq2=pretrade_quality_gate(sym,sig['side'],prof,cfg,"bybit")
                                 if not ok_guard2:
@@ -4061,8 +4137,10 @@ async def scanner(s):
                             meta={}
                             if em=="demo" and SHADOW_MODE:
                                 fn.bump("would_open")
+                                trace.mark("order_sent"); trace.meta["shadow"]=1
+                                LATENCY_REG.ingest(trace)
                                 log_trade_event(cid,JournalCode.WOULD_OPEN,
-                                    f"shadow score={t.score} DQ={sig.get('data_quality')} gate={council_gate}",
+                                    f"shadow score={t.score} DQ={sig.get('data_quality')} gate={council_gate} bucket={trace.latency_bucket()} age_ms={trace.metrics().get('candidate_to_order_ms')}",
                                     sym=sym,profile=prof)
                                 sm["last_event"]="SHADOW WOULD_OPEN"; continue
                             if em=="demo":
@@ -4093,6 +4171,12 @@ async def scanner(s):
                                 save_ai_council_open(t,cursor_vote,grok_vote,council_gate or "TRIPLE")
                             current+=1
                             sm["opened"]+=1; FUNNEL.funnel(cid).bump("opened"); sm["last_event"]="OPENED on Bybit Demo" if em=="demo" else "OPENED PAPER"
+                            try:
+                                if em=="demo":
+                                    trace.mark("order_sent"); trace.mark("order_ack"); trace.mark("fill_confirmed")
+                                LATENCY_REG.ingest(trace)
+                            except Exception as _le:
+                                print("LATENCY_INGEST",repr(_le))
                             council = ""
                             if prof in AUTO_COUNCIL_PROFILES and cursor_vote and grok_vote:
                                 combined=(float(t.score)+float(cursor_vote.get("confidence",0))+float(grok_vote.get("confidence",0)))/3.0
@@ -4486,6 +4570,49 @@ async def startup_reconcile_demo(session):
         else:
             print('STARTUP_RECONCILE OK',cid,len(local))
 
+
+async def ai_context_prewarm_loop(s):
+    """Layer A: refresh Cursor/Grok slow context for Top symbols. Never opens trades."""
+    while not stop_event.is_set():
+        try:
+            # Deterministic local Layer-A priors from live feeds (no LLM required for baseline cache).
+            # Optional LLM enrichment can overwrite these later without blocking the fast path.
+            btc=states.get("BTCUSDT",{}).get("bybit") if "BTCUSDT" in states else None
+            btc_ret=0.0
+            if btc:
+                n=mid(btc); o=old(btc,60.0)
+                if n and o: btc_ret=pct(o,n)
+            regime="risk_on" if btc_ret>0.15 else ("risk_off" if btc_ret<-0.15 else "neutral")
+            allowed="BOTH" if abs(btc_ret)<0.45 else ("LONG" if btc_ret>0 else "SHORT")
+            AI_CACHE.put_grok(AiContext(
+                source="grok", symbol="GLOBAL", allowed_side=allowed, bias=regime,
+                confidence=60.0, caution=("elevated_move" if abs(btc_ret)>0.45 else "none"),
+                invalidation="btc_60s_flip", ts=now(), ttl_sec=120.0,
+                extra={"btc_ret_60s":btc_ret},
+            ))
+            for sym in list(symbols)[:20]:
+                try:
+                    m=states[sym]["bybit"]; n=mid(m); o=old(m,30.0)
+                    if not n: continue
+                    r=pct(o,n) if o else 0.0
+                    side="BOTH"
+                    if r>0.25: side="LONG"
+                    elif r<-0.25: side="SHORT"
+                    sp=_spread_bps(m)
+                    AI_CACHE.put_cursor(AiContext(
+                        source="cursor", symbol=sym, allowed_side=side,
+                        bias=("trend" if abs(r)>0.25 else "range"),
+                        confidence=max(40.0, min(75.0, 50+abs(r)*40)),
+                        caution=("wide_spread" if sp>20 else "none"),
+                        invalidation="30s_structure_break", ts=now(), ttl_sec=90.0,
+                        extra={"ret30":r,"spread_bps":sp},
+                    ))
+                except Exception:
+                    continue
+        except Exception as e:
+            print("AI_PREWARM",repr(e))
+        await asyncio.sleep(45)
+
 async def main():
     ok_lock,lock_detail=acquire_instance_lock()
     if not ok_lock:
@@ -4502,7 +4629,8 @@ async def main():
         await startup_reconcile_demo(s)
         tasks=[asyncio.create_task(x) for x in (
             binance(),bybit(),okx(),binance_liquidations(),news_poller(s),
-            telegram_loop(s),scanner(s),watcher(s),live_positions_loop(s)
+            telegram_loop(s),scanner(s),watcher(s),live_positions_loop(s),
+            ai_context_prewarm_loop(s),
         )]
         await stop_event.wait()
         for t in tasks:t.cancel()

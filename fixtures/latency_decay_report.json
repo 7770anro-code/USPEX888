@@ -1,0 +1,62 @@
+{
+  "profile": "medium",
+  "n_snapshots": 300,
+  "by_latency_sec": {
+    "0": {
+      "valid": 300,
+      "chase": 0,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 0,
+      "n": 300
+    },
+    "1": {
+      "valid": 300,
+      "chase": 0,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 0,
+      "n": 300
+    },
+    "3": {
+      "valid": 300,
+      "chase": 0,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 0,
+      "n": 300
+    },
+    "5": {
+      "valid": 288,
+      "chase": 12,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 0,
+      "n": 300
+    },
+    "8": {
+      "valid": 161,
+      "chase": 130,
+      "reversal": 0,
+      "edge_gone": 7,
+      "expired": 2,
+      "n": 300
+    },
+    "12": {
+      "valid": 84,
+      "chase": 184,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 32,
+      "n": 300
+    },
+    "30": {
+      "valid": 0,
+      "chase": 0,
+      "reversal": 0,
+      "edge_gone": 0,
+      "expired": 300,
+      "n": 300
+    }
+  }
+}

@@ -49,9 +49,10 @@ PROFILES = {
 AUTO_COUNCIL_PROFILES = {"easy", "medium", "big", "ai"}
 
 # Council wall-clock budget (seconds). Fail-closed on timeout.
-COUNCIL_BUDGET_SEC = 10.0
-CURSOR_VOTE_TIMEOUT_SEC = 8.0
-GROK_VOTE_TIMEOUT_SEC = 8.0
+# Hard max 8s; prefer ~5s for micro half-life compatibility with Layer A cache.
+COUNCIL_BUDGET_SEC = 8.0
+CURSOR_VOTE_TIMEOUT_SEC = 5.0
+GROK_VOTE_TIMEOUT_SEC = 5.0
 
 TP1_CLOSE_FRACTION = 0.22  # ~20–25%
 
