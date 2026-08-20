@@ -1,0 +1,17 @@
+[Unit]
+Description=USPEX PRO DESK V12 BYBIT DEMO (Shadow-capable)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uspex
+WorkingDirectory=/opt/uspex
+EnvironmentFile=/opt/uspex/.env
+ExecStart=/opt/uspex/venv/bin/python /opt/uspex/main.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
