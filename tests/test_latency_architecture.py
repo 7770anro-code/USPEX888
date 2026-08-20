@@ -25,8 +25,9 @@ from uspex_core.journal_codes import JournalCode
 
 
 class TestLatencyArchitecture(unittest.TestCase):
-    def test_council_budget_le_8(self):
-        self.assertLessEqual(COUNCIL_BUDGET_SEC, 8.0)
+    def test_council_budget_le_12(self):
+        self.assertLessEqual(COUNCIL_BUDGET_SEC, 12.0)
+        self.assertGreaterEqual(COUNCIL_BUDGET_SEC, 8.0)
         self.assertLessEqual(CURSOR_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
         self.assertLessEqual(GROK_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
 
@@ -139,10 +140,10 @@ class TestLatencyArchitecture(unittest.TestCase):
                        "evaluate_signal_ttl", "classify_entry_window", "PipelineTrace"):
             self.assertIn(needle, src)
 
-    def test_version_v12_1(self):
+    def test_version_v12_2(self):
         from uspex_core.versioning import BUILD_ID, STRATEGY_VERSION
-        self.assertIn("V12_1", BUILD_ID)
-        self.assertIn("LATENCY", STRATEGY_VERSION)
+        self.assertIn("V12_2", BUILD_ID)
+        self.assertIn("INSTITUTIONAL", STRATEGY_VERSION)
 
 
 if __name__ == "__main__":

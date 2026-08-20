@@ -5,9 +5,10 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-BUILD_ID = "USPEX_PRO_DESK_V12_1_LATENCY_TTL_2026-08-20"
-STRATEGY_VERSION = "V12_1_LATENCY_TTL_LAYERAB"
-PROMPT_VERSION = "P12_1_FAST_CONFIRM_CACHED_CTX"
+BUILD_ID = "USPEX_PRO_DESK_V12_2_INSTITUTIONAL_FAST_AI_2026-08-20"
+STRATEGY_VERSION = "V12_2_INSTITUTIONAL_LAYERAB_FAST_AI"
+PROMPT_VERSION = "P12_2_FAST_CONFIRM_GROK_FAST"
+CONFIG_SCHEMA_VERSION = "C3_INSTITUTIONAL_V1"
 
 
 def config_hash(cfg: Mapping[str, Any] | None = None, **extra: Any) -> str:
@@ -17,5 +18,6 @@ def config_hash(cfg: Mapping[str, Any] | None = None, **extra: Any) -> str:
     payload.setdefault("build_id", BUILD_ID)
     payload.setdefault("strategy_version", STRATEGY_VERSION)
     payload.setdefault("prompt_version", PROMPT_VERSION)
+    payload.setdefault("config_schema_version", CONFIG_SCHEMA_VERSION)
     raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]

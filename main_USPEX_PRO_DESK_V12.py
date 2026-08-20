@@ -45,6 +45,8 @@ from uspex_core.coalesce import CandidateCoalescer
 from uspex_core.ai_context import AiContextCache, AiContext
 from uspex_core.entry_window import classify_entry_window
 from uspex_core.latency_decay import write_latency_decay_report
+from uspex_core.fair_value import VenueQuote, robust_fair_value
+from uspex_core.net_edge import estimate_net_edge, executable_price as exec_px
 
 def _clean_env_secret(name):
     # Windows/Notepad/copy-paste can inject BOM, CR/LF, NBSP, zero-width chars,
@@ -63,6 +65,8 @@ def _clean_team_id(raw):
 TG_TOKEN = _clean_env_secret("TELEGRAM_BOT_TOKEN")
 XAI_API_KEY = _clean_env_secret("XAI_API_KEY") or _clean_env_secret("XAI_INFERENCE_API_KEY")
 XAI_MODEL = (os.getenv("XAI_MODEL","grok-4.5") or "grok-4.5").strip()
+# Chat/diagnostics may keep a richer model; council votes MUST use a fast model (VPS measured ~0.7–1.0s).
+XAI_VOTE_MODEL = (os.getenv("XAI_VOTE_MODEL","grok-4-1-fast-non-reasoning") or "grok-4-1-fast-non-reasoning").strip()
 if XAI_MODEL.lower() in ("grok-4.6","grok-4.6-latest"):
     XAI_MODEL = "grok-4.5"
 XAI_MANAGEMENT_KEY = _clean_env_secret("XAI_MANAGEMENT_KEY")
@@ -81,6 +85,7 @@ BYBIT_DEMO_ENABLED = True  # V12 DEMO-ONLY hard lock
 REAL_TRADING_ENABLED = False  # never enable REAL in this build
 SHADOW_MODE = (os.getenv("USPEX_SHADOW_MODE","0") or "0").strip().lower() in ("1","true","yes","on")
 BUILD_ID = CORE_BUILD_ID
+CURSOR_VOTE_LOCK = asyncio.Lock()
 
 def is_admin(cid):
     # Supports one ID or a comma/space separated list in ADMIN_CHAT_ID.
@@ -2642,18 +2647,48 @@ def candidate(sym,prof,exchange_pref,use_news=True):
     score=cap_uspex_score_by_quality(max(0,min(100,raw_score+learn_adj+intel_adj)), dq)
     if score<p["score"]:return None
 
-    residual=gap
+    # V3: fair value + executable Bybit price + net edge after costs (no mid-as-entry fantasy).
+    by_m=states[sym]["bybit"]
+    bid=float(by_m.bid) if by_m.bid else None
+    ask=float(by_m.ask) if by_m.ask else None
+    by_mid=mid(by_m)
+    if (bid is None or ask is None) and by_mid:
+        sp=max(0.0,_spread_bps(by_m))/10000.0
+        bid=by_mid*(1-sp/2); ask=by_mid*(1+sp/2)
+    px=exec_px(bid, ask, side) or f[3]
+    quotes=[]
+    for ex,_,m,n in vals:
+        quotes.append(VenueQuote(venue=ex, mid=float(n), age_ms=float(ages.get(ex,0))*1000.0,
+                                 spread_bps=_spread_bps(m), liquidity=max(0.1,float(getattr(m,"turnover24h",0) or 0)/1e9),
+                                 book_dirty=False, sequence_ok=True, comparable=True))
+    fv=robust_fair_value(quotes, executable_bybit=px, side=side)
+    gross_bps=float(fv.edge_bps) if fv.edge_bps is not None else float(gap)*100.0
+    net=estimate_net_edge(
+        gross_edge_bps=gross_bps,
+        spread_bps=_spread_bps(by_m),
+        expected_slippage_bps=2.0,
+        taker_fee_bps_roundtrip=2.0*(PAPER_FEE_PCT_PER_SIDE*100.0),
+        uncertainty_bps=2.0,
+        min_net_bps=2.0 if prof=="easy" else (3.0 if prof in ("medium","ai") else 4.0),
+    )
+    if not net.ok and fv.edge_bps is not None:
+        return None
+
+    residual=gap if fv.edge_bps is None else max(gap, float(fv.edge_bps)/100.0)
     return {
         "side":side,
         "score":float(score),
         "data_quality":float(dq.score),
         "dq_reasons":list(dq.reasons),
         "follower":f[0],
-        "entry":f[3],
+        "entry":float(px),
         "lead_ex":lead[0],
         "lead_ret":lead[1],
         "follow_ret":f[1],
         "residual_edge":float(residual),
+        "fair_value":fv.fair,
+        "edge_bps":fv.edge_bps,
+        "net_edge_bps":net.expected_net_edge_bps,
         "flow":fm.display,
         "book":bm.display,
         "flow_status":fm.status,
@@ -2664,6 +2699,7 @@ def candidate(sym,prof,exchange_pref,use_news=True):
         "reason":(
             f"окно {signal_window:.1f}с • {lead[0].upper()} {lead[1]:+.2f}%, {f[0].upper()} {f[1]:+.2f}%, "
             f"отставание {gap:.2f}%. flow={fm.display} book={bm.display} DQ={dq.score:.0f}. "
+            f"net_edge={net.expected_net_edge_bps:.1f}bps. "
             f"🧠 {learn_label} {learn_adj:+d}. 📡 {intel_label} {intel_adj:+d}."
         ),
     }
@@ -3707,35 +3743,38 @@ async def ask_cursor_vote_raw(prompt, timeout_sec=None):
     full = CURSOR_VOTE_SYSTEM + "\n\n" + prompt
     env=os.environ.copy(); env["CURSOR_API_KEY"]=CURSOR_API_KEY
     t0=now()
-    try:
-        args=[agent,"-p","--mode=ask","--output-format","text"]
-        if CURSOR_MODEL and CURSOR_MODEL.lower() not in ("auto","default"):
-            args += ["--model",CURSOR_MODEL]
-        args.append(full)
-        proc=await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
-            cwd="/opt/uspex" if os.path.isdir("/opt/uspex") else None)
-        stdout,stderr=await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-        elapsed=now()-t0; FUNNEL.cursor.record(elapsed, False)
-        raw=stdout.decode("utf-8","replace").strip()
-        if proc.returncode!=0:
-            err=stderr.decode("utf-8","replace").strip()
-            return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
-                    "reason":f"Cursor exit {proc.returncode}: {err[:100]}","timeout":False}
+    # Serialize CLI votes: parallel cold-starts thrash the agent and blow the council budget.
+    async with CURSOR_VOTE_LOCK:
         try:
-            return parse_vote_json(raw, 10.0)
-        except Exception:
+            # --trust required on VPS non-interactive cwd; without it agent exits with workspace prompt.
+            args=[agent,"-p","--trust","--mode=ask","--output-format","text"]
+            if CURSOR_MODEL and CURSOR_MODEL.lower() not in ("auto","default"):
+                args += ["--model",CURSOR_MODEL]
+            args.append(full)
+            proc=await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+                cwd="/opt/uspex" if os.path.isdir("/opt/uspex") else None)
+            stdout,stderr=await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+            elapsed=now()-t0; FUNNEL.cursor.record(elapsed, False)
+            raw=stdout.decode("utf-8","replace").strip()
+            if proc.returncode!=0:
+                err=stderr.decode("utf-8","replace").strip()
+                return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
+                        "reason":f"Cursor exit {proc.returncode}: {err[:100]}","timeout":False}
+            try:
+                return parse_vote_json(raw, 10.0)
+            except Exception:
+                return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
+                        "reason":"Cursor invalid JSON: "+raw.replace("\n"," ")[:120],"timeout":False}
+        except asyncio.TimeoutError:
+            try: proc.kill()
+            except Exception: pass
+            FUNNEL.cursor.record(timeout_sec, True)
+            return timeout_vote("Cursor", 10.0)
+        except Exception as e:
+            FUNNEL.cursor.record(max(0.0,now()-t0), False)
             return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
-                    "reason":"Cursor invalid JSON: "+raw.replace("\n"," ")[:120],"timeout":False}
-    except asyncio.TimeoutError:
-        try: proc.kill()
-        except Exception: pass
-        FUNNEL.cursor.record(timeout_sec, True)
-        return timeout_vote("Cursor", 10.0)
-    except Exception as e:
-        FUNNEL.cursor.record(max(0.0,now()-t0), False)
-        return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
-                "reason":f"Cursor error {type(e).__name__}","timeout":False}
+                    "reason":f"Cursor error {type(e).__name__}","timeout":False}
 
 def ai_council_gate(profile,uspex_score,cursor_vote,grok_vote):
     """Fail-closed Triple AI gate; timeouts are AI_TIMEOUT_* not MARKET_REJECT."""
@@ -3811,12 +3850,12 @@ async def grok_trade_vote(session,cid,sym,sig,execution_mode_name,margin,lev,pos
     snap = build_council_snapshot(facts) + " | LAYER_A: " + layer_a
     prompt = grok_vote_prompt(snap, profile) + "\nUse LAYER_A regime/risk cache as prior; confirm ONLY with live FACTS. Cache is NOT final approval."
     headers={"Authorization":f"Bearer {XAI_API_KEY}","Content-Type":"application/json"}
-    payload={"model":XAI_MODEL,"input":[{"role":"system","content":GROK_VOTE_SYSTEM},{"role":"user","content":prompt}],
-             "max_output_tokens":180}
+    payload={"model":XAI_VOTE_MODEL,"input":[{"role":"system","content":GROK_VOTE_SYSTEM},{"role":"user","content":prompt}],
+             "max_output_tokens":120}
     t0=now()
     try:
         async with session.post("https://api.x.ai/v1/responses",headers=headers,json=payload,
-                                timeout=aiohttp.ClientTimeout(total=GROK_VOTE_TIMEOUT_SEC)) as r:
+                                timeout=aiohttp.ClientTimeout(total=GROK_VOTE_TIMEOUT_SEC, connect=2, sock_connect=2, sock_read=GROK_VOTE_TIMEOUT_SEC)) as r:
             raw=await r.text()
             elapsed=now()-t0; FUNNEL.grok.record(elapsed, False)
             if r.status>=400:

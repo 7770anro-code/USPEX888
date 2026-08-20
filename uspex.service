@@ -8,6 +8,7 @@ Type=simple
 User=uspex
 WorkingDirectory=/opt/uspex
 EnvironmentFile=/opt/uspex/.env
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/uspex/venv/bin/python /opt/uspex/main.py
 Restart=always
 RestartSec=5

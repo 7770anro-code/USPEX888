@@ -49,9 +49,10 @@ PROFILES = {
 AUTO_COUNCIL_PROFILES = {"easy", "medium", "big", "ai"}
 
 # Council wall-clock budget (seconds). Fail-closed on timeout.
-# Hard max 8s; prefer ~5s for micro half-life compatibility with Layer A cache.
-COUNCIL_BUDGET_SEC = 8.0
-CURSOR_VOTE_TIMEOUT_SEC = 5.0
+# Spec allows 8–12s. Cursor CLI cold path is ~9–10s on VPS; Grok fast model ~1s.
+# Layer A cache keeps prompts tiny; residual edge / TTL still gate late fills.
+COUNCIL_BUDGET_SEC = 12.0
+CURSOR_VOTE_TIMEOUT_SEC = 11.0
 GROK_VOTE_TIMEOUT_SEC = 5.0
 
 TP1_CLOSE_FRACTION = 0.22  # ~20–25%
