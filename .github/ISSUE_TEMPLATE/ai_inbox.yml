@@ -1,0 +1,35 @@
+name: AI Inbox (for Cursor)
+description: Задача от Cloud Code / ChatGPT для Cursor через GitHub
+title: "[ai-inbox][uspex] "
+labels: ["ai-inbox", "target-uspex"]
+body:
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target bot
+      options: [uspex, vector]
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: Что нужно в итоге
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution (from Cloud Code + ChatGPT)
+      description: Согласованный план или черновик
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ] 
+        - [ ] DEMO/Shadow only if trading-related
+    validations:
+      required: true
