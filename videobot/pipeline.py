@@ -81,6 +81,9 @@ RUNWAY_SAFETY_MSG = (
     "Runway не пропустил этот запрос по правилам контента. "
     "Измени текст или фото и попробуй ещё раз."
 )
+RUNWAY_CREDITS_MSG = (
+    "На Runway закончились кредиты, пополните баланс и попробуйте снова"
+)
 
 _PERSON_MOD_RE = re.compile(
     r"PUBLIC[_\s-]?FIGURE|LIKENESS|CELEBRITY|REAL PEOPLE|ANOTHER PERSON|"
@@ -111,6 +114,26 @@ def is_runway_person_moderation(failure_code: str = "", detail: str = "") -> boo
     return bool(_PERSON_MOD_RE.search(blob))
 
 
+def is_runway_credits_fail(detail: str = "") -> bool:
+    blob = (detail or "").lower()
+    return (
+        "enough credits" in blob
+        or "insufficient credits" in blob
+        or "out of credits" in blob
+    )
+
+
+def is_runway_user_facing(err: PipelineError) -> bool:
+    code = getattr(err, "code", "") or ""
+    return code.startswith("moderation") or code == "credits" or is_runway_credits_fail(err.detail)
+
+
+def credits_error(detail: str, *, status: int | None = None) -> PipelineError:
+    err = PipelineError(RUNWAY_CREDITS_MSG, detail, code="credits")
+    err.status = status
+    return err
+
+
 def runway_fail_error(
     failure_code: str,
     detail: str,
@@ -123,7 +146,9 @@ def runway_fail_error(
     и на картинке. Если в запрос уходил promptImage — любой SAFETY/moderation
     показываем как отказ по реальным людям (пункт 4 фактчека).
     """
-    if used_image and (
+    if is_runway_credits_fail(failure_code) or is_runway_credits_fail(detail):
+        err = credits_error(detail)
+    elif used_image and (
         is_runway_safety_fail(failure_code, detail) or is_runway_person_moderation(failure_code, detail)
     ):
         err = PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
@@ -666,9 +691,10 @@ async def _runway_poll(
                 if resp.status >= 400:
                     detail = _clip(f"HTTP {resp.status}: {raw}")
                     failure_code = _failure_code_from_http_body(raw)
-                    mod_err = runway_fail_error(failure_code, detail, used_image=used_image)
-                    if getattr(mod_err, "code", "").startswith("moderation"):
-                        raise mod_err
+                    mapped = runway_fail_error(failure_code, detail, used_image=used_image)
+                    mapped.status = resp.status
+                    if is_runway_user_facing(mapped):
+                        raise mapped
                     raise PipelineError("Runway не отдал статус задачи.", detail)
                 data = json.loads(raw)
         except PipelineError:
@@ -798,9 +824,9 @@ async def _runway_submit(
                 if resp.status >= 400:
                     detail = _clip(f"HTTP {resp.status}: {raw}")
                     failure_code = _failure_code_from_http_body(raw)
-                    mod_err = runway_fail_error(failure_code, detail, used_image=used_image)
-                    if getattr(mod_err, "code", "").startswith("moderation"):
-                        err = mod_err
+                    mapped = runway_fail_error(failure_code, detail, used_image=used_image)
+                    if is_runway_user_facing(mapped):
+                        err = mapped
                     else:
                         err = PipelineError("Runway отклонил запрос на видео.", detail)
                     err.status = resp.status
@@ -847,15 +873,24 @@ async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Pat
     return dest
 
 
-async def _text_to_image_url(session: aiohttp.ClientSession, prompt: str, ratio: str) -> str:
-    """Общий still для цепочки I2V, если пользователь не прислал фото."""
-    payload = {
-        "model": "gen4_image_turbo",
+def text_to_image_payload(prompt: str, ratio: str) -> dict[str, Any]:
+    """POST /v1/text_to_image без фото пользователя.
+
+    docs.dev.runwayml.com (2024-11-06): у gen4_image_turbo поле referenceImages
+    обязательно, min 1 / max 3, элемент {uri, tag?}. Пустой массив не принимают.
+    У gen4_image referenceImages необязателен — его не шлём, если референса нет.
+    """
+    return {
+        "model": "gen4_image",
         "promptText": runway_prompt_text(prompt),
         "ratio": {"720:1280": "1080:1920", "960:960": "1080:1080"}.get(ratio, "1920:1080"),
         "contentModeration": runway_content_moderation(),
     }
-    task_id = await _runway_submit(session, "/v1/text_to_image", payload)
+
+
+async def _text_to_image_url(session: aiohttp.ClientSession, prompt: str, ratio: str) -> str:
+    """Общий still для цепочки I2V, если пользователь не прислал фото."""
+    task_id = await _runway_submit(session, "/v1/text_to_image", text_to_image_payload(prompt, ratio))
     return await _runway_poll(session, task_id)
 
 
@@ -914,7 +949,7 @@ async def runway_clip(
                 try:
                     return await _i2v(prompt_image, i2v_model)
                 except PipelineError as exc:
-                    if getattr(exc, "code", "").startswith("moderation"):
+                    if is_runway_user_facing(exc) and getattr(exc, "code", "") != "credits":
                         raise
                     status = getattr(exc, "status", None)
                     if status in (400, 404, 422) and i2v_model != "gen4_turbo":
@@ -931,7 +966,7 @@ async def runway_clip(
                     video_url = await _runway_poll(session, task_id)
                     return await _download(session, video_url, dest)
                 except PipelineError as exc:
-                    if getattr(exc, "code", "").startswith("moderation"):
+                    if is_runway_user_facing(exc) and getattr(exc, "code", "") != "credits":
                         raise
                     status = getattr(exc, "status", None)
                     if status not in (400, 404, 422):
@@ -941,7 +976,9 @@ async def runway_clip(
             return await _i2v(still, "gen4_turbo")
         except PipelineError as exc:
             last_fail = exc
-            if getattr(exc, "code", "").startswith("moderation"):
+            if is_runway_user_facing(exc):
+                if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                    raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
                 raise
             detail = (exc.detail or "").upper()
             retryable = "INTERNAL" in detail or "BAD_OUTPUT" in detail or "THROTTLED" in detail
@@ -1249,7 +1286,9 @@ async def build_video(
                 await _download(session, still_url, still_path)
                 anchor_image = await file_to_data_uri(still_path, work_dir / "bible_ref.jpg")
             except PipelineError as exc:
-                if getattr(exc, "code", "").startswith("moderation"):
+                if is_runway_user_facing(exc):
+                    if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                        raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
                     raise
                 log.warning("shared still failed, T2V with lock: %s", exc.detail)
                 anchor_image = None

@@ -6,6 +6,7 @@ from pipeline import (
     CLIP_SPEECH_BUDGET_SEC,
     MAX_SCENES,
     PipelineError,
+    RUNWAY_CREDITS_MSG,
     RUNWAY_PERSON_MSG,
     RUNWAY_PROMPT_MAX,
     SCRIPT_TOO_LONG_MSG,
@@ -14,8 +15,10 @@ from pipeline import (
     estimate_speech_sec,
     fallback_split_script,
     format_script,
+    is_runway_credits_fail,
     is_runway_person_moderation,
     is_runway_safety_fail,
+    is_runway_user_facing,
     parse_script,
     pick_clip_duration,
     ratio_wh,
@@ -28,6 +31,7 @@ from pipeline import (
     script_too_long_for_custom,
     split_text_to_speech_budget,
     target_scene_count,
+    text_to_image_payload,
     wrap_caption,
 )
 from voices import VOICES, voice_by_index
@@ -194,6 +198,35 @@ def test_runway_moderation_person() -> None:
     assert runway_content_moderation()["publicFigureThreshold"] == "auto"
 
 
+def test_runway_credits_message() -> None:
+    live = '{"error":"You do not have enough credits to run this task.","docUrl":"https://docs.dev.runwayml.com/api"}'
+    detail = f"HTTP 400: {live}"
+    assert is_runway_credits_fail(detail)
+    err = runway_fail_error("", detail)
+    assert err.code == "credits"
+    assert err.user_message == RUNWAY_CREDITS_MSG
+    assert "закончились кредиты" in err.user_message
+    assert is_runway_user_facing(err)
+    generic = PipelineError(
+        "🎥 Не получился клип 1 из 6. Я остановился, чтобы не склеить кривой ролик. "
+        "Попробуй ещё раз или другое фото.",
+        detail,
+    )
+    assert is_runway_credits_fail(generic.detail)
+    assert is_runway_user_facing(generic)
+    assert not is_runway_credits_fail("HTTP 400: Validation of body failed")
+
+
+def test_text_to_image_payload_no_refs() -> None:
+    payload = text_to_image_payload("woman in red coat, still", "720:1280")
+    assert payload["model"] == "gen4_image"
+    assert "referenceImages" not in payload
+    assert payload["promptText"]
+    assert payload["ratio"] == "1080:1920"
+    assert payload["contentModeration"]["publicFigureThreshold"] == "auto"
+    assert payload["model"] != "gen4_image_turbo"
+
+
 def test_consent_gate() -> None:
     assert photo_start_blocked("file-1", False) == CONSENT_REQUIRED_MSG
     assert photo_start_blocked("file-1", True) == ""
@@ -295,6 +328,8 @@ if __name__ == "__main__":
     test_fallback_and_scene_count()
     test_voices_catalog()
     test_runway_moderation_person()
+    test_runway_credits_message()
+    test_text_to_image_payload_no_refs()
     test_consent_gate()
     test_speech_budget_custom()
     test_presets_and_cost()
