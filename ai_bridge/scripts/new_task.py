@@ -18,14 +18,17 @@ def slugify(text: str) -> str:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Create ai_bridge inbox task")
-    p.add_argument("--title", required=True)
-    p.add_argument("--goal", required=True)
-    p.add_argument("--target", choices=("uspex", "vector"), default="uspex")
-    p.add_argument("--from", dest="from_agent", default="human")
-    p.add_argument("--priority", choices=("normal", "high"), default="normal")
-    p.add_argument("--proposal", default="(to be filled by Cloud/GPT)")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser(description="Create ai_bridge inbox task")
+    ap.add_argument("--title", required=True)
+    ap.add_argument("--goal", required=True)
+    ap.add_argument("--target", choices=("uspex", "vector"), default="uspex")
+    ap.add_argument("--from", dest="from_agent", default="human")
+    ap.add_argument("--priority", choices=("normal", "high"), default="normal")
+    ap.add_argument("--proposal", default="(to be filled by Cloud/GPT)")
+    ap.add_argument("--needs-browser", action="store_true")
+    ap.add_argument("--browser-goal", default="")
+    ap.add_argument("--browser-steps-json", default="[]")
+    args = ap.parse_args()
 
     INBOX.mkdir(parents=True, exist_ok=True)
     now = datetime.now(timezone.utc)
@@ -34,6 +37,7 @@ def main() -> int:
     if path.exists():
         raise SystemExit(f"already exists: {path}")
 
+    needs = "true" if args.needs_browser else "false"
     body = f"""---
 id: {tid}
 from: {args.from_agent}
@@ -42,6 +46,9 @@ target: {args.target}
 status: inbox
 priority: {args.priority}
 created_utc: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}
+needs_browser: {needs}
+browser_goal: {args.browser_goal!r}
+browser_steps_json: {args.browser_steps_json}
 ---
 
 # {args.title}
@@ -65,7 +72,10 @@ REAL trading, `/opt/uspex` changes without explicit deploy OK.
 
 ## Notes for Cursor
 API keys only via env. Prefer branch `cursor/<slug>-bf57`. Do not push main/deploy unless asked.
+If needs_browser: run `python3 ai_bridge/scripts/run_browser_task.py` with KERNEL_API_KEY from secrets.
 """
+    # Fix browser_goal quoting in frontmatter — use plain string without repr quotes issues
+    body = body.replace(f"browser_goal: {args.browser_goal!r}", f'browser_goal: "{args.browser_goal}"')
     path.write_text(body, encoding="utf-8")
     print(path.relative_to(ROOT))
     return 0
