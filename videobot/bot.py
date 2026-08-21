@@ -20,7 +20,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    PhotoSize,
 )
 
 import config
@@ -172,6 +171,7 @@ async def on_quick_idea(message: Message, state: FSMContext) -> None:
         user_script=False,
         voice_id=config.ELEVENLABS_VOICE_ID,
         photo_file_id=None,
+        photo_consent=False,
         bot=message.bot,
     )
 
@@ -191,13 +191,8 @@ async def on_custom_script(message: Message, state: FSMContext) -> None:
     )
 
 
-async def on_custom_photo(message: Message, state: FSMContext) -> None:
-    photos = message.photo or []
-    if not photos:
-        await message.answer("Пришли именно фото (картинкой), или нажми «Пропустить».", reply_markup=photo_skip_kb())
-        return
-    best: PhotoSize = photos[-1]
-    await state.update_data(photo_file_id=best.file_id)
+async def _maybe_start_consent(message: Message, state: FSMContext, file_id: str) -> None:
+    await state.update_data(photo_file_id=file_id, photo_consent=False)
     await state.set_state(Flow.custom_consent)
     await message.answer(
         "Если на фото живой узнаваемый человек, мне нужно твоё явное согласие.\n\n"
@@ -207,12 +202,33 @@ async def on_custom_photo(message: Message, state: FSMContext) -> None:
     )
 
 
+async def on_custom_photo(message: Message, state: FSMContext) -> None:
+    photos = message.photo or []
+    if photos:
+        await _maybe_start_consent(message, state, photos[-1].file_id)
+        return
+    doc = message.document
+    mime = (doc.mime_type or "") if doc else ""
+    if doc and mime.startswith("image/"):
+        await _maybe_start_consent(message, state, doc.file_id)
+        return
+    await message.answer(
+        "Пришли именно фото (картинкой или файлом-изображением), или нажми «Пропустить».",
+        reply_markup=photo_skip_kb(),
+    )
+
+
 async def on_photo_skip(query: CallbackQuery, state: FSMContext) -> None:
     try:
         await query.answer()
     except Exception:
         pass
-    await state.update_data(photo_file_id=None)
+    current = await state.get_state()
+    if current != Flow.custom_photo.state:
+        if query.message:
+            await query.message.answer("Эта кнопка уже не действует. Нажми /start.", reply_markup=main_menu())
+        return
+    await state.update_data(photo_file_id=None, photo_consent=False)
     await state.set_state(Flow.custom_voice)
     if query.message:
         await query.message.answer("Выбери голос:", reply_markup=voice_kb(0))
@@ -223,11 +239,23 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer()
     except Exception:
         pass
+    current = await state.get_state()
+    if current != Flow.custom_consent.state:
+        if query.message:
+            await query.message.answer("Сначала пришли фото и нажми согласие заново. /start", reply_markup=main_menu())
+        return
     if (query.data or "") == "consent:no":
         await state.clear()
         if query.message:
             await query.message.answer("Ок, без фото не продолжаю. Можно начать заново.", reply_markup=main_menu())
         return
+    data = await state.get_data()
+    if not data.get("photo_file_id"):
+        await state.clear()
+        if query.message:
+            await query.message.answer("Фото не нашёл. Нажми /start и пришли его снова.", reply_markup=main_menu())
+        return
+    await state.update_data(photo_consent=True)
     await state.set_state(Flow.custom_voice)
     if query.message:
         await query.message.answer(
@@ -236,12 +264,17 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
         )
 
 
-async def on_voice_page(query: CallbackQuery) -> None:
+async def on_voice_page(query: CallbackQuery, state: FSMContext) -> None:
     try:
         await query.answer()
     except Exception:
         pass
-    page = int((query.data or "vpage:0").split(":")[1])
+    if await state.get_state() != Flow.custom_voice.state:
+        return
+    try:
+        page = int((query.data or "vpage:0").split(":")[1])
+    except (IndexError, ValueError):
+        page = 0
     if query.message:
         try:
             await query.message.edit_reply_markup(reply_markup=voice_kb(page))
@@ -250,27 +283,44 @@ async def on_voice_page(query: CallbackQuery) -> None:
 
 
 async def on_voice_pick(query: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != Flow.custom_voice.state:
+        try:
+            await query.answer("Сначала пройди шаги с /start — иначе согласие на фото не считается.")
+        except Exception:
+            pass
+        return
     try:
         await query.answer("Голос выбран")
     except Exception:
         pass
-    idx = int((query.data or "voice:1").split(":")[1])
+    try:
+        idx = int((query.data or "voice:1").split(":")[1])
+    except (IndexError, ValueError):
+        idx = 1
     voice = voice_by_index(idx)
     data = await state.get_data()
     script = (data.get("script") or "").strip()
     photo_file_id = data.get("photo_file_id")
+    photo_consent = bool(data.get("photo_consent"))
     await state.clear()
     msg = query.message
     if not isinstance(msg, Message) or not script:
         if msg:
             await msg.answer("Что-то потерялось. Нажми /start и начнём сначала.", reply_markup=main_menu())
         return
+    if photo_file_id and not photo_consent:
+        await msg.answer(
+            "Без кнопки согласия я это фото не использую. Нажми /start и подтверди согласие.",
+            reply_markup=main_menu(),
+        )
+        return
     await _run_job(
         msg,
         idea=script,
         user_script=True,
         voice_id=voice["id"],
-        photo_file_id=photo_file_id,
+        photo_file_id=photo_file_id if photo_consent else None,
+        photo_consent=photo_consent,
         bot=msg.bot,
         voice_name=voice["name"],
     )
@@ -310,31 +360,41 @@ async def _run_job(
     photo_file_id: str | None,
     bot: Bot,
     voice_name: str = "Сара",
+    photo_consent: bool = False,
 ) -> None:
+    if photo_file_id and not photo_consent:
+        await message.answer(
+            "Без кнопки согласия я это фото не использую. Нажми /start.",
+            reply_markup=main_menu(),
+        )
+        return
     if BUSY.locked():
         await message.answer(
             "⏳ Я уже снимаю другой ролик. Напиши ещё раз, когда пришлю готовое видео.",
             reply_markup=main_menu(),
         )
         return
-
-    status = await message.answer("🚀 Поехали. Это займёт несколько минут — я буду писать, что сейчас делаю.")
-
-    async def progress(text: str) -> None:
-        try:
-            await status.edit_text(text)
-        except Exception:
-            try:
-                await message.answer(text)
-            except Exception:
-                log.warning("status: %s", text)
-
-    work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
+    # Acquire before any await-send, иначе два апдейта оба пройдут locked()==False.
+    await BUSY.acquire()
     ok = False
-    async with BUSY:
+    work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
+    try:
+        status = await message.answer(
+            "🚀 Поехали. Это займёт несколько минут — я буду писать, что сейчас делаю."
+        )
+
+        async def progress(text: str) -> None:
+            try:
+                await status.edit_text(text)
+            except Exception:
+                try:
+                    await message.answer(text)
+                except Exception:
+                    log.warning("status: %s", text)
+
         try:
             photo_path = None
-            if photo_file_id:
+            if photo_file_id and photo_consent:
                 photo_path = work / "user_photo.jpg"
                 work.mkdir(parents=True, exist_ok=True)
                 await _download_photo(bot, photo_file_id, photo_path)
@@ -374,6 +434,15 @@ async def _run_job(
                 shutil.rmtree(work, ignore_errors=True)
             else:
                 log.warning("оставил рабочие файлы: %s", work)
+    finally:
+        BUSY.release()
+
+
+async def on_stale_callback(query: CallbackQuery) -> None:
+    try:
+        await query.answer("Эта кнопка уже не действует. Нажми /start.")
+    except Exception:
+        pass
 
 
 async def on_plain_text(message: Message, state: FSMContext) -> None:
@@ -413,15 +482,17 @@ async def main() -> None:
     dp.message.register(cmd_help, Command("help"))
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
-    dp.callback_query.register(on_photo_skip, F.data == "photo:skip")
-    dp.callback_query.register(on_consent, F.data.startswith("consent:"))
-    dp.callback_query.register(on_voice_page, F.data.startswith("vpage:"))
-    dp.callback_query.register(on_voice_pick, F.data.startswith("voice:"))
+    dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")
+    dp.callback_query.register(on_consent, Flow.custom_consent, F.data.startswith("consent:"))
+    dp.callback_query.register(on_voice_page, Flow.custom_voice, F.data.startswith("vpage:"))
+    dp.callback_query.register(on_voice_pick, Flow.custom_voice, F.data.startswith("voice:"))
     dp.message.register(on_quick_idea, Flow.quick_idea, F.text)
     dp.message.register(on_custom_script, Flow.custom_script, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
+    dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
+    dp.callback_query.register(on_stale_callback)
     log.info("VideoBot polling start")
     await dp.start_polling(bot)
 

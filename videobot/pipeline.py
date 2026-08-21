@@ -111,9 +111,23 @@ def is_runway_person_moderation(failure_code: str = "", detail: str = "") -> boo
     return bool(_PERSON_MOD_RE.search(blob))
 
 
-def runway_fail_error(failure_code: str, detail: str) -> PipelineError:
-    """Понятный текст в чат вместо generic «ошибка» при FAILED модерации."""
-    if is_runway_person_moderation(failure_code, detail):
+def runway_fail_error(
+    failure_code: str,
+    detail: str,
+    *,
+    used_image: bool = False,
+) -> PipelineError:
+    """Понятный текст в чат вместо generic «ошибка» при FAILED модерации.
+
+    У Runway третий сегмент failureCode часто врёт: SAFETY.INPUT.TEXT бывает
+    и на картинке. Если в запрос уходил promptImage — любой SAFETY/moderation
+    показываем как отказ по реальным людям (пункт 4 фактчека).
+    """
+    if used_image and (
+        is_runway_safety_fail(failure_code, detail) or is_runway_person_moderation(failure_code, detail)
+    ):
+        err = PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
+    elif is_runway_person_moderation(failure_code, detail):
         err = PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
     elif is_runway_safety_fail(failure_code, detail):
         err = PipelineError(RUNWAY_SAFETY_MSG, detail, code="moderation")
@@ -535,7 +549,12 @@ def _runway_headers() -> dict[str, str]:
     }
 
 
-async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
+async def _runway_poll(
+    session: aiohttp.ClientSession,
+    task_id: str,
+    *,
+    used_image: bool = False,
+) -> str:
     url = f"{RUNWAY_HOST}/v1/tasks/{task_id}"
     deadline = time.monotonic() + config.RUNWAY_TIMEOUT_SEC
     last_status = ""
@@ -549,7 +568,12 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
             ) as resp:
                 raw = await resp.text()
                 if resp.status >= 400:
-                    raise PipelineError("Runway не отдал статус задачи.", _clip(f"HTTP {resp.status}: {raw}"))
+                    detail = _clip(f"HTTP {resp.status}: {raw}")
+                    failure_code = _failure_code_from_http_body(raw)
+                    mod_err = runway_fail_error(failure_code, detail, used_image=used_image)
+                    if getattr(mod_err, "code", "").startswith("moderation"):
+                        raise mod_err
+                    raise PipelineError("Runway не отдал статус задачи.", detail)
                 data = json.loads(raw)
         except PipelineError:
             raise
@@ -574,8 +598,15 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
             raise PipelineError("Runway SUCCEEDED без URL в output[0].", _clip(raw, 240))
         if status_u in RUNWAY_DONE_FAIL:
             failure_code = str(data.get("failureCode") or "")
-            reason = data.get("failure") or failure_code or data.get("error") or raw
-            raise runway_fail_error(failure_code, _clip(f"{status_u}: {failure_code} {reason}", 300))
+            nested = data.get("error")
+            if not failure_code and isinstance(nested, dict):
+                failure_code = str(nested.get("code") or nested.get("failureCode") or "")
+            reason = data.get("failure") or failure_code or nested or raw
+            raise runway_fail_error(
+                failure_code,
+                _clip(f"{status_u}: {failure_code} {reason}", 300),
+                used_image=used_image,
+            )
         await asyncio.sleep(runway_poll_delay())
     raise PipelineError(
         "Runway слишком долго генерирует клип, остановил ожидание.",
@@ -583,10 +614,26 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
     )
 
 
+def _failure_code_from_http_body(raw: str) -> str:
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    code = body.get("failureCode") or body.get("errorCode") or ""
+    nested = body.get("error")
+    if not code and isinstance(nested, dict):
+        code = nested.get("code") or nested.get("failureCode") or ""
+    return str(code or "")
+
+
 async def _runway_submit(
     session: aiohttp.ClientSession,
     path: str,
     payload: dict[str, Any],
+    *,
+    used_image: bool = False,
 ) -> str:
     tries = max(1, int(config.HTTP_RETRIES))
     last_err = ""
@@ -606,8 +653,10 @@ async def _runway_submit(
                     continue
                 if resp.status >= 400:
                     detail = _clip(f"HTTP {resp.status}: {raw}")
-                    if is_runway_safety_fail("", detail) or is_runway_person_moderation("", detail):
-                        err = runway_fail_error("", detail)
+                    failure_code = _failure_code_from_http_body(raw)
+                    mod_err = runway_fail_error(failure_code, detail, used_image=used_image)
+                    if getattr(mod_err, "code", "").startswith("moderation"):
+                        err = mod_err
                     else:
                         err = PipelineError("Runway отклонил запрос на видео.", detail)
                     err.status = resp.status
@@ -706,8 +755,8 @@ async def runway_clip(
     async def _i2v(image: str, mdl: str) -> Path:
         payload = _clip_payload_base(mdl, visual, ratio, seconds, seed)
         payload["promptImage"] = image
-        task_id = await _runway_submit(session, "/v1/image_to_video", payload)
-        video_url = await _runway_poll(session, task_id)
+        task_id = await _runway_submit(session, "/v1/image_to_video", payload, used_image=True)
+        video_url = await _runway_poll(session, task_id, used_image=True)
         return await _download(session, video_url, dest)
 
     for round_i in range(2):
@@ -998,10 +1047,14 @@ async def build_video(
         script["style"] = style
         total = len(scenes)
 
-        # Штатного character-consistency в API нет: якорь — одно исходное фото
-        # на клип 1; дальше last-frame chaining (кадр N → promptImage N+1).
-        # Если кадр не снялся — снова якорь (то же исходное фото).
+        # Якорь — одно исходное фото на КАЖДЫЙ клип (штатного character-consistency нет).
+        # Last-frame chaining только если фото пользователя нет: иначе клипы 2+ теряют лицо
+        # и лишний раз бьются о модерацию чужого кадра.
         job_seed = random.randint(0, 2_147_483_647)
+        user_supplied_photo = bool(
+            (isinstance(reference_image, Path) and reference_image.exists())
+            or (isinstance(reference_image, str) and reference_image.startswith(("data:", "http")))
+        )
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
             await _notify(progress, "🖼️ Готовлю твоё фото как первый кадр для всех клипов…")
@@ -1054,7 +1107,7 @@ async def build_video(
                 )
             except PipelineError:
                 raise
-            if prompt_image and n < total:
+            if prompt_image and n < total and not user_supplied_photo:
                 try:
                     prompt_image = await last_frame_data_uri(clip, work_dir / f"tail{i}.jpg")
                 except PipelineError as exc:

@@ -169,6 +169,19 @@ def test_runway_moderation_person() -> None:
     assert policy.code == "moderation_person"
     text_err = runway_fail_error("SAFETY.INPUT.TEXT", "prompt blocked")
     assert text_err.code == "moderation"
+    # Реальный I2V: Runway часто ставит TEXT даже на фото. С картинкой — текст про людей.
+    photo_text = runway_fail_error(
+        "SAFETY.INPUT.TEXT",
+        "The input was flagged by our content moderation system.",
+        used_image=True,
+    )
+    assert photo_text.user_message == RUNWAY_PERSON_MSG
+    vague = runway_fail_error(
+        "",
+        "FAILED: the input image was flagged by our content moderation system.",
+        used_image=True,
+    )
+    assert vague.user_message == RUNWAY_PERSON_MSG
     assert runway_content_moderation()["publicFigureThreshold"] == "auto"
 
 
