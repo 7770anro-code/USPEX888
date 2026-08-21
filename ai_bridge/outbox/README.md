@@ -1,5 +1,7 @@
 # Outbox
 
-Cursor кладёт сюда `TASK-*-DONE.md` после внедрения.
+Сюда Cursor пишет:
+- `TASK-…-CLAIM.md` — задача взята
+- `TASK-…-DONE.md` — результат
 
-Cloud Code / ChatGPT читают ответы отсюда или из PR.
+Не класть секреты и логи с ключами.

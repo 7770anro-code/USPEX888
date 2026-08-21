@@ -1,0 +1,53 @@
+name: AI Bridge inbox validate
+on:
+  push:
+    paths:
+      - "ai_bridge/inbox/TASK-*.md"
+  pull_request:
+    paths:
+      - "ai_bridge/inbox/TASK-*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate TASK frontmatter
+        id: val
+        run: |
+          set -euo pipefail
+          python3 ai_bridge/scripts/validate_task.py
+          echo "ok=1" >> "$GITHUB_OUTPUT"
+      - name: Open/refresh tracking issue for new inbox tasks
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh label create ai-inbox -c "0E8A16" -d "AI Bridge inbox task" 2>/dev/null || true
+          gh label create target-uspex -c "1D76DB" -d "USPEX target" 2>/dev/null || true
+          gh label create target-vector -c "5319E7" -d "Vector target" 2>/dev/null || true
+          for f in ai_bridge/inbox/TASK-*.md; do
+            [ -f "$f" ] || continue
+            id=$(basename "$f" .md)
+            if ls ai_bridge/outbox/${id}-DONE.md >/dev/null 2>&1; then
+              continue
+            fi
+            title="[ai-inbox] $id"
+            existing=$(gh issue list --state open --search "$id in:title" --json number,title -q '.[] | select(.title|contains("'"$id"'")) | .number' | head -1 || true)
+            if [ -z "$existing" ]; then
+              gh issue create --title "$title" --label "ai-inbox" --body "New task file: \`$f\`
+
+Posted via AI Bridge Action. Cursor/Cloud Agent: run \`python3 ai_bridge/scripts/claim_task.py $id\` then implement.
+
+Do not deploy \`/opt/uspex\` without explicit OK. Mac offline is fine — this Issue is the wake signal." || true
+            fi
+          done
