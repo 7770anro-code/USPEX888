@@ -348,16 +348,12 @@ def test_last_frame_chains_with_user_photo() -> None:
 
 
 def test_wave2_thin_api() -> None:
-    from bot import main_menu
+    from bot import clone_consent_kb, consent_kb, main_menu, result_kb
     from wave2 import (
-        ACT_CONSENT_MSG,
         CLONE_CONSENT_MSG,
         act_two_payload,
-        clear_user_voices,
         extend_video_payload,
         image_upscale_payload,
-        load_user_voices,
-        save_user_voice,
         video_upscale_payload,
         voice_design_payload,
     )
@@ -365,13 +361,17 @@ def test_wave2_thin_api() -> None:
     labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
     assert labels[0] == "⚡️ Видео за 1 клик"
     assert labels[1] == "🎬 Своё фото + текст + голос"
-    assert "🧰 Ещё возможности" in labels
+    assert "🧟 Оживить фото" in labels
+    assert "🎙 Клонировать мой голос" in labels
+    assert "🗑 Удалить мой голос" in labels
+    assert "🎯 Пресеты" in labels
     payload = voice_design_payload("спокойный низкий мужской голос, тёплый, спокойный темп")
     assert payload["auto_generate_text"] is True
     assert payload["model_id"] == "eleven_ttv_v3"
     img = image_upscale_payload("data:image/jpeg;base64,xx")
     assert img["model"] == "magnific_precision_upscaler_v2"
     vid = video_upscale_payload("runway://clip")
+    assert vid["model"] == "magnific_video_upscaler_creative"
     assert vid["resolution"] == "2k"
     act = act_two_payload("data:image/jpeg;base64,a", "runway://perf")
     assert act["model"] == "act_two"
@@ -379,12 +379,140 @@ def test_wave2_thin_api() -> None:
     ext = extend_video_payload("runway://v", "")
     assert ext["mode"] == "extend"
     assert ext["promptText"]
-    assert "согласи" in CLONE_CONSENT_MSG.lower()
-    assert "согласи" in ACT_CONSENT_MSG.lower()
-    save_user_voice(0, {"id": "abc", "name": "t", "tag": "клон", "kind": "clone"})
-    assert load_user_voices(0)[0]["id"] == "abc"
-    clear_user_voices(0)
-    assert load_user_voices(0) == []
+    clone_btns = [b.callback_data for row in clone_consent_kb().inline_keyboard for b in row]
+    photo_btns = [b.callback_data for row in consent_kb().inline_keyboard for b in row]
+    assert "w2c:yes" in clone_btns
+    assert "consent:yes" in photo_btns
+    assert "consent:yes" not in clone_btns
+    assert "Разрешаю клонировать голос" in clone_consent_kb().inline_keyboard[0][0].text
+    assert "моё фото" in consent_kb().inline_keyboard[0][0].text.lower()
+    assert "отдельно от согласия на фото" in CLONE_CONSENT_MSG.lower()
+    result_btns = [b.callback_data for row in result_kb().inline_keyboard for b in row]
+    assert "upscale:last" in result_btns
+
+
+def test_store_sqlite_voices_and_prefs() -> None:
+    import json
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    import config
+    import store
+
+    tmp = tempfile.mkdtemp()
+    old = config.DATA_DIR
+    config.DATA_DIR = tmp
+    store.reset_for_tests()
+    try:
+        legacy = Path(tmp) / "user_42.json"
+        legacy.write_text(
+            json.dumps({"voices": [{"id": "old-id", "name": "Старый", "tag": "клон", "kind": "clone"}]}),
+            encoding="utf-8",
+        )
+        migrated = store.load_user_voices(42)
+        assert migrated[0]["id"] == "old-id"
+        store.set_cloned_voice(7, "abc123", "Мой голос")
+        cloned = store.get_cloned_voice(7)
+        assert cloned is not None
+        assert cloned["id"] == "abc123"
+        store.set_cloned_voice(7, "new-id", "Мой голос")
+        assert store.get_cloned_voice(7)["id"] == "new-id"
+        assert len([v for v in store.load_user_voices(7) if v["kind"] == "clone"]) == 1
+        deleted = store.delete_cloned_voice(7)
+        assert deleted == "new-id"
+        assert store.get_cloned_voice(7) is None
+        store.set_watermark(7, True)
+        assert store.get_watermark(7) is True
+        store.set_watermark(7, False)
+        assert store.get_watermark(7) is False
+        src = Path(tmp) / "clip.mp4"
+        src.write_bytes(b"mp4-bytes")
+        keep = store.save_last_video(7, src, "Ролик")
+        assert keep.is_file()
+        assert store.get_last_video(7) == keep
+        assert store.get_last_title(7) == "Ролик"
+        store.save_user_voice(7, {"id": "design-1", "name": "Дизайн", "tag": "по описанию", "kind": "design"})
+        ids = store.clear_user_voices(7)
+        assert "design-1" in ids
+        assert store.load_user_voices(7) == []
+    finally:
+        config.DATA_DIR = old
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_act_two_uses_photo_consent() -> None:
+    import inspect
+
+    from bot import PHOTO_CONSENT_PROMPT, on_act_photo, on_consent, on_w2_act_video
+
+    assert PHOTO_CONSENT_PROMPT
+    assert "consent_kb" in inspect.getsource(on_act_photo)
+    assert "PHOTO_CONSENT_PROMPT" in inspect.getsource(on_act_photo)
+    consent_src = inspect.getsource(on_consent)
+    assert 'job.get("mode") == "act_two"' in consent_src
+    video_src = inspect.getsource(on_w2_act_video)
+    assert "photo_start_blocked" in video_src
+    assert "CONSENT_REQUIRED_MSG" in video_src or "blocked" in video_src
+
+
+def test_preset_topic_goes_to_cost() -> None:
+    import inspect
+
+    from bot import confirm_kb, cost_text, on_preset_topic
+    from presets import PRESETS
+
+    src = inspect.getsource(on_preset_topic)
+    assert "Flow.confirm" in src
+    assert "cost_text" in src
+    assert "Flow.tune" not in src
+    labels = {p["label"] for p in PRESETS.values()}
+    assert {"Вирусный TikTok", "Реклама товара", "Мем", "Личный бренд"} <= labels
+    kb = [b.text for row in confirm_kb().inline_keyboard for b in row]
+    assert "✅ Создать" in kb
+    assert "❌ Отмена" in kb
+    text = cost_text({"n_scenes": 5, "quality": "optimal", "idea": "тема ролика про кофе"})
+    assert "кредит" in text.lower()
+    assert "Создать" in text or "кредит" in text.lower()
+
+
+def test_watermark_ffmpeg_overlay() -> None:
+    from pipeline import watermark_drawtext
+
+    vf = watermark_drawtext("VideoBot", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    assert "drawtext" in vf
+    assert "VideoBot" in vf
+    import inspect
+
+    from pipeline import apply_watermark, build_video
+
+    assert "watermark_drawtext" in inspect.getsource(apply_watermark)
+    assert "if watermark:" in inspect.getsource(build_video)
+
+
+def test_clone_posts_voices_add() -> None:
+    import inspect
+
+    from wave2 import ELEVEN_IVC_URL, clone_voice
+
+    assert ELEVEN_IVC_URL.endswith("/v1/voices/add")
+    src = inspect.getsource(clone_voice)
+    assert "ELEVEN_IVC_URL" in src
+
+
+def test_upscale_result_uses_video_upscale() -> None:
+    import inspect
+
+    from bot import on_upscale_last
+    from wave2 import video_upscale_payload
+
+    src = inspect.getsource(on_upscale_last)
+    assert "/v1/video_upscale" in src
+    assert "video_upscale_payload" in src
+    assert "_send_video" in src
+    payload = video_upscale_payload("runway://final")
+    assert payload["model"] == "magnific_video_upscaler_creative"
 
 
 if __name__ == "__main__":
@@ -415,4 +543,10 @@ if __name__ == "__main__":
     test_tiktok_upload_filename()
     test_last_frame_chains_with_user_photo()
     test_wave2_thin_api()
+    test_store_sqlite_voices_and_prefs()
+    test_act_two_uses_photo_consent()
+    test_preset_topic_goes_to_cost()
+    test_watermark_ffmpeg_overlay()
+    test_clone_posts_voices_add()
+    test_upscale_result_uses_video_upscale()
     print("ok")

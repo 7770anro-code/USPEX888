@@ -1202,6 +1202,62 @@ async def concat_mp4(clips: list[Path], dest: Path, width: int = 720, height: in
     return dest
 
 
+def watermark_drawtext(text: str, font: str) -> str:
+    escaped = _drawtext_escape((text or "VideoBot").strip() or "VideoBot")
+    return (
+        f"drawtext=fontfile={font}:text='{escaped}':fontsize=28:"
+        "fontcolor=white@0.6:borderw=2:bordercolor=black@0.45:"
+        "x=w-tw-24:y=h-th-24"
+    )
+
+
+async def apply_watermark(
+    src: Path,
+    dest: Path,
+    *,
+    text: str = "",
+    logo_path: str = "",
+) -> Path:
+    """Простой оверлей лого/текста. Без Brand Kit — только вкл/выкл."""
+    text = (text or config.WATERMARK_TEXT or "VideoBot").strip() or "VideoBot"
+    logo = Path(logo_path or config.WATERMARK_LOGO or "")
+    font = find_font()
+    has_logo = bool(str(logo) and logo.is_file())
+    if not has_logo and not font:
+        log.warning("нет шрифта и лого для водяного знака, оставляю ролик как есть")
+        if src.resolve() != dest.resolve():
+            shutil.copyfile(src, dest)
+        return dest
+    args = ["ffmpeg", "-y", "-i", str(src)]
+    if has_logo:
+        args += ["-i", str(logo)]
+        fc = "[1:v]format=rgba,scale=120:-1[wm];[0:v][wm]overlay=W-w-24:H-h-48[base]"
+        if font:
+            fc += f";[base]{watermark_drawtext(text, font)}[v]"
+            args += ["-filter_complex", fc, "-map", "[v]", "-map", "0:a"]
+        else:
+            args += ["-filter_complex", fc, "-map", "[base]", "-map", "0:a"]
+    else:
+        args += ["-vf", watermark_drawtext(text, font), "-map", "0:v", "-map", "0:a"]
+    args += [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    await _run_ffmpeg(args)
+    return dest
+
+
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
         raise PipelineError("На сервере нет программы склейки видео (ffmpeg).")
@@ -1223,6 +1279,7 @@ async def build_video(
     camera: str = "",
     motion: str = "",
     quality: str = "optimal",
+    watermark: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
 
@@ -1346,6 +1403,9 @@ async def build_video(
             await report(f"Видео {n} из {total}")
         await report("Монтаж")
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)
+        if watermark:
+            await report("Водяной знак")
+            out = await apply_watermark(out, work_dir / "final_wm.mp4")
         tracker.mux_done = True
         await report("✅ Готово")
         return out, script

@@ -86,6 +86,8 @@ HTTP_RETRIES = int(_clean("HTTP_RETRIES") or "4")
 KEEP_FAILED_DIR = (_clean("KEEP_FAILED_DIR") or "1").lower() in ("1", "true", "yes", "on")
 BURN_SUBTITLES = (_clean("BURN_SUBTITLES") or "1").lower() in ("1", "true", "yes", "on")
 DEFAULT_STYLE = _clean("DEFAULT_STYLE") or "cinematic"
+WATERMARK_TEXT = _clean("WATERMARK_TEXT") or "VideoBot"
+WATERMARK_LOGO = _clean("WATERMARK_LOGO")
 
 WORK_DIR = _clean("WORK_DIR") or "/tmp/videobot"
 DATA_DIR = _clean("VIDEOBOT_DATA_DIR") or str(Path(__file__).resolve().parent / "data")

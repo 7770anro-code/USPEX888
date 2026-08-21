@@ -1,4 +1,4 @@
-"""Волна 2: тонкие API-фичи без БД. Согласие на голос/лицо — как для фото."""
+"""Волна 2: ElevenLabs IVC/STS/Design и Runway Act Two / Magnific / extend."""
 
 from __future__ import annotations
 
@@ -20,16 +20,22 @@ from pipeline import (
     _runway_submit,
     runway_content_moderation,
 )
+from store import (  # noqa: F401 — реэкспорт для старых импортов
+    clear_user_voices,
+    load_user_voices,
+    save_user_voice,
+)
 
 log = logging.getLogger("videobot")
 
 CLONE_CONSENT_MSG = (
-    "Без кнопки согласия я этот голос не клонирую. "
-    "Подтверди, что это твой голос или есть согласие человека."
-)
-ACT_CONSENT_MSG = (
-    "Оживление фото — только своё лицо / своё видео-перформанс или с согласия. "
-    "Без кнопки подтверждения не начинаю."
+    "🎙 Клонирование голоса\n\n"
+    "Я запишу образец и создам голосовой профиль через ElevenLabs Instant Voice Clone. "
+    "Профиль привязан только к вашему Telegram-аккаунту. "
+    "Удалить его можно кнопкой «Удалить мой голос».\n\n"
+    "Нажимая «Разрешаю клонировать голос», вы подтверждаете, что это ваш голос "
+    "(или есть согласие человека) и даёте разрешение на обработку голосовых данных.\n\n"
+    "Это согласие отдельно от согласия на фото."
 )
 
 ELEVEN_DESIGN_URL = "https://api.elevenlabs.io/v1/text-to-voice/design"
@@ -37,64 +43,6 @@ ELEVEN_CREATE_VOICE_URL = "https://api.elevenlabs.io/v1/text-to-voice"
 ELEVEN_IVC_URL = "https://api.elevenlabs.io/v1/voices/add"
 ELEVEN_STS_URL = "https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}"
 ELEVEN_DELETE_VOICE_URL = "https://api.elevenlabs.io/v1/voices/{voice_id}"
-
-
-def data_dir() -> Path:
-    path = Path(config.DATA_DIR)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _user_file(chat_id: int) -> Path:
-    return data_dir() / f"user_{int(chat_id)}.json"
-
-
-def load_user_voices(chat_id: int) -> list[dict[str, str]]:
-    path = _user_file(chat_id)
-    if not path.is_file():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    voices = raw.get("voices") if isinstance(raw, dict) else raw
-    if not isinstance(voices, list):
-        return []
-    out: list[dict[str, str]] = []
-    for item in voices:
-        if not isinstance(item, dict):
-            continue
-        vid = str(item.get("id") or "").strip()
-        name = str(item.get("name") or "").strip() or "Мой голос"
-        if not vid:
-            continue
-        out.append(
-            {
-                "id": vid,
-                "name": name,
-                "tag": str(item.get("tag") or "свой"),
-                "kind": str(item.get("kind") or "custom"),
-            }
-        )
-    return out
-
-
-def save_user_voice(chat_id: int, voice: dict[str, str]) -> None:
-    voices = load_user_voices(chat_id)
-    voices = [v for v in voices if v.get("id") != voice.get("id")]
-    voices.insert(0, voice)
-    _user_file(chat_id).write_text(
-        json.dumps({"voices": voices}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def clear_user_voices(chat_id: int) -> list[str]:
-    ids = [v["id"] for v in load_user_voices(chat_id)]
-    path = _user_file(chat_id)
-    if path.is_file():
-        path.unlink()
-    return ids
 
 
 def voice_design_payload(description: str) -> dict[str, Any]:

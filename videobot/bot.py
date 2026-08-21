@@ -51,22 +51,32 @@ from presets import (
     motion_prompt,
     voice_settings_payload,
 )
+from store import (
+    clear_user_voices,
+    delete_cloned_voice,
+    get_cloned_voice,
+    get_last_title,
+    get_last_video,
+    get_watermark,
+    init_db,
+    load_user_voices,
+    save_last_video,
+    save_user_voice,
+    set_cloned_voice,
+    set_watermark,
+)
 from voices import catalog_for, voice_by_index, voice_label
 from wave2 import (
-    ACT_CONSENT_MSG,
     CLONE_CONSENT_MSG,
     act_two_payload,
-    clear_user_voices,
     clone_voice,
     create_designed_voice,
     delete_eleven_voice,
     design_voice_previews,
     extend_video_payload,
     image_upscale_payload,
-    load_user_voices,
     runway_generate_file,
     runway_upload,
-    save_user_voice,
     speech_to_speech,
     video_upscale_payload,
 )
@@ -82,6 +92,11 @@ TIKTOK_RATIO = "720:1280"
 CONSENT_REQUIRED_MSG = (
     "Без кнопки согласия я это фото не использую. Нажми /start и подтверди согласие."
 )
+PHOTO_CONSENT_PROMPT = (
+    "Если на фото живой узнаваемый человек, мне нужно твоё явное согласие.\n\n"
+    "Подтверждаю, что это моё фото или у меня есть согласие человека.\n"
+    "Без этой кнопки я ролик не сниму."
+)
 
 
 def photo_start_blocked(photo_file_id: str | None, consent_verified: bool) -> str:
@@ -94,11 +109,13 @@ HOW_IT_WORKS = (
     "Как это работает — совсем просто:\n\n"
     "1) Тема, готовый текст или пресет.\n"
     "2) Можно своё фото — лицо в ролике будет как на фото.\n"
-    "3) Подача, скорость, качество, камера — кнопками, без технических названий.\n"
-    "4) Сначала оценка кредитов, потом съёмка. Вертикаль 9:16, 30–60 секунд.\n\n"
-    "⚠️ Фото и голос живого человека — только свои или с согласия. "
-    "Без кнопки «подтверждаю» я это не использую. "
-    "То же правило для клонирования голоса и оживления персонажа."
+    "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
+    "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
+    "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
+    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n\n"
+    "⚠️ Фото живого человека — только своё или с согласия. "
+    "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
+    "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
 )
 
 
@@ -118,7 +135,7 @@ class Flow(StatesGroup):
     w2_sts_voice = State()
     w2_sts_audio = State()
     w2_upscale = State()
-    w2_act_consent = State()
+    act_photo = State()
     w2_act_photo = State()
     w2_act_video = State()
     w2_extend_video = State()
@@ -134,7 +151,6 @@ def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
 def _voices_kb(message: Message | None, page: int = 0) -> InlineKeyboardMarkup:
     chat_id = message.chat.id if message else None
     return voice_kb(page, _extra_voices(chat_id))
-    return ("✓ " if cur == key else "") + label
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -142,6 +158,9 @@ def main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="⚡️ Видео за 1 клик", callback_data="menu:quick")],
             [InlineKeyboardButton(text="🎬 Своё фото + текст + голос", callback_data="menu:custom")],
+            [InlineKeyboardButton(text="🧟 Оживить фото", callback_data="menu:acttwo")],
+            [InlineKeyboardButton(text="🎙 Клонировать мой голос", callback_data="menu:clone")],
+            [InlineKeyboardButton(text="🗑 Удалить мой голос", callback_data="menu:unclone")],
             [InlineKeyboardButton(text="🎯 Пресеты", callback_data="menu:preset")],
             [InlineKeyboardButton(text="🧰 Ещё возможности", callback_data="menu:more")],
             [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
@@ -153,12 +172,10 @@ def more_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🧬 Голос по описанию", callback_data="more:design")],
-            [InlineKeyboardButton(text="🪞 Клонировать голос", callback_data="more:clone")],
             [InlineKeyboardButton(text="🎤 Переозвучить запись", callback_data="more:sts")],
-            [InlineKeyboardButton(text="✨ Увеличить качество", callback_data="more:upscale")],
-            [InlineKeyboardButton(text="🎭 Оживить фото", callback_data="more:act")],
+            [InlineKeyboardButton(text="✨ Увеличить качество любого файла", callback_data="more:upscale")],
             [InlineKeyboardButton(text="▶️ Продолжить ролик", callback_data="more:extend")],
-            [InlineKeyboardButton(text="🗑 Удалить мои голоса", callback_data="more:forget")],
+            [InlineKeyboardButton(text="🗑 Удалить все свои голоса", callback_data="more:forget")],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
         ]
     )
@@ -169,7 +186,7 @@ def clone_consent_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подтверждаю: мой голос / есть согласие",
+                    text="✅ Разрешаю клонировать голос",
                     callback_data="w2c:yes",
                 )
             ],
@@ -178,16 +195,20 @@ def clone_consent_kb() -> InlineKeyboardMarkup:
     )
 
 
-def act_consent_kb() -> InlineKeyboardMarkup:
+def clone_done_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтверждаю: моё фото и перформанс / есть согласие",
-                    callback_data="w2a:yes",
-                )
-            ],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="w2a:no")],
+            [InlineKeyboardButton(text="🗑 Удалить мой голос", callback_data="menu:unclone")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def result_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✨ Улучшить качество", callback_data="upscale:last")],
+            [InlineKeyboardButton(text="🎬 Новый ролик", callback_data="menu:home")],
         ]
     )
 
@@ -273,6 +294,15 @@ def tune_kb(job: dict[str, Any]) -> InlineKeyboardMarkup:
     rows += _pair_rows([(k, v["label"]) for k, v in CAMERA.items()], "cam", job.get("camera") or "push")
     rows.append([InlineKeyboardButton(text="Движение", callback_data="noop:x")])
     rows += _pair_rows([(k, v["label"]) for k, v in MOTION.items()], "mot", job.get("motion") or "nat")
+    wm_on = bool(job.get("watermark"))
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✓ Водяной знак: вкл" if wm_on else "Водяной знак: выкл",
+                callback_data="wm:off" if wm_on else "wm:on",
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton(text="➡️ К оценке стоимости", callback_data="tune:cost")])
     rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -301,6 +331,7 @@ def tune_text(job: dict[str, Any]) -> str:
         f"Качество: {(QUALITY.get(job.get('quality') or '') or QUALITY['optimal'])['label']}",
         f"Камера: {(CAMERA.get(job.get('camera') or '') or CAMERA['push'])['label']}",
         f"Движение: {(MOTION.get(job.get('motion') or '') or MOTION['nat'])['label']}",
+        f"Водяной знак: {'вкл' if job.get('watermark') else 'выкл'}",
         f"Сцен: {int(job.get('n_scenes') or 5)}",
     ]
     return "\n".join(lines)
@@ -321,6 +352,13 @@ def cost_text(job: dict[str, Any]) -> str:
         + est["text"]
         + "\n\nЭто оценка по числу клипов и тарифу качества, не чек провайдера."
     )
+
+
+async def _new_job(mode: str, user_id: int | None = None) -> dict[str, Any]:
+    job = default_job(mode=mode)
+    if user_id:
+        job["watermark"] = get_watermark(int(user_id))
+    return job
 
 
 async def _job(state: FSMContext) -> dict[str, Any]:
@@ -354,6 +392,35 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Ок, отменил. Можно начать заново.", reply_markup=main_menu())
 
 
+async def _start_clone_voice(msg: Message, state: FSMContext) -> None:
+    await state.set_state(Flow.w2_clone_consent)
+    await msg.answer(CLONE_CONSENT_MSG, reply_markup=clone_consent_kb())
+
+
+async def _start_act_two(msg: Message, state: FSMContext) -> None:
+    job = await _new_job("act_two", msg.chat.id)
+    job["photo_file_id"] = None
+    job["consent_verified"] = False
+    await _save_job(state, job)
+    await state.set_state(Flow.act_photo)
+    await msg.answer(
+        "🧟 Оживить фото (Act Two).\n\n"
+        "Сначала пришли фото — то же согласие, что и для своего фото в ролике. "
+        "Без кнопки подтверждения я это фото не использую.\n"
+        "Потом короткое видео мимики и движений (3–30 сек)."
+    )
+
+
+async def _delete_cloned_voice(msg: Message) -> None:
+    vid = delete_cloned_voice(msg.chat.id)
+    if not vid:
+        await msg.answer("Клонированного голоса пока нет.", reply_markup=main_menu())
+        return
+    async with aiohttp.ClientSession() as session:
+        await delete_eleven_voice(session, vid)
+    await msg.answer("Клон голоса удалён.", reply_markup=main_menu())
+
+
 async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
     data = query.data or ""
     try:
@@ -372,7 +439,7 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "menu:quick":
         await state.clear()
-        job = default_job(mode="quick")
+        job = await _new_job("quick", msg.chat.id)
         await _save_job(state, job)
         await state.set_state(Flow.quick_idea)
         await msg.answer(
@@ -387,7 +454,7 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "menu:custom":
         await state.clear()
-        job = default_job(mode="custom")
+        job = await _new_job("custom", msg.chat.id)
         await _save_job(state, job)
         await state.set_state(Flow.custom_script)
         await msg.answer(
@@ -395,6 +462,15 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
             "Это слова, которые зритель услышит. Можно абзацами — я разрежу на клипы.\n"
             "Ориентир: не длиннее ~230 слов, иначе озвучка не влезет в 6 клипов."
         )
+        return
+    if data == "menu:acttwo":
+        await _start_act_two(msg, state)
+        return
+    if data == "menu:clone":
+        await _start_clone_voice(msg, state)
+        return
+    if data == "menu:unclone":
+        await _delete_cloned_voice(msg)
         return
     if data == "menu:more":
         await state.clear()
@@ -414,7 +490,8 @@ async def on_preset_pick(query: CallbackQuery, state: FSMContext) -> None:
     pid = (query.data or "preset:viral").split(":", 1)[-1]
     if pid not in PRESETS:
         pid = "viral"
-    job = apply_preset(default_job(mode="preset"), pid)
+    uid = query.message.chat.id if query.message else None
+    job = apply_preset(await _new_job("preset", uid), pid)
     await _save_job(state, job)
     await state.set_state(Flow.preset_topic)
     p = PRESETS[pid]
@@ -451,8 +528,8 @@ async def on_preset_topic(message: Message, state: FSMContext) -> None:
     job["idea"] = idea
     job["user_script"] = False
     await _save_job(state, job)
-    await state.set_state(Flow.tune)
-    await message.answer(tune_text(job), reply_markup=tune_kb(job))
+    await state.set_state(Flow.confirm)
+    await message.answer(cost_text(job), reply_markup=confirm_kb())
 
 
 async def on_custom_script(message: Message, state: FSMContext) -> None:
@@ -490,9 +567,7 @@ async def _maybe_start_consent(message: Message, state: FSMContext, file_id: str
     await _save_job(state, job)
     await state.set_state(Flow.custom_consent)
     await message.answer(
-        "Если на фото живой узнаваемый человек, мне нужно твоё явное согласие.\n\n"
-        "Подтверждаю, что это моё фото или у меня есть согласие человека.\n"
-        "Без этой кнопки я ролик не сниму.",
+        PHOTO_CONSENT_PROMPT,
         reply_markup=consent_kb(),
     )
 
@@ -553,6 +628,14 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
         return
     job["consent_verified"] = True
     await _save_job(state, job)
+    if job.get("mode") == "act_two":
+        await state.set_state(Flow.w2_act_video)
+        if query.message:
+            await query.message.answer(
+                "Теперь короткое видео 3–30 сек, где есть мимика и движения — "
+                "по нему оживим фото."
+            )
+        return
     await state.set_state(Flow.custom_voice)
     if query.message:
         await query.message.answer("Спасибо. Теперь выбери голос:", reply_markup=_voices_kb(query.message, 0))
@@ -652,6 +735,17 @@ async def on_tune(query: CallbackQuery, state: FSMContext) -> None:
         if query.message:
             await query.message.answer(cost_text(job), reply_markup=confirm_kb())
         return
+    if kind == "wm" and key in ("on", "off"):
+        job["watermark"] = key == "on"
+        if query.from_user:
+            set_watermark(query.from_user.id, bool(job["watermark"]))
+        await _save_job(state, job)
+        if query.message:
+            try:
+                await query.message.edit_text(tune_text(job), reply_markup=tune_kb(job))
+            except Exception:
+                await query.message.answer(tune_text(job), reply_markup=tune_kb(job))
+        return
     catalog = catalogs.get(kind)
     field = fields.get(kind)
     if catalog and field and key in catalog:
@@ -719,6 +813,7 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
         motion=motion_prompt(str(job.get("motion") or "nat")),
         quality=str(job.get("quality") or "optimal"),
         style=str(job.get("style") or "cinematic"),
+        watermark=bool(job.get("watermark")),
     )
 
 
@@ -781,6 +876,7 @@ async def _run_job(
     motion: str = "",
     quality: str = "optimal",
     style: str = "cinematic",
+    watermark: bool = False,
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -828,6 +924,7 @@ async def _run_job(
                 camera=camera,
                 motion=motion,
                 quality=quality,
+                watermark=watermark,
             )
             preview = format_script(script)
             try:
@@ -836,16 +933,22 @@ async def _run_job(
                 pass
             q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
+            title = str(script.get("title") or "video")
+            keep = save_last_video(message.chat.id, video_path, title)
             await _send_video(
                 message,
-                video_path,
+                keep,
                 caption,
-                filename=tiktok_upload_filename(str(script.get("title") or "video")),
+                filename=tiktok_upload_filename(title),
             )
             try:
                 await status.edit_text("✅ Готово — видео выше.")
             except Exception:
                 pass
+            await message.answer(
+                "Можно улучшить качество этого ролика.",
+                reply_markup=result_kb(),
+            )
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
@@ -917,8 +1020,7 @@ async def on_w2_menu(query: CallbackQuery, state: FSMContext) -> None:
         await msg.answer("Опиши голос своими словами: тембр, возраст, характер, акцент. Без имени знаменитости.")
         return
     if data == "clone":
-        await state.set_state(Flow.w2_clone_consent)
-        await msg.answer(CLONE_CONSENT_MSG, reply_markup=clone_consent_kb())
+        await _start_clone_voice(msg, state)
         return
     if data == "sts":
         await state.set_state(Flow.w2_sts_voice)
@@ -929,8 +1031,7 @@ async def on_w2_menu(query: CallbackQuery, state: FSMContext) -> None:
         await msg.answer("Пришли фото или видео до 30 сек — увеличу детализацию.")
         return
     if data == "act":
-        await state.set_state(Flow.w2_act_consent)
-        await msg.answer(ACT_CONSENT_MSG, reply_markup=act_consent_kb())
+        await _start_act_two(msg, state)
         return
     if data == "extend":
         await state.set_state(Flow.w2_extend_video)
@@ -965,28 +1066,7 @@ async def on_w2_clone_consent(query: CallbackQuery, state: FSMContext) -> None:
     await _save_job(state, job)
     await state.set_state(Flow.w2_clone_audio)
     if msg:
-        await msg.answer("Пришли голосовое 10–30 секунд чистой речи.")
-
-
-async def on_w2_act_consent(query: CallbackQuery, state: FSMContext) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    if await state.get_state() != Flow.w2_act_consent.state:
-        return
-    msg = query.message
-    if (query.data or "") == "w2a:no":
-        await state.clear()
-        if msg:
-            await msg.answer("Ок, персонажа не оживляю.", reply_markup=main_menu())
-        return
-    job = await _job(state)
-    job["w2_consent"] = True
-    await _save_job(state, job)
-    await state.set_state(Flow.w2_act_photo)
-    if msg:
-        await msg.answer("Пришли фото лица — оно станет персонажем.")
+        await msg.answer("Пришли голосовое 10–30 секунд чистой речи или аудиофайл.")
 
 
 async def on_w2_design_text(message: Message, state: FSMContext) -> None:
@@ -1084,15 +1164,19 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
     status = await message.answer("⏳ Клонирую голос…")
     try:
         src = await _tg_download(message.bot, file_id, work / f"clone.{ext}")
+        old = get_cloned_voice(message.chat.id)
         async with aiohttp.ClientSession() as session:
             voice_id = await clone_voice(session, src, name="Мой голос")
-        save_user_voice(
-            message.chat.id,
-            {"id": voice_id, "name": "Мой голос", "tag": "клон", "kind": "clone"},
-        )
+            if old and old.get("id") and old["id"] != voice_id:
+                await delete_eleven_voice(session, old["id"])
+        set_cloned_voice(message.chat.id, voice_id, "Мой голос")
         await state.clear()
-        await status.edit_text("Голос склонирован. Он появится в списке голосов.")
-        await message.answer("Можно снимать ролик или переозвучить запись.", reply_markup=main_menu())
+        await status.edit_text("Голос склонирован и сохранён.")
+        await message.answer(
+            "Клон привязан к вашему аккаунту. Он появится в списке голосов. "
+            "Удалить можно кнопкой ниже.",
+            reply_markup=clone_done_kb(),
+        )
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
@@ -1160,10 +1244,11 @@ async def on_w2_upscale(message: Message, state: FSMContext) -> None:
                 uri = await runway_upload(session, src)
                 dest = work / "out.mp4"
                 await runway_generate_file(session, "/v1/video_upscale", video_upscale_payload(uri), dest)
-                await _send_video(message, dest, "Увеличенное видео", filename="upscale_tiktok.mp4")
+                keep = save_last_video(message.chat.id, dest, "Увеличенное видео")
+                await _send_video(message, keep, "Увеличенное видео", filename="upscale_tiktok.mp4")
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Ещё что-нибудь?", reply_markup=main_menu())
+        await message.answer("Можно ещё раз улучшить или снять новый ролик.", reply_markup=result_kb())
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
@@ -1173,39 +1258,44 @@ async def on_w2_upscale(message: Message, state: FSMContext) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-async def on_w2_act_photo(message: Message, state: FSMContext) -> None:
-    job = await _job(state)
-    if not job.get("w2_consent"):
-        await message.answer(ACT_CONSENT_MSG, reply_markup=act_consent_kb())
-        await state.set_state(Flow.w2_act_consent)
-        return
+async def on_act_photo(message: Message, state: FSMContext) -> None:
     photos = message.photo or []
     file_id = photos[-1].file_id if photos else None
     doc = message.document
     if not file_id and doc and (doc.mime_type or "").startswith("image/"):
         file_id = doc.file_id
     if not file_id:
-        await message.answer("Нужно фото лица.")
+        await message.answer("Нужно фото — картинкой или файлом-изображением.")
         return
-    job["act_photo_id"] = file_id
+    job = await _job(state)
+    job["mode"] = "act_two"
+    job["photo_file_id"] = file_id
+    job["consent_verified"] = False
     await _save_job(state, job)
-    await state.set_state(Flow.w2_act_video)
-    await message.answer("Теперь видео 3–30 сек, где человек играет нужную мимику и жесты.")
+    await state.set_state(Flow.custom_consent)
+    await message.answer(PHOTO_CONSENT_PROMPT, reply_markup=consent_kb())
 
 
 async def on_w2_act_video(message: Message, state: FSMContext) -> None:
     job = await _job(state)
-    if not job.get("w2_consent") or not job.get("act_photo_id"):
-        await message.answer(ACT_CONSENT_MSG, reply_markup=act_consent_kb())
+    photo_id = str(job.get("photo_file_id") or job.get("act_photo_id") or "")
+    blocked = photo_start_blocked(photo_id or None, bool(job.get("consent_verified")))
+    if blocked:
+        await message.answer(blocked, reply_markup=consent_kb())
+        await state.set_state(Flow.custom_consent)
         return
     media = _media_file_id(message)
     if not media or media[1] != "mp4":
         await message.answer("Пришли видео-перформанс 3–30 секунд.")
         return
+    if BUSY.locked():
+        await message.answer("⏳ Я уже занят другим роликом. Подожди, пока пришлю готовое.")
+        return
     work = _w2_work(message)
     status = await message.answer("⏳ Оживляю фото…")
+    await BUSY.acquire()
     try:
-        photo = await _tg_download(message.bot, str(job["act_photo_id"]), work / "face.jpg")
+        photo = await _tg_download(message.bot, photo_id, work / "face.jpg")
         video = await _tg_download(message.bot, media[0], work / "perf.mp4")
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)) as session:
             image_uri = await file_to_data_uri(photo, work / "face_ref.jpg")
@@ -1218,17 +1308,19 @@ async def on_w2_act_video(message: Message, state: FSMContext) -> None:
                 dest,
                 used_image=True,
             )
-            await _send_video(message, dest, "Оживлённое фото", filename="act_tiktok.mp4")
+            keep = save_last_video(message.chat.id, dest, "Оживлённое фото")
+            await _send_video(message, keep, "Оживлённое фото", filename="act_tiktok.mp4")
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Ещё что-нибудь?", reply_markup=main_menu())
+        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb())
     except PipelineError as exc:
-        await message.answer(exc.user_message, reply_markup=more_kb())
+        await message.answer(exc.user_message, reply_markup=main_menu())
     except Exception:
         log.exception("w2 act")
-        await message.answer("Не оживил. Другое фото или более короткое видео.", reply_markup=more_kb())
+        await message.answer("Не оживил. Другое фото или более короткое видео.", reply_markup=main_menu())
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
 
 
 async def on_w2_extend_video(message: Message, state: FSMContext) -> None:
@@ -1262,9 +1354,10 @@ async def on_w2_extend_prompt(message: Message, state: FSMContext) -> None:
             dest = work / "ext.mp4"
             await runway_generate_file(session, "/v1/video_to_video", extend_video_payload(uri, prompt), dest)
             await _send_video(message, dest, "Продолжение ролика", filename="extend_tiktok.mp4")
+        keep = save_last_video(message.chat.id, dest, "Продолжение")
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Ещё что-нибудь?", reply_markup=main_menu())
+        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb())
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
@@ -1272,6 +1365,51 @@ async def on_w2_extend_prompt(message: Message, state: FSMContext) -> None:
         await message.answer("Не продолжил ролик. Попробуй более короткий файл.", reply_markup=more_kb())
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+async def on_upscale_last(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    src = get_last_video(msg.chat.id)
+    if not src:
+        await msg.answer("Нет готового ролика для улучшения. Сначала сними видео.", reply_markup=main_menu())
+        return
+    if BUSY.locked():
+        await msg.answer("⏳ Я уже занят. Подожди, пока пришлю результат.")
+        return
+    title = get_last_title(msg.chat.id) or "video"
+    work = _w2_work(msg)
+    status = await msg.answer("⏳ Улучшаю качество готового ролика…")
+    await BUSY.acquire()
+    try:
+        local = work / "final.mp4"
+        shutil.copyfile(src, local)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)) as session:
+            uri = await runway_upload(session, local)
+            dest = work / "upscale.mp4"
+            await runway_generate_file(session, "/v1/video_upscale", video_upscale_payload(uri), dest)
+            keep = save_last_video(msg.chat.id, dest, title)
+            await _send_video(
+                msg,
+                keep,
+                "Улучшенное качество",
+                filename=tiktok_upload_filename(title),
+            )
+        await status.edit_text("Готово — улучшенный файл выше.")
+        await msg.answer("Можно улучшить ещё раз или снять новый ролик.", reply_markup=result_kb())
+    except PipelineError as exc:
+        await msg.answer(exc.user_message, reply_markup=result_kb())
+    except Exception:
+        log.exception("upscale last")
+        await msg.answer("Не получилось улучшить. Попробуй ещё раз чуть позже.", reply_markup=result_kb())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
 
 
 async def on_stale_callback(query: CallbackQuery) -> None:
@@ -1297,6 +1435,9 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.custom_photo.state:
         await on_custom_photo(message, state)
         return
+    if current == Flow.act_photo.state:
+        await on_act_photo(message, state)
+        return
     if current == Flow.w2_clone_audio.state:
         await on_w2_clone_audio(message, state)
         return
@@ -1307,7 +1448,7 @@ async def on_other(message: Message, state: FSMContext) -> None:
         await on_w2_upscale(message, state)
         return
     if current == Flow.w2_act_photo.state:
-        await on_w2_act_photo(message, state)
+        await on_act_photo(message, state)
         return
     if current == Flow.w2_act_video.state:
         await on_w2_act_video(message, state)
@@ -1331,6 +1472,7 @@ async def main() -> None:
         raise SystemExit(exc.user_message) from exc
     Path(config.WORK_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.DATA_DIR).mkdir(parents=True, exist_ok=True)
+    init_db()
     bot = Bot(token=config.VIDEOBOT_TELEGRAM_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.message.register(cmd_start, CommandStart())
@@ -1346,7 +1488,6 @@ async def main() -> None:
     dp.callback_query.register(on_voice_pick, Flow.w2_sts_voice, F.data.startswith("voice:"))
     dp.callback_query.register(on_w2_menu, F.data.startswith("more:"))
     dp.callback_query.register(on_w2_clone_consent, Flow.w2_clone_consent, F.data.startswith("w2c:"))
-    dp.callback_query.register(on_w2_act_consent, Flow.w2_act_consent, F.data.startswith("w2a:"))
     dp.callback_query.register(on_w2_design_pick, Flow.w2_design_pick, F.data.startswith("w2p:"))
     dp.callback_query.register(on_noop, F.data.startswith("noop:"))
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("deliv:"))
@@ -1354,8 +1495,10 @@ async def main() -> None:
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("qual:"))
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("cam:"))
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("mot:"))
+    dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("wm:"))
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("tune:"))
     dp.callback_query.register(on_job, Flow.confirm, F.data.startswith("job:"))
+    dp.callback_query.register(on_upscale_last, F.data == "upscale:last")
     dp.message.register(on_quick_idea, Flow.quick_idea, F.text)
     dp.message.register(on_preset_topic, Flow.preset_topic, F.text)
     dp.message.register(on_custom_script, Flow.custom_script, F.text)
@@ -1363,10 +1506,12 @@ async def main() -> None:
     dp.message.register(on_w2_extend_prompt, Flow.w2_extend_prompt, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
+    dp.message.register(on_act_photo, Flow.act_photo, F.photo)
+    dp.message.register(on_act_photo, Flow.act_photo, F.document)
     dp.message.register(on_w2_clone_audio, Flow.w2_clone_audio)
     dp.message.register(on_w2_sts_audio, Flow.w2_sts_audio)
     dp.message.register(on_w2_upscale, Flow.w2_upscale)
-    dp.message.register(on_w2_act_photo, Flow.w2_act_photo)
+    dp.message.register(on_act_photo, Flow.w2_act_photo)
     dp.message.register(on_w2_act_video, Flow.w2_act_video)
     dp.message.register(on_w2_extend_video, Flow.w2_extend_video)
     dp.message.register(on_plain_text, F.text)

@@ -229,6 +229,7 @@ def default_job(*, mode: str) -> dict[str, Any]:
         "brief": "",
         "photo_file_id": None,
         "consent_verified": False,
+        "watermark": False,
     }
 
 
