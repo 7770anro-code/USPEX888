@@ -73,11 +73,10 @@ VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
 XAI_MODEL = _clean("XAI_MODEL") or "grok-4-1-fast-non-reasoning"
 XAI_FALLBACK_MODEL = _clean("XAI_FALLBACK_MODEL") or "grok-4.5"
 
-ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"
-ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_flash_v2_5"
+ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah, MVP без выбора голоса
+ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
 
-# gen4.5 — самый дешёвый нативный text-to-video в Runway API.
-# gen4_turbo дешевле, но это image-to-video (нужен кадр).
+# gen4.5 — text-to-video. gen4_turbo — только image-to-video, на T2V не отправляем.
 RUNWAY_MODEL = _clean("RUNWAY_MODEL") or "gen4.5"
 RUNWAY_RATIO = _clean("RUNWAY_RATIO") or "1280:720"
 RUNWAY_VERSION = _clean("RUNWAY_VERSION") or "2024-11-06"

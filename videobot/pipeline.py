@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 import shutil
 import time
@@ -21,7 +22,17 @@ ProgressCb = Callable[[str], Any]
 
 XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
 XAI_RESPONSES_URL = "https://api.x.ai/v1/responses"
-RUNWAY_BASE = "https://api.dev.runwayml.com/v1"
+
+# Runway API (docs 2026-08-21): host + /v1/... ; X-Runway-Version обязателен.
+RUNWAY_HOST = "https://api.dev.runwayml.com"
+RUNWAY_VERSION = "2024-11-06"
+RUNWAY_PROMPT_MAX = 1000
+RUNWAY_DURATION_MIN = 2
+RUNWAY_DURATION_MAX = 10
+RUNWAY_T2V_MODELS = frozenset({"gen4.5", "veo3", "veo3.1", "veo3.1_fast", "seedance2"})
+RUNWAY_DONE_FAIL = frozenset({"FAILED", "CANCELED", "CANCELLED"})
+
+# ElevenLabs: POST /v1/text-to-speech/{voice_id} → сырой audio/mpeg, не JSON.
 ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
 SCRIPT_SYSTEM = """Ты режиссёр коротких вертикально-нейтральных роликов 15–20 секунд.
@@ -93,7 +104,9 @@ def parse_script(raw: str) -> dict[str, Any]:
         visual = str(scene.get("visual_prompt") or scene.get("visualPrompt") or "").strip()
         if not narration or not visual:
             continue
-        cleaned.append({"narration": narration[:500], "visual_prompt": visual[:900]})
+        cleaned.append(
+            {"narration": narration[:500], "visual_prompt": visual[:RUNWAY_PROMPT_MAX]}
+        )
     if not cleaned:
         raise PipelineError("Сцены пустые: нет текста озвучки или visual-промпта.")
     title = str(data.get("title") or "Ролик").strip()[:80] or "Ролик"
@@ -106,6 +119,26 @@ def scene_durations(count: int) -> list[int]:
     if count == 2:
         return [10, 10]
     return [5, 5, 5]
+
+
+def runway_prompt_text(text: str) -> str:
+    visual = re.sub(r"\s+", " ", (text or "").strip())[:RUNWAY_PROMPT_MAX]
+    if not visual:
+        raise PipelineError("Пустой visual-промпт для Runway.")
+    return visual
+
+
+def runway_duration(seconds: int) -> int:
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        value = 5
+    return max(RUNWAY_DURATION_MIN, min(RUNWAY_DURATION_MAX, value))
+
+
+def runway_poll_delay() -> float:
+    base = max(5.0, float(config.RUNWAY_POLL_SEC or 5))
+    return base + random.uniform(0.0, 1.5)
 
 
 async def _read_error(resp: aiohttp.ClientResponse) -> str:
@@ -192,7 +225,10 @@ async def grok_script(session: aiohttp.ClientSession, idea: str) -> dict[str, An
 async def eleven_tts(session: aiohttp.ClientSession, text: str, dest: Path) -> Path:
     if not config.ELEVENLABS_API_KEY:
         raise PipelineError("Нет ELEVENLABS_API_KEY — озвучку сделать не могу.")
-    url = ELEVEN_TTS_URL.format(voice_id=config.ELEVENLABS_VOICE_ID)
+    voice_id = config.ELEVENLABS_VOICE_ID
+    if not voice_id:
+        raise PipelineError("Не задан ELEVENLABS_VOICE_ID — для MVP нужен дефолтный голос.")
+    url = ELEVEN_TTS_URL.format(voice_id=voice_id)
     params = {"output_format": "mp3_44100_128"}
     headers = {
         "xi-api-key": config.ELEVENLABS_API_KEY,
@@ -201,8 +237,7 @@ async def eleven_tts(session: aiohttp.ClientSession, text: str, dest: Path) -> P
     }
     body = {
         "text": text.strip()[:900],
-        "model_id": config.ELEVENLABS_MODEL_ID,
-        "voice_settings": {"stability": 0.45, "similarity_boost": 0.75},
+        "model_id": config.ELEVENLABS_MODEL_ID or "eleven_multilingual_v2",
     }
     try:
         async with session.post(
@@ -212,34 +247,42 @@ async def eleven_tts(session: aiohttp.ClientSession, text: str, dest: Path) -> P
             json=body,
             timeout=aiohttp.ClientTimeout(total=90),
         ) as resp:
+            raw = await resp.read()
+            ctype = (resp.headers.get("Content-Type") or "").lower()
             if resp.status >= 400:
                 raise PipelineError(
                     "ElevenLabs не озвучил сцену.",
-                    await _read_error(resp),
+                    _clip(f"HTTP {resp.status}: {raw.decode('utf-8', 'replace')}", 350),
                 )
-            data = await resp.read()
+            if "json" in ctype or raw[:1] in (b"{", b"["):
+                raise PipelineError(
+                    "ElevenLabs вернул JSON вместо аудио.",
+                    _clip(raw.decode("utf-8", "replace"), 300),
+                )
     except PipelineError:
         raise
     except Exception as exc:
         raise PipelineError("ElevenLabs недоступен.", f"{type(exc).__name__}: {exc}") from exc
-    if len(data) < 200:
+    if len(raw) < 200:
         raise PipelineError("ElevenLabs вернул пустой аудиофайл.")
-    dest.write_bytes(data)
+    dest.write_bytes(raw)
+    log.info("ElevenLabs mp3 voice=%s bytes=%s", voice_id, len(raw))
     return dest
 
 
 def _runway_headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {config.RUNWAY_API_KEY}",
-        "X-Runway-Version": config.RUNWAY_VERSION,
+        "X-Runway-Version": config.RUNWAY_VERSION or RUNWAY_VERSION,
         "Content-Type": "application/json",
     }
 
 
 async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
-    url = f"{RUNWAY_BASE}/tasks/{task_id}"
+    url = f"{RUNWAY_HOST}/v1/tasks/{task_id}"
     deadline = time.monotonic() + config.RUNWAY_TIMEOUT_SEC
     last_status = ""
+    raw = ""
     while time.monotonic() < deadline:
         try:
             async with session.get(
@@ -255,13 +298,12 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
             raise
         except Exception as exc:
             log.warning("Runway poll error: %s", exc)
-            await asyncio.sleep(config.RUNWAY_POLL_SEC)
+            await asyncio.sleep(runway_poll_delay())
             continue
         last_status = str(data.get("status") or "")
-        if last_status.upper() == "SUCCEEDED":
+        status_u = last_status.upper()
+        if status_u == "SUCCEEDED":
             output = data.get("output") or []
-            if isinstance(output, str) and output.startswith("http"):
-                return output
             if isinstance(output, list) and output:
                 first = output[0]
                 if isinstance(first, str) and first.startswith("http"):
@@ -270,11 +312,13 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
                     for key in ("url", "uri", "href"):
                         if isinstance(first.get(key), str) and first[key].startswith("http"):
                             return first[key]
-            raise PipelineError("Runway завершился без ссылки на видео.", _clip(raw, 240))
-        if last_status.upper() == "FAILED":
+            if isinstance(output, str) and output.startswith("http"):
+                return output
+            raise PipelineError("Runway SUCCEEDED без URL в output[0].", _clip(raw, 240))
+        if status_u in RUNWAY_DONE_FAIL:
             reason = data.get("failure") or data.get("failureCode") or data.get("error") or raw
-            raise PipelineError("Runway не смог сгенерировать клип.", _clip(str(reason), 300))
-        await asyncio.sleep(config.RUNWAY_POLL_SEC)
+            raise PipelineError("Runway не смог сгенерировать клип.", _clip(f"{status_u}: {reason}", 300))
+        await asyncio.sleep(runway_poll_delay())
     raise PipelineError(
         "Runway слишком долго генерирует клип, остановил ожидание.",
         f"status={last_status or 'unknown'} timeout={int(config.RUNWAY_TIMEOUT_SEC)}s",
@@ -288,7 +332,7 @@ async def _runway_submit(
 ) -> str:
     try:
         async with session.post(
-            f"{RUNWAY_BASE}{path}",
+            f"{RUNWAY_HOST}{path}",
             headers=_runway_headers(),
             json=payload,
             timeout=aiohttp.ClientTimeout(total=60),
@@ -303,9 +347,10 @@ async def _runway_submit(
         raise
     except Exception as exc:
         raise PipelineError("Runway недоступен.", f"{type(exc).__name__}: {exc}") from exc
-    task_id = data.get("id") or data.get("taskId") or data.get("task_id")
+    task_id = data.get("id")
     if not task_id:
         raise PipelineError("Runway не вернул id задачи.", _clip(raw, 240))
+    log.info("Runway submitted %s id=%s cost=%s", path, task_id, data.get("estimatedCost"))
     return str(task_id)
 
 
@@ -325,13 +370,13 @@ async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Pat
 
 
 async def _text_to_image_url(session: aiohttp.ClientSession, prompt: str) -> str:
-    """Запасной путь: дешёвый кадр для gen4_turbo (image-to-video)."""
+    """Запасной путь: кадр для gen4_turbo (только image-to-video)."""
     payload = {
         "model": "gen4_image_turbo",
-        "promptText": prompt[:900],
-        "ratio": "1280:720",
+        "promptText": runway_prompt_text(prompt),
+        "ratio": config.RUNWAY_RATIO or "1280:720",
     }
-    task_id = await _runway_submit(session, "/text_to_image", payload)
+    task_id = await _runway_submit(session, "/v1/text_to_image", payload)
     return await _runway_poll(session, task_id)
 
 
@@ -343,34 +388,40 @@ async def runway_clip(
 ) -> Path:
     if not config.RUNWAY_API_KEY:
         raise PipelineError("Нет RUNWAY_API_KEY — видео не собрать.")
-    seconds = 10 if seconds >= 8 else 5
-    visual = prompt.strip()[:900]
-    t2v_payload = {
-        "model": config.RUNWAY_MODEL,
-        "promptText": visual,
-        "ratio": config.RUNWAY_RATIO,
-        "duration": seconds,
-    }
-    try:
-        task_id = await _runway_submit(session, "/text_to_video", t2v_payload)
-        video_url = await _runway_poll(session, task_id)
-        return await _download(session, video_url, dest)
-    except PipelineError as exc:
-        status = getattr(exc, "status", None)
-        if status not in (400, 404, 422):
-            raise
-        log.warning("T2V rejected (%s), fallback image+turbo: %s", status, exc.detail)
-        image_url = await _text_to_image_url(session, visual)
-        i2v_payload = {
-            "model": "gen4_turbo",
-            "promptImage": image_url,
+    seconds = runway_duration(10 if seconds >= 8 else 5)
+    visual = runway_prompt_text(prompt)
+    ratio = config.RUNWAY_RATIO or "1280:720"
+    model = config.RUNWAY_MODEL or "gen4.5"
+    t2v_ok = model in RUNWAY_T2V_MODELS
+    if t2v_ok:
+        t2v_payload = {
+            "model": model,
             "promptText": visual,
-            "ratio": config.RUNWAY_RATIO,
+            "ratio": ratio,
             "duration": seconds,
         }
-        task_id = await _runway_submit(session, "/image_to_video", i2v_payload)
-        video_url = await _runway_poll(session, task_id)
-        return await _download(session, video_url, dest)
+        try:
+            task_id = await _runway_submit(session, "/v1/text_to_video", t2v_payload)
+            video_url = await _runway_poll(session, task_id)
+            return await _download(session, video_url, dest)
+        except PipelineError as exc:
+            status = getattr(exc, "status", None)
+            if status not in (400, 404, 422):
+                raise
+            log.warning("T2V rejected (%s), fallback image+gen4_turbo: %s", status, exc.detail)
+    else:
+        log.info("Модель %s не T2V (gen4_turbo только image-to-video) — сразу кадр+I2V", model)
+    image_url = await _text_to_image_url(session, visual)
+    i2v_payload = {
+        "model": "gen4_turbo",
+        "promptText": visual,
+        "promptImage": image_url,
+        "ratio": ratio,
+        "duration": seconds,
+    }
+    task_id = await _runway_submit(session, "/v1/image_to_video", i2v_payload)
+    video_url = await _runway_poll(session, task_id)
+    return await _download(session, video_url, dest)
 
 
 async def _run_ffmpeg(args: list[str]) -> None:

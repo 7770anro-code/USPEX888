@@ -1,7 +1,13 @@
 """Офлайн-проверка разбора сценария и unwrap Grok-ключа. Без сети."""
 
 from config import unwrap_xai_api_key
-from pipeline import parse_script, scene_durations
+from pipeline import (
+    parse_script,
+    runway_duration,
+    runway_poll_delay,
+    runway_prompt_text,
+    scene_durations,
+)
 
 
 def test_plain_json() -> None:
@@ -58,6 +64,26 @@ def test_unwrap_empty() -> None:
     assert "пустой" in err
 
 
+def test_runway_duration_clamp() -> None:
+    assert runway_duration(5) == 5
+    assert runway_duration(10) == 10
+    assert runway_duration(1) == 2
+    assert runway_duration(99) == 10
+
+
+def test_runway_prompt_limit() -> None:
+    text = runway_prompt_text("  hello   world  " + ("x" * 2000))
+    assert text.startswith("hello world")
+    assert len(text) == 1000
+
+
+def test_runway_poll_delay_min() -> None:
+    for _ in range(8):
+        delay = runway_poll_delay()
+        assert delay >= 5.0
+        assert delay < 7.0
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -66,4 +92,7 @@ if __name__ == "__main__":
     test_unwrap_plain_key()
     test_unwrap_rejects_bad_shape()
     test_unwrap_empty()
+    test_runway_duration_clamp()
+    test_runway_prompt_limit()
+    test_runway_poll_delay_min()
     print("ok")
