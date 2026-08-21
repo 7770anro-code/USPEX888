@@ -1,73 +1,64 @@
-# AI Bridge via GitHub
+# AI Bridge (GitHub bus)
 
-Общий канал связи: **Cloud Code / ChatGPT / Claude ↔ GitHub ↔ Cursor**.
-
-IP между ИИ не нужен. Пишем в репозиторий — читаем из репозитория.
-
-## Поток
+Задачи для Cursor / Cloud / GPT живут в **git**, не на одном Маке.
+Пока MacBook выключен — задачу всё равно можно положить в `inbox/` с телефона,
+Cloud Code, другого ПК или через GitHub web UI. Cursor забирает её при следующей
+сессии (Cloud Agent или когда Мак снова онлайн).
 
 ```
-Ты → Cloud Code / ChatGPT
-        ↓  создаёт файл в ai_bridge/inbox/  ИЛИ  Issue с label ai-inbox
-     GitHub (push / PR)
-        ↓
-     Cursor забирает задачу
-        ↓  делает код + тесты
-     Cursor пишет ответ в ai_bridge/outbox/  ИЛИ  PR + комментарий
-        ↓
-     Ты / Cloud Code видите результат в GitHub
+Human / Cloud / GPT
+        │  commit + push TASK-*.md
+        ▼
+ai_bridge/inbox/     ◄── GitHub (source of truth)
+        │
+        │  GitHub Action: validate frontmatter → open Issue label ai-inbox
+        │
+        ▼
+Cursor (Cloud Agent / Mac / later VPS helper)
+        │  claim_task → work → complete_task
+        ▼
+ai_bridge/outbox/TASK-…-DONE.md  (+ optional PR with code)
 ```
 
-## Правила
+## Когда Cursor читает inbox
 
-1. **Один writer кода в проекте — Cursor.** Cloud/GPT кладут ТЗ и черновики в `inbox`, не правят `main_*.py` напрямую без PR.
-2. Каждая задача — один файл `ai_bridge/inbox/TASK-YYYYMMDD-HHMM-<slug>.md` по шаблону.
-3. Cursor отвечает файлом `ai_bridge/outbox/TASK-...-DONE.md` + PR с кодом.
-4. Цель обязательна: `target: uspex` или `target: vector` (не смешивать).
-5. Секреты (API keys) в bridge-файлы **не писать**.
+1. **В начале агент-сессии** (Cursor Cloud или локально): `python3 ai_bridge/scripts/list_pending.py`
+2. **По Issue** с label `ai-inbox` (создаёт Actions при push в inbox)
+3. **По явной команде** в чате: «забери inbox» / «claim TASK-…»
 
-## Labels (Issues)
+Автоматического демона на `/opt/uspex` **нет** и не будет без отдельного ок.
+Опционально: зеркало репо в `/home/cloud/` + `poll_inbox.py` только читает inbox
+и пишет ACK в outbox (не трогает прод).
 
-| Label | Кто ставит | Смысл |
-|-------|------------|--------|
-| `ai-inbox` | Cloud/GPT | Новая задача для Cursor |
-| `ai-wip` | Cursor | В работе |
-| `ai-done` | Cursor | Сделано, смотри outbox/PR |
-| `target-uspex` | любой | Касается USPEX |
-| `target-vector` | любой | Касается Vector |
+## Статусы задачи
 
-## Команды для Cloud Code
+| status (frontmatter) | Где | Смысл |
+|---|---|---|
+| `inbox` | inbox/ | Новая, никто не взял |
+| `claimed` | inbox/ (обновлён) + outbox CLAIM | Cursor взял в работу |
+| `wip` | outbox | Идёт работа |
+| `done` | outbox `*-DONE.md` | Готово |
+| `blocked` | outbox | Нужен ответ человека |
+| `failed` | outbox | Ошибка |
 
-После того как придумали решение с GPT:
+## Секреты
+
+Только env / GitHub Secrets. Никогда не класть ключи в `ai_bridge/**`.
+
+## Быстрый старт
 
 ```bash
-# из корня клона репо
-cp ai_bridge/templates/TASK_TEMPLATE.md \
-   ai_bridge/inbox/TASK-$(date -u +%Y%m%d-%H%M)-my-idea.md
-# отредактировать файл, затем:
-git checkout -b orch/cloud-$(date -u +%Y%m%d-%H%M)
-git add ai_bridge/inbox/
-git commit -m "ai-inbox: <коротко о задаче>"
-git push -u origin HEAD
-# открыть PR в main (или в рабочую ветку) с title: [ai-inbox][uspex] ...
+# новая задача
+python3 ai_bridge/scripts/new_task.py --target uspex --title "Fix X" --goal "..."
+
+# что ждёт выполнения
+python3 ai_bridge/scripts/list_pending.py
+
+# взять задачу
+python3 ai_bridge/scripts/claim_task.py TASK-YYYYMMDD-HHMM-slug
+
+# закрыть
+python3 ai_bridge/scripts/complete_task.py TASK-YYYYMMDD-HHMM-slug --summary "..."
 ```
 
-## Команды для Cursor
-
-Когда видит новый inbox / Issue `ai-inbox`:
-
-1. Перенести статус → `ai-wip`
-2. Внедрить в код
-3. Положить `ai_bridge/outbox/TASK-...-DONE.md`
-4. PR с реализацией + label `ai-done`
-
-## Что нужно один раз от тебя
-
-Подключить remote GitHub (сейчас `origin` может отсутствовать):
-
-```bash
-git remote add origin git@github.com:<USER>/<REPO>.git
-git push -u origin main   # или текущую ветку
-```
-
-Без remote Cloud Code и Cursor **не увидят** файлы друг друга.
+Потом: `git add ai_bridge && git commit && git push`.
