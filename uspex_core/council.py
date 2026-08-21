@@ -93,14 +93,14 @@ def parse_vote_json(raw: str, default_lev: float = 10.0) -> Dict[str, Any]:
     }
 
 
-def timeout_vote(who: str, lev: float = 10.0) -> Dict[str, Any]:
+def timeout_vote(who: str, lev: float = 10.0, reason: str | None = None) -> Dict[str, Any]:
     return {
         "ok": False,
         "decision": "REJECT",
         "confidence": 0,
         "leverage": max(1, min(100, lev)),
         "flags": ["TIMEOUT"],
-        "reason": f"{who} timeout FAIL_CLOSED",
+        "reason": reason or f"{who} timeout FAIL_CLOSED",
         "timeout": True,
     }
 

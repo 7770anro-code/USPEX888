@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 from uspex_core.fair_value import VenueQuote, robust_fair_value
 from uspex_core.net_edge import estimate_net_edge, executable_price
 from uspex_core.venues import BybitPublicAdapter, BinanceFuturesAdapter, OkxAdapter, MarketSnapshot
-from uspex_core.modes import COUNCIL_BUDGET_SEC, CURSOR_VOTE_TIMEOUT_SEC, GROK_VOTE_TIMEOUT_SEC
+from uspex_core.modes import COUNCIL_BUDGET_SEC, CURSOR_VOTE_TIMEOUT_SEC, GROK_VOTE_TIMEOUT_SEC, CURSOR_SPAWN_TIMEOUT_SEC
 from uspex_core.versioning import BUILD_ID, CONFIG_SCHEMA_VERSION
 
 
@@ -26,6 +26,7 @@ class TestV3Institutional(unittest.TestCase):
         self.assertGreaterEqual(COUNCIL_BUDGET_SEC, 8.0)
         self.assertLessEqual(CURSOR_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
         self.assertLessEqual(GROK_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
+        self.assertLess(CURSOR_SPAWN_TIMEOUT_SEC, CURSOR_VOTE_TIMEOUT_SEC)
 
     def test_outlier_quarantine(self):
         qs = [

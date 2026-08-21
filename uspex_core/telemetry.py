@@ -76,6 +76,10 @@ class SessionFunnel:
     opened: int = 0
     would_open: int = 0
     would_reject: int = 0
+    net_edge_reject: int = 0
+    cursor_spawn_timeout: int = 0
+    council_task_cancelled: int = 0
+    council_task_hung: int = 0
     tp1_hit: int = 0
     early_exit: int = 0
     hard_stop: int = 0
@@ -101,7 +105,8 @@ class SessionFunnel:
             f"AI timeout cursor/grok {d['cursor_timeout']}/{d['grok_timeout']}",
             f"reval pass/chase/rev/edge {d['revalidation_pass']}/{d['revalidation_chase']}/{d['revalidation_reversal']}/{d['revalidation_edge_gone']}",
             f"risk/exchange/fill_fail {d['risk_reject']}/{d['exchange_reject']}/{d['fill_fail']}",
-            f"opened {d['opened']} • would_open {d['would_open']} • would_reject {d['would_reject']}",
+            f"opened {d['opened']} • would_open {d['would_open']} • would_reject {d['would_reject']} • net_edge_reject {d['net_edge_reject']}",
+            f"cursor_spawn_timeout {d['cursor_spawn_timeout']} • council_cancel/hung {d['council_task_cancelled']}/{d['council_task_hung']}",
             f"tp1 {d['tp1_hit']} • early {d['early_exit']} • stop {d['hard_stop']} • tp2 {d['tp2']} • closed {d['closed']}",
             f"last: {d['last_candidate']} • {d['last_event'][:100]}",
         ]

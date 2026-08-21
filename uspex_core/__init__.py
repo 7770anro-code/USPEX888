@@ -1,4 +1,4 @@
-"""USPEX V12.2 core: robust microstructure, data quality, council, revalidation, latency, V3 adapters."""
+"""USPEX V12.2.1 core: robust microstructure, data quality, council, revalidation, latency, V3 adapters."""
 
 from .versioning import BUILD_ID, STRATEGY_VERSION, PROMPT_VERSION, CONFIG_SCHEMA_VERSION, config_hash
 from .fair_value import VenueQuote, FairValueResult, robust_fair_value, quotes_from_mids

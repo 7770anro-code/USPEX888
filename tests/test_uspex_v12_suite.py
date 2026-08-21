@@ -341,6 +341,7 @@ class TestJournalScoreboardShadowRisk(unittest.TestCase):
         for code in (
             "QUALITY_LOW_LIQ", "BAD_FLOW_DATA", "AI_TIMEOUT_GROK", "REVALIDATION_CHASE",
             "FILL_CONFIRM_FAIL", "WOULD_OPEN", "EARLY_EDGE_LOST", "TP1_PARTIAL",
+            "NET_EDGE_REJECT", "COUNCIL_TASK_CANCELLED", "CURSOR_CONNECT_TIMEOUT",
         ):
             self.assertTrue(hasattr(JournalCode, code))
 
