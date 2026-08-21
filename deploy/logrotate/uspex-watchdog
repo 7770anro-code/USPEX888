@@ -1,0 +1,9 @@
+/var/log/uspex-watchdog.log {
+    weekly
+    rotate 8
+    missingok
+    notifempty
+    compress
+    copytruncate
+    create 0640 root adm
+}

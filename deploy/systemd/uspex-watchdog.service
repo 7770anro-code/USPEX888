@@ -1,0 +1,14 @@
+[Unit]
+Description=USPEX watchdog (restart existing uspex.service only; never deploys code)
+Documentation=file:///usr/local/sbin/uspex-watchdog
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+ExecStart=/usr/bin/python3 /usr/local/sbin/uspex-watchdog
+# No git/rsync/pip. The script itself refuses any unit other than uspex.service.
+PrivateTmp=true
+ProtectHome=read-only
+NoNewPrivileges=true
