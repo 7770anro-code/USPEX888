@@ -1,17 +1,28 @@
 # VideoBot
 
-Отдельный Telegram-бот: **текст идеи → ролик ~20–30 секунд**.
+Отдельный Telegram-бот: **идея или свой текст → вертикальный ролик 30–60 секунд (TikTok 9:16)**.
 
 Не связан с USPEX/Vector. На сервере: `/opt/videobot`, unit `videobot.service`.
 
 ## Пайплайн
 
-1. **Grok** (`grok-4.5`, fallback fast) — 2–3 сцены, cinematic-промпты.
-2. **ElevenLabs** — TTS Sarah / `eleven_multilingual_v2`, сырой `audio/mpeg`.
-3. **Runway** `gen4.5` T2V, дефолт **9:16** (`720:1280`), клип ~10 сек; ретраи 429/5xx и INTERNAL.
-4. **ffmpeg** — подгон голоса (`atempo`), склейка, субтитры (DejaVu).
-5. Telegram: превью сценария + mp4. `/ratio`, `/style`.
+1. **Grok** (`grok-4.5`, fallback fast) — JSON: одно поле `continuity` (лицо, одежда, место, стиль) + 4–6 сцен. В `visual_prompt` сцены только камера/действие.
+2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 premade-голос кнопками (`GET /v1/voices` формат прежний).
+3. **Runway** `gen4.5`, хост `https://api.dev.runwayml.com`, заголовок `X-Runway-Version: 2024-11-06`.
+   - Вертикаль: `ratio=720:1280`.
+   - Клип: `duration` 5 или 10 сек (API допускает integer 2–10).
+   - Одно и то же `promptImage` на все клипы цепочки (data URI ≤ 5 МБ или HTTPS) — штатного character-consistency в API нет.
+   - Одинаковый `seed` на клипы ролика (похожесть выше, не гарантия).
+   - `contentModeration.publicFigureThreshold=auto`. При `FAILED` + `SAFETY.*` / лица — понятный текст в чат, без ретрая.
+4. **ffmpeg** — `atempo`, склейка 9:16, субтитры.
+5. Telegram: меню «для новичка», статусы с эмодзи, превью сценария + mp4.
 
-Ошибки API — текстом в чат. При сбое рабочие файлы остаются в `/tmp/videobot` (`KEEP_FAILED_DIR=1`).
+## Режимы
+
+- **Быстрая идея** — одно сообщение, голос Сара, общий still из `continuity`, затем I2V.
+- **Своё фото + текст + голос** — готовый сценарий, фото как `promptImage` всех клипов, выбор из 21 голоса.
+- Фото человека: пайплайн **не стартует**, пока не нажата кнопка согласия («это моё фото или есть согласие»).
+
+Ошибки API — текстом в чат, не стектрейс. При сбое файлы остаются в `/tmp/videobot` (`KEEP_FAILED_DIR=1`).
 
 Деплой: [DEPLOY.md](DEPLOY.md). Секреты: [.env.example](.env.example).

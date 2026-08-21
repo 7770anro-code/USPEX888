@@ -35,25 +35,26 @@ RUNWAY_DONE_FAIL = frozenset({"FAILED", "CANCELED", "CANCELLED"})
 # ElevenLabs: POST /v1/text-to-speech/{voice_id} → сырой audio/mpeg, не JSON.
 ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
-SCRIPT_SYSTEM = """Ты режиссёр коротких вертикальных/горизонтальных роликов 20–30 секунд высокого качества.
-Пользователь даёт идею текстом. Верни ТОЛЬКО JSON без markdown и без комментариев:
+SCRIPT_SYSTEM = """Ты режиссёр вертикальных TikTok-роликов 30–60 секунд (кадр 9:16).
+Верни ТОЛЬКО JSON без markdown:
 
 {
   "title": "короткий заголовок",
+  "continuity": "ONE locked English description for EVERY shot: character (age, face, hair, clothes), location, lighting, color grade, visual style. No camera motion here. Must stay identical across shots.",
   "scenes": [
     {
-      "narration": "озвучка на языке идеи, 16–24 слова, один законченный кадр мысли",
-      "visual_prompt": "English cinematic prompt: camera, lens, lighting, motion, mood, continuity with previous shot; no on-screen text"
+      "narration": "озвучка на языке пользователя",
+      "visual_prompt": "English CAMERA AND ACTION ONLY: move, gesture, framing. Do NOT re-describe face, clothes, or location."
     }
   ]
 }
 
 Правила:
-- Ровно 3 сцены (если идея крошечная — 2). Каждая сцена рассчитана на ~10 секунд видео.
-- narration: живая речь диктора, без кавычек, без нумерации, без «в этом видео».
-- visual_prompt: один конкретный shot на английском, непрерывное движение камеры, тот же персонаж/локация если история одна.
-- Стиль задан пользователем — встрой его в каждый visual_prompt.
-- Без логотипов, без текста на экране, без знаменитостей, без NSFW, без watermark.
+- continuity пишется ОДИН раз — единственное описание персонажа и места.
+- visual_prompt сцены — только действие камеры, без нового лица и локации.
+- Сцен от 4 до 6. Каждая ~10 секунд речи (примерно 18–28 слов). Итого 40–60 секунд.
+- Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
+- Без текста на экране, логотипов, знаменитостей, NSFW, watermark.
 """
 
 STYLES = {
@@ -71,12 +72,59 @@ RATIO_PRESETS = {
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
 
 
+# Явные тексты при модерации Runway (docs 21.08.2026: FAILED + failureCode SAFETY.*).
+RUNWAY_PERSON_MSG = (
+    "Runway отклонил это фото (политика по реальным людям). "
+    "Попробуй другое фото или текстовый режим без фото."
+)
+RUNWAY_SAFETY_MSG = (
+    "Runway не пропустил этот запрос по правилам контента. "
+    "Измени текст или фото и попробуй ещё раз."
+)
+
+_PERSON_MOD_RE = re.compile(
+    r"PUBLIC[_\s-]?FIGURE|LIKENESS|CELEBRITY|REAL PEOPLE|ANOTHER PERSON|"
+    r"SAFETY\.(INPUT|OUTPUT)\.(IMAGE|VIDEO|AUDIO)|"
+    r"\bFACES?\b|\bPEOPLE\b|\bPERSON\b(?!AL)",
+    re.I,
+)
+
+
 class PipelineError(Exception):
-    def __init__(self, user_message: str, detail: str = "") -> None:
+    def __init__(self, user_message: str, detail: str = "", code: str = "") -> None:
         super().__init__(user_message)
         self.user_message = user_message
         self.detail = detail or user_message
         self.status: int | None = None
+        self.code = code
+        self.failure_code = ""
+
+
+def is_runway_safety_fail(failure_code: str = "", detail: str = "") -> bool:
+    blob = f"{failure_code} {detail}".upper()
+    return "SAFETY" in blob or "CONTENT_MODERAT" in blob or "CONTENT MODERAT" in blob or "MODERATED" in blob
+
+
+def is_runway_person_moderation(failure_code: str = "", detail: str = "") -> bool:
+    blob = f"{failure_code} {detail}"
+    return bool(_PERSON_MOD_RE.search(blob))
+
+
+def runway_fail_error(failure_code: str, detail: str) -> PipelineError:
+    """Понятный текст в чат вместо generic «ошибка» при FAILED модерации."""
+    if is_runway_person_moderation(failure_code, detail):
+        err = PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
+    elif is_runway_safety_fail(failure_code, detail):
+        err = PipelineError(RUNWAY_SAFETY_MSG, detail, code="moderation")
+    else:
+        err = PipelineError("Runway не смог сгенерировать клип.", detail)
+    err.failure_code = failure_code
+    return err
+
+
+def runway_content_moderation() -> dict[str, str]:
+    # auto — дефолт API; low ослабляет фильтр знаменитостей, нам это не нужно.
+    return {"publicFigureThreshold": "auto"}
 
 
 def _clip(text: str, n: int = 400) -> str:
@@ -110,27 +158,82 @@ def parse_script(raw: str) -> dict[str, Any]:
         raise PipelineError("Не получилось разобрать сценарий от Grok.", str(exc)) from exc
     scenes = data.get("scenes")
     if not isinstance(scenes, list) or not scenes:
-        raise PipelineError("В сценарии нет сцен.")
+        raise PipelineError("Не получилось понять сцены. Напиши текст чуть подробнее.")
     cleaned = []
-    for scene in scenes[:3]:
+    for scene in scenes[:6]:
         if not isinstance(scene, dict):
             continue
         narration = str(scene.get("narration") or "").strip()
         visual = str(scene.get("visual_prompt") or scene.get("visualPrompt") or "").strip()
-        if not narration or not visual:
+        if not narration:
             continue
+        if not visual:
+            visual = "slow cinematic camera move, keep identity unchanged"
         cleaned.append(
             {"narration": narration[:500], "visual_prompt": visual[:RUNWAY_PROMPT_MAX]}
         )
     if not cleaned:
-        raise PipelineError("Сцены пустые: нет текста озвучки или visual-промпта.")
+        raise PipelineError("В тексте нет слов для озвучки. Напиши сценарий своими словами.")
     title = str(data.get("title") or "Ролик").strip()[:80] or "Ролик"
-    return {"title": title, "scenes": cleaned}
+    continuity = str(
+        data.get("continuity") or data.get("bible") or data.get("lock") or ""
+    ).strip()
+    if not continuity:
+        continuity = cleaned[0]["visual_prompt"][:500]
+    return {"title": title, "continuity": continuity, "scenes": cleaned}
 
 
 def scene_durations(count: int) -> list[int]:
-    n = max(1, min(int(count), 3))
+    n = max(1, min(int(count or 1), 6))
     return [10] * n
+
+
+def target_scene_count(text: str) -> int:
+    words = len(re.findall(r"\w+", text or "", flags=re.U))
+    if words < 50:
+        return 4
+    if words < 110:
+        return 5
+    return 6
+
+
+def compose_runway_prompt(continuity: str, scene_visual: str) -> str:
+    """Один lock на все клипы + действие сцены. continuity не переписывается."""
+    lock = re.sub(r"\s+", " ", (continuity or "").strip())
+    motion = re.sub(r"\s+", " ", (scene_visual or "").strip())
+    header = "LOCKED LOOK (same person, clothes, location, style): "
+    glue = " | CAMERA/ACTION: "
+    budget = RUNWAY_PROMPT_MAX - len(header) - len(glue)
+    lock_max = min(len(lock), max(280, budget - 120))
+    lock_part = lock[:lock_max]
+    motion_part = motion[: max(40, budget - len(lock_part))]
+    return (header + lock_part + glue + motion_part)[:RUNWAY_PROMPT_MAX]
+
+
+def fallback_split_script(text: str, n: int = 5) -> dict[str, Any]:
+    words = re.findall(r"\S+", text or "")
+    if not words:
+        raise PipelineError("Пустой сценарий. Напиши текст ролика.")
+    n = max(4, min(6, n))
+    chunk = max(1, (len(words) + n - 1) // n)
+    scenes = []
+    for i in range(n):
+        part = " ".join(words[i * chunk : (i + 1) * chunk]).strip()
+        if not part:
+            continue
+        scenes.append(
+            {
+                "narration": part,
+                "visual_prompt": "slow push-in, natural motion, keep locked look",
+            }
+        )
+    if not scenes:
+        raise PipelineError("Не смог разрезать сценарий на сцены.")
+    return {
+        "title": "Мой ролик",
+        "continuity": "same protagonist and location throughout, consistent lighting and clothes, photoreal",
+        "scenes": scenes,
+    }
 
 
 def pick_clip_duration(audio_sec: float) -> int:
@@ -152,7 +255,12 @@ def ratio_wh(ratio: str) -> tuple[int, int]:
 
 
 def format_script(script: dict[str, Any]) -> str:
-    lines = [f"🎬 {script.get('title') or 'Ролик'}", ""]
+    lines = [f"🎬 {script.get('title') or 'Ролик'}"]
+    lock = (script.get("continuity") or "").strip()
+    if lock:
+        lines.append("")
+        lines.append(f"🔒 Один образ на весь ролик: {lock[:280]}")
+    lines.append("")
     for i, scene in enumerate(script.get("scenes") or [], 1):
         lines.append(f"{i}. {scene.get('narration') or ''}")
     return "\n".join(lines).strip()
@@ -229,21 +337,31 @@ async def grok_script(
     session: aiohttp.ClientSession,
     idea: str,
     style: str = "cinematic",
+    *,
+    n_scenes: int = 5,
+    user_script: bool = False,
 ) -> dict[str, Any]:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
     if not config.XAI_API_KEY_NEW:
         raise PipelineError("Нет XAI_API_KEY_NEW — сценарий собрать не могу.")
     style_key = style if style in STYLES else "cinematic"
+    n_scenes = max(4, min(6, int(n_scenes or 5)))
+    if user_script:
+        user_content = (
+            f"Стиль: {style_key} — {STYLES[style_key]}\n"
+            f"Готовый текст ролика (нарежь на {n_scenes} сцен, речь почти дословно):\n"
+            f"{idea.strip()[:4000]}"
+        )
+    else:
+        user_content = (
+            f"Стиль: {style_key} — {STYLES[style_key]}\n"
+            f"Сделай {n_scenes} сцен. continuity — один lock на весь ролик.\n"
+            f"Идея:\n{idea.strip()[:2000]}"
+        )
     messages = [
         {"role": "system", "content": SCRIPT_SYSTEM},
-        {
-            "role": "user",
-            "content": (
-                f"Стиль: {style_key} — {STYLES[style_key]}\n"
-                f"Идея ролика:\n{idea.strip()[:2000]}"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     headers = {
         "Authorization": f"Bearer {config.XAI_API_KEY_NEW}",
@@ -275,7 +393,12 @@ async def grok_script(
                         )
                         if content.strip():
                             log.info("Grok chat ok model=%s", model)
-                            return parse_script(content)
+                            try:
+                                return parse_script(content)
+                            except PipelineError:
+                                if user_script:
+                                    return fallback_split_script(idea, n_scenes)
+                                raise
                         last_err = f"{model}: пустой chat/completions"
                     else:
                         last_err = f"{model} chat: {await _read_error(resp)}"
@@ -317,7 +440,12 @@ async def grok_script(
                 content = "\n".join(chunks).strip()
                 if content:
                     log.info("Grok responses ok model=%s", model)
-                    return parse_script(content)
+                    try:
+                        return parse_script(content)
+                    except PipelineError:
+                        if user_script:
+                            return fallback_split_script(idea, n_scenes)
+                        raise
                 last_err = f"{model}: пустой responses"
                 break
             except PipelineError:
@@ -327,15 +455,23 @@ async def grok_script(
                 if attempt < tries - 1:
                     await sleep_backoff(attempt)
                     continue
-    raise PipelineError("Grok не смог написать сценарий.", last_err)
+    if user_script:
+        log.warning("Grok failed, split script locally: %s", last_err)
+        return fallback_split_script(idea, n_scenes)
+    raise PipelineError("Не получилось сочинить сценарий. Напиши идею другими словами.", last_err)
 
 
-async def eleven_tts(session: aiohttp.ClientSession, text: str, dest: Path) -> Path:
+async def eleven_tts(
+    session: aiohttp.ClientSession,
+    text: str,
+    dest: Path,
+    voice_id: str | None = None,
+) -> Path:
     if not config.ELEVENLABS_API_KEY:
-        raise PipelineError("Нет ELEVENLABS_API_KEY — озвучку сделать не могу.")
-    voice_id = config.ELEVENLABS_VOICE_ID
+        raise PipelineError("Голос сейчас недоступен. Попробуй ещё раз чуть позже.")
+    voice_id = voice_id or config.ELEVENLABS_VOICE_ID
     if not voice_id:
-        raise PipelineError("Не задан ELEVENLABS_VOICE_ID — для MVP нужен дефолтный голос.")
+        raise PipelineError("Не выбран голос. Нажми /start и выбери голос кнопкой.")
     url = ELEVEN_TTS_URL.format(voice_id=voice_id)
     params = {"output_format": "mp3_44100_128"}
     headers = {
@@ -436,8 +572,9 @@ async def _runway_poll(session: aiohttp.ClientSession, task_id: str) -> str:
                 return output
             raise PipelineError("Runway SUCCEEDED без URL в output[0].", _clip(raw, 240))
         if status_u in RUNWAY_DONE_FAIL:
-            reason = data.get("failure") or data.get("failureCode") or data.get("error") or raw
-            raise PipelineError("Runway не смог сгенерировать клип.", _clip(f"{status_u}: {reason}", 300))
+            failure_code = str(data.get("failureCode") or "")
+            reason = data.get("failure") or failure_code or data.get("error") or raw
+            raise runway_fail_error(failure_code, _clip(f"{status_u}: {failure_code} {reason}", 300))
         await asyncio.sleep(runway_poll_delay())
     raise PipelineError(
         "Runway слишком долго генерирует клип, остановил ожидание.",
@@ -467,10 +604,11 @@ async def _runway_submit(
                     await sleep_backoff(attempt)
                     continue
                 if resp.status >= 400:
-                    err = PipelineError(
-                        "Runway отклонил запрос на видео.",
-                        _clip(f"HTTP {resp.status}: {raw}"),
-                    )
+                    detail = _clip(f"HTTP {resp.status}: {raw}")
+                    if is_runway_safety_fail("", detail) or is_runway_person_moderation("", detail):
+                        err = runway_fail_error("", detail)
+                    else:
+                        err = PipelineError("Runway отклонил запрос на видео.", detail)
                     err.status = resp.status
                     raise err
                 data = json.loads(raw)
@@ -516,14 +654,28 @@ async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Pat
 
 
 async def _text_to_image_url(session: aiohttp.ClientSession, prompt: str, ratio: str) -> str:
-    """Запасной путь: кадр для gen4_turbo (только image-to-video)."""
+    """Общий still для цепочки I2V, если пользователь не прислал фото."""
     payload = {
         "model": "gen4_image_turbo",
         "promptText": runway_prompt_text(prompt),
         "ratio": {"720:1280": "1080:1920", "960:960": "1080:1080"}.get(ratio, "1920:1080"),
+        "contentModeration": runway_content_moderation(),
     }
     task_id = await _runway_submit(session, "/v1/text_to_image", payload)
     return await _runway_poll(session, task_id)
+
+
+def _clip_payload_base(model: str, visual: str, ratio: str, seconds: int, seed: int | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "model": model,
+        "promptText": visual,
+        "ratio": ratio,
+        "duration": seconds,
+        "contentModeration": runway_content_moderation(),
+    }
+    if seed is not None:
+        payload["seed"] = int(seed) & 0xFFFFFFFF
+    return payload
 
 
 async def runway_clip(
@@ -532,56 +684,120 @@ async def runway_clip(
     seconds: int,
     dest: Path,
     ratio: str | None = None,
+    prompt_image: str | None = None,
+    clip_index: int = 1,
+    clip_total: int = 1,
+    seed: int | None = None,
 ) -> Path:
     if not config.RUNWAY_API_KEY:
-        raise PipelineError("Нет RUNWAY_API_KEY — видео не собрать.")
-    seconds = runway_duration(seconds)
+        raise PipelineError("Камера сейчас недоступна. Попробуй ещё раз чуть позже.")
+    # gen4.5 image_to_video: на практике 5 или 10; API допускает integer 2–10.
+    seconds = 10 if int(seconds) >= 8 else 5
     visual = runway_prompt_text(prompt)
-    ratio = ratio or config.RUNWAY_RATIO or "720:1280"
+    ratio = ratio or "720:1280"
+    if ratio not in RATIO_PRESETS.values():
+        ratio = "720:1280"
     model = config.RUNWAY_MODEL or "gen4.5"
-    t2v_ok = model in RUNWAY_T2V_MODELS
+    i2v_model = model if model in ("gen4.5", "gen4_turbo", "seedance2", "veo3.1", "veo3.1_fast") else "gen4.5"
     last_fail: PipelineError | None = None
+    label = f"клип {clip_index} из {clip_total}"
+
+    async def _i2v(image: str, mdl: str) -> Path:
+        payload = _clip_payload_base(mdl, visual, ratio, seconds, seed)
+        payload["promptImage"] = image
+        task_id = await _runway_submit(session, "/v1/image_to_video", payload)
+        video_url = await _runway_poll(session, task_id)
+        return await _download(session, video_url, dest)
+
     for round_i in range(2):
         try:
-            if t2v_ok:
-                t2v_payload = {
-                    "model": model,
-                    "promptText": visual,
-                    "ratio": ratio,
-                    "duration": seconds,
-                }
+            if prompt_image:
+                try:
+                    return await _i2v(prompt_image, i2v_model)
+                except PipelineError as exc:
+                    if getattr(exc, "code", "").startswith("moderation"):
+                        raise
+                    status = getattr(exc, "status", None)
+                    if status in (400, 404, 422) and i2v_model != "gen4_turbo":
+                        log.warning("I2V %s failed, try gen4_turbo: %s", i2v_model, exc.detail)
+                        return await _i2v(prompt_image, "gen4_turbo")
+                    raise
+            if model in RUNWAY_T2V_MODELS:
+                t2v_payload = _clip_payload_base(model, visual, ratio, seconds, seed)
                 try:
                     task_id = await _runway_submit(session, "/v1/text_to_video", t2v_payload)
                     video_url = await _runway_poll(session, task_id)
                     return await _download(session, video_url, dest)
                 except PipelineError as exc:
+                    if getattr(exc, "code", "").startswith("moderation"):
+                        raise
                     status = getattr(exc, "status", None)
                     if status not in (400, 404, 422):
                         raise
-                    log.warning("T2V rejected (%s), fallback image+gen4_turbo: %s", status, exc.detail)
-            else:
-                log.info("Модель %s не T2V — сразу кадр+I2V", model)
-            image_url = await _text_to_image_url(session, visual, ratio)
-            i2v_payload = {
-                "model": "gen4_turbo",
-                "promptText": visual,
-                "promptImage": image_url,
-                "ratio": ratio,
-                "duration": seconds,
-            }
-            task_id = await _runway_submit(session, "/v1/image_to_video", i2v_payload)
-            video_url = await _runway_poll(session, task_id)
-            return await _download(session, video_url, dest)
+                    log.warning("T2V rejected (%s), fallback still+I2V: %s", status, exc.detail)
+            still = await _text_to_image_url(session, visual, ratio)
+            return await _i2v(still, "gen4_turbo")
         except PipelineError as exc:
             last_fail = exc
+            if getattr(exc, "code", "").startswith("moderation"):
+                raise
             detail = (exc.detail or "").upper()
             retryable = "INTERNAL" in detail or "BAD_OUTPUT" in detail or "THROTTLED" in detail
             if round_i == 0 and retryable:
-                log.warning("Runway clip retry: %s", exc.detail)
+                log.warning("Runway %s retry: %s", label, exc.detail)
                 await sleep_backoff(1)
                 continue
-            raise
-    raise last_fail or PipelineError("Runway не смог сгенерировать клип.")
+            raise PipelineError(
+                f"🎥 Не получился {label}. Я остановился, чтобы не склеить кривой ролик. "
+                "Попробуй ещё раз или другое фото.",
+                exc.detail,
+                code=getattr(exc, "code", ""),
+            ) from exc
+    raise PipelineError(
+        f"🎥 Не получился {label}. Попробуй ещё раз.",
+        (last_fail.detail if last_fail else ""),
+    )
+
+
+async def file_to_data_uri(path: Path, dest_jpeg: Path | None = None) -> str:
+    """JPEG data URI для Runway promptImage (лимит ~5 МБ)."""
+    import base64
+
+    jpeg = dest_jpeg or path.with_suffix(".ref.jpg")
+    await _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(path),
+            "-vf",
+            "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            str(jpeg),
+        ]
+    )
+    raw = jpeg.read_bytes()
+    if len(raw) > 4_500_000:
+        await _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(jpeg),
+                "-q:v",
+                "8",
+                str(jpeg),
+            ]
+        )
+        raw = jpeg.read_bytes()
+    if len(raw) < 80:
+        raise PipelineError("Фото не прочиталось. Пришли другое изображение.")
+    if len(raw) > 5_000_000:
+        raise PipelineError("Фото слишком тяжёлое. Пришли файл поменьше.")
+    return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
 async def _run_ffmpeg(args: list[str]) -> None:
@@ -592,7 +808,7 @@ async def _run_ffmpeg(args: list[str]) -> None:
     )
     _out, err = await proc.communicate()
     if proc.returncode != 0:
-        raise PipelineError("ffmpeg не смог склеить ролик.", _clip(err.decode("utf-8", "replace"), 400))
+        raise PipelineError("Не получилось склеить ролик. Попробуй ещё раз.", _clip(err.decode("utf-8", "replace"), 400))
 
 
 async def media_duration(path: Path) -> float:
@@ -719,7 +935,7 @@ async def concat_mp4(clips: list[Path], dest: Path, width: int = 720, height: in
 
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
-        raise PipelineError("На сервере нет ffmpeg. Поставь: sudo apt-get install -y ffmpeg")
+        raise PipelineError("На сервере нет программы склейки видео (ffmpeg).")
 
 
 async def build_video(
@@ -729,41 +945,90 @@ async def build_video(
     *,
     ratio: str | None = None,
     style: str | None = None,
+    voice_id: str | None = None,
+    reference_image: Path | str | None = None,
+    user_script: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     ensure_ffmpeg()
     work_dir.mkdir(parents=True, exist_ok=True)
-    ratio = ratio or config.RUNWAY_RATIO or "720:1280"
+    ratio = ratio or "720:1280"
     style = style or config.DEFAULT_STYLE or "cinematic"
     width, height = ratio_wh(ratio)
+    n_scenes = target_scene_count(idea)
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        await _notify(progress, "Пишу сценарий через Grok…")
-        script = await grok_script(session, idea, style=style)
+        await _notify(progress, "✍️ Пишу сценарий…")
+        script = await grok_script(
+            session,
+            idea,
+            style=style,
+            n_scenes=n_scenes,
+            user_script=user_script,
+        )
         scenes = script["scenes"]
+        if len(scenes) > 6:
+            scenes = scenes[:6]
+            script["scenes"] = scenes
+        continuity = script.get("continuity") or ""
         script["ratio"] = ratio
         script["style"] = style
-        await _notify(
-            progress,
-            f"Сценарий «{script['title']}»: {len(scenes)} сцен. Делаю озвучку…",
-        )
+        total = len(scenes)
+
+        prompt_image: str | None = None
+        # Один и тот же promptImage на ВСЕ клипы — единственный штатный способ
+        # консистентности лица (отдельного character-consistency в API нет).
+        # TODO: last-frame chaining (последний кадр клипа N → promptImage клипа N+1).
+        job_seed = random.randint(0, 2_147_483_647)
+        if isinstance(reference_image, Path) and reference_image.exists():
+            await _notify(progress, "🖼️ Готовлю твоё фото как первый кадр для всех клипов…")
+            prompt_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
+        elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
+            prompt_image = reference_image
+        else:
+            await _notify(progress, "🖼️ Рисую общий первый кадр, чтобы лицо и место не прыгали…")
+            try:
+                still_url = await _text_to_image_url(
+                    session,
+                    compose_runway_prompt(continuity, "medium shot, looking into camera, still"),
+                    ratio,
+                )
+                still_path = work_dir / "bible_still.png"
+                await _download(session, still_url, still_path)
+                prompt_image = await file_to_data_uri(still_path, work_dir / "bible_ref.jpg")
+            except PipelineError as exc:
+                if getattr(exc, "code", "").startswith("moderation"):
+                    raise
+                log.warning("shared still failed, T2V with lock: %s", exc.detail)
+                prompt_image = None
+
         muxed: list[Path] = []
         for i, scene in enumerate(scenes):
-            await _notify(progress, f"Озвучка сцены {i + 1}/{len(scenes)}…")
-            audio = await eleven_tts(session, scene["narration"], work_dir / f"n{i}.mp3")
-            audio_sec = await media_duration(audio)
-            seconds = pick_clip_duration(audio_sec) if audio_sec else 10
-            seconds = runway_duration(seconds)
-            await _notify(
-                progress,
-                f"Runway: клип {i + 1}/{len(scenes)} (~{seconds} сек, {ratio})…",
-            )
-            clip = await runway_clip(
+            n = i + 1
+            await _notify(progress, f"🎤 Записываю голос ({n} из {total})…")
+            audio = await eleven_tts(
                 session,
-                scene["visual_prompt"],
-                seconds,
-                work_dir / f"c{i}.mp4",
-                ratio=ratio,
+                scene["narration"],
+                work_dir / f"n{i}.mp3",
+                voice_id=voice_id,
             )
+            prompt = compose_runway_prompt(continuity, scene["visual_prompt"])
+            audio_sec = await media_duration(audio)
+            clip_sec = pick_clip_duration(audio_sec or 10.0)
+            await _notify(progress, f"🎥 Снимаю клип {n} из {total}…")
+            try:
+                clip = await runway_clip(
+                    session,
+                    prompt,
+                    clip_sec,
+                    work_dir / f"c{i}.mp4",
+                    ratio=ratio,
+                    prompt_image=prompt_image,
+                    clip_index=n,
+                    clip_total=total,
+                    seed=job_seed,
+                )
+            except PipelineError:
+                raise
             mixed = await mux_scene(
                 clip,
                 audio,
@@ -773,6 +1038,7 @@ async def build_video(
                 height=height,
             )
             muxed.append(mixed)
-        await _notify(progress, "Склеиваю клипы в один ролик…")
+        await _notify(progress, "✂️ Монтирую ролик…")
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)
+        await _notify(progress, "✅ Готово!")
         return out, script

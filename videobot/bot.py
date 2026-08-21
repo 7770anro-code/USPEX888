@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telegram-бот: идея текстом -> готовое видео 20–30 сек."""
+"""Telegram-бот: идея или свой сценарий → вертикальный ролик 30–60 сек."""
 
 from __future__ import annotations
 
@@ -7,28 +7,25 @@ import asyncio
 import logging
 import shutil
 import time
-from collections import defaultdict
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    PhotoSize,
 )
 
 import config
-from pipeline import (
-    RATIO_PRESETS,
-    STYLES,
-    PipelineError,
-    build_video,
-    ensure_ffmpeg,
-    format_script,
-)
+from pipeline import PipelineError, build_video, ensure_ffmpeg, format_script
+from voices import VOICES, voice_by_index, voice_label
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,85 +34,253 @@ logging.basicConfig(
 log = logging.getLogger("videobot")
 
 BUSY = asyncio.Lock()
-SETTINGS: dict[int, dict[str, str]] = defaultdict(
-    lambda: {
-        "ratio": config.RUNWAY_RATIO or RATIO_PRESETS["9:16"],
-        "style": config.DEFAULT_STYLE or "cinematic",
-    }
+TIKTOK_RATIO = "720:1280"
+
+HOW_IT_WORKS = (
+    "Как это работает — совсем просто:\n\n"
+    "1) Ты пишешь идею или готовый текст.\n"
+    "2) Можно прислать своё фото — тогда лицо в ролике будет как на фото.\n"
+    "3) Выбираешь голос кнопкой.\n"
+    "4) Я снимаю несколько коротких клипов 9:16 и склеиваю в ролик 30–60 секунд.\n\n"
+    "⚠️ Фото живого человека — только своё или с согласия человека. "
+    "Без кнопки «подтверждаю» я видео не начну."
 )
 
-HELP = (
-    "Пришли идею одним сообщением — соберу ролик ~20–30 сек (2–3 сцены по 10 сек).\n"
-    "Grok пишет сценарий, ElevenLabs озвучивает, Runway снимает, ffmpeg склеивает и жжёт субтитры.\n"
-    "Команды: /ratio — 9:16 или 16:9, /style — cinematic / ad / cartoon.\n"
-    "Одно видео за раз, обычно несколько минут."
-)
+
+class Flow(StatesGroup):
+    quick_idea = State()
+    custom_script = State()
+    custom_photo = State()
+    custom_consent = State()
+    custom_voice = State()
 
 
-def _chat_settings(chat_id: int) -> dict[str, str]:
-    return SETTINGS[chat_id]
-
-
-def settings_kb(chat_id: int) -> InlineKeyboardMarkup:
-    s = _chat_settings(chat_id)
-    ratio_label = next((k for k, v in RATIO_PRESETS.items() if v == s["ratio"]), "9:16")
-    style = s["style"]
-
-    def mark(current: str, value: str, label: str) -> str:
-        return f"• {label}" if current == value else label
-
+def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text=mark(ratio_label, "9:16", "9:16"), callback_data="ratio:9:16"),
-                InlineKeyboardButton(text=mark(ratio_label, "16:9", "16:9"), callback_data="ratio:16:9"),
-            ],
-            [
-                InlineKeyboardButton(text=mark(style, "cinematic", "кино"), callback_data="style:cinematic"),
-                InlineKeyboardButton(text=mark(style, "ad", "реклама"), callback_data="style:ad"),
-                InlineKeyboardButton(text=mark(style, "cartoon", "мульт"), callback_data="style:cartoon"),
-            ],
+            [InlineKeyboardButton(text="⚡️ Быстрая идея (текстом)", callback_data="menu:quick")],
+            [InlineKeyboardButton(text="🎬 Своё фото + текст + голос", callback_data="menu:custom")],
+            [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
         ]
     )
 
 
-async def cmd_start(message: Message) -> None:
-    await message.answer("VideoBot. " + HELP, reply_markup=settings_kb(message.chat.id))
+def consent_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтверждаю: моё фото / есть согласие",
+                    callback_data="consent:yes",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="consent:no")],
+        ]
+    )
 
 
-async def cmd_help(message: Message) -> None:
-    await message.answer(HELP, reply_markup=settings_kb(message.chat.id))
+def photo_skip_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Пропустить фото", callback_data="photo:skip")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
 
 
-async def cmd_ratio(message: Message) -> None:
-    await message.answer("Формат кадра:", reply_markup=settings_kb(message.chat.id))
+def voice_kb(page: int = 0) -> InlineKeyboardMarkup:
+    per = 7
+    start = page * per
+    chunk = VOICES[start : start + per]
+    rows = []
+    for i, v in enumerate(chunk):
+        idx = start + i
+        rows.append(
+            [InlineKeyboardButton(text=voice_label(v), callback_data=f"voice:{idx}")]
+        )
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Ещё голоса", callback_data=f"vpage:{page - 1}"))
+    if start + per < len(VOICES):
+        nav.append(InlineKeyboardButton(text="Ещё голоса ➡️", callback_data=f"vpage:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def cmd_style(message: Message) -> None:
-    await message.answer("Стиль ролика:", reply_markup=settings_kb(message.chat.id))
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Привет! Я собираю вертикальное видео для TikTok.\n"
+        "Нажми кнопку — я подскажу каждый шаг.",
+        reply_markup=main_menu(),
+    )
 
 
-async def on_callback(query: CallbackQuery) -> None:
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(HOW_IT_WORKS, reply_markup=main_menu())
+
+
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Ок, отменил. Можно начать заново.", reply_markup=main_menu())
+
+
+async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
     data = query.data or ""
-    chat_id = query.message.chat.id if query.message else 0
-    s = _chat_settings(chat_id)
-    if data.startswith("ratio:"):
-        key = data.split(":", 1)[1]
-        if key in RATIO_PRESETS:
-            s["ratio"] = RATIO_PRESETS[key]
-    elif data.startswith("style:"):
-        key = data.split(":", 1)[1]
-        if key in STYLES:
-            s["style"] = key
     try:
-        await query.answer("Ок")
+        await query.answer()
     except Exception:
         pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    if data == "menu:home":
+        await state.clear()
+        await msg.answer("Главное меню:", reply_markup=main_menu())
+        return
+    if data == "menu:help":
+        await msg.answer(HOW_IT_WORKS, reply_markup=main_menu())
+        return
+    if data == "menu:quick":
+        await state.set_state(Flow.quick_idea)
+        await msg.answer(
+            "⚡️ Напиши идею одним сообщением.\n"
+            "Например: «утренний кофе на балконе, город просыпается».\n"
+            "Я сам придумаю сцены, голос по умолчанию — Сара."
+        )
+        return
+    if data == "menu:custom":
+        await state.set_state(Flow.custom_script)
+        await msg.answer(
+            "🎬 Пришли готовый текст ролика.\n"
+            "Это слова, которые зритель услышит. Можно абзацами — я разрежу на клипы."
+        )
+
+
+async def on_quick_idea(message: Message, state: FSMContext) -> None:
+    idea = (message.text or "").strip()
+    if len(idea) < 8:
+        await message.answer("Напиши чуть больше — хотя бы одно предложение.")
+        return
+    await state.clear()
+    await _run_job(
+        message,
+        idea=idea,
+        user_script=False,
+        voice_id=config.ELEVENLABS_VOICE_ID,
+        photo_file_id=None,
+        bot=message.bot,
+    )
+
+
+async def on_custom_script(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if len(text) < 20:
+        await message.answer("Текста маловато. Напиши речь на 20–40 секунд своими словами.")
+        return
+    await state.update_data(script=text)
+    await state.set_state(Flow.custom_photo)
+    await message.answer(
+        "Теперь фото — если хочешь своё лицо в ролике, пришли его сюда.\n"
+        "Это будет первый кадр каждого клипа, чтобы лицо не прыгало.\n"
+        "Если фото не нужно — нажми «Пропустить».",
+        reply_markup=photo_skip_kb(),
+    )
+
+
+async def on_custom_photo(message: Message, state: FSMContext) -> None:
+    photos = message.photo or []
+    if not photos:
+        await message.answer("Пришли именно фото (картинкой), или нажми «Пропустить».", reply_markup=photo_skip_kb())
+        return
+    best: PhotoSize = photos[-1]
+    await state.update_data(photo_file_id=best.file_id)
+    await state.set_state(Flow.custom_consent)
+    await message.answer(
+        "Если на фото живой узнаваемый человек, мне нужно твоё явное согласие.\n\n"
+        "Подтверждаю, что это моё фото или у меня есть согласие человека.\n"
+        "Без этой кнопки я ролик не сниму.",
+        reply_markup=consent_kb(),
+    )
+
+
+async def on_photo_skip(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    await state.update_data(photo_file_id=None)
+    await state.set_state(Flow.custom_voice)
+    if query.message:
+        await query.message.answer("Выбери голос:", reply_markup=voice_kb(0))
+
+
+async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    if (query.data or "") == "consent:no":
+        await state.clear()
+        if query.message:
+            await query.message.answer("Ок, без фото не продолжаю. Можно начать заново.", reply_markup=main_menu())
+        return
+    await state.set_state(Flow.custom_voice)
+    if query.message:
+        await query.message.answer(
+            "Спасибо. Теперь выбери голос:",
+            reply_markup=voice_kb(0),
+        )
+
+
+async def on_voice_page(query: CallbackQuery) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    page = int((query.data or "vpage:0").split(":")[1])
     if query.message:
         try:
-            await query.message.edit_reply_markup(reply_markup=settings_kb(chat_id))
+            await query.message.edit_reply_markup(reply_markup=voice_kb(page))
         except Exception:
-            pass
+            await query.message.answer("Выбери голос:", reply_markup=voice_kb(page))
+
+
+async def on_voice_pick(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer("Голос выбран")
+    except Exception:
+        pass
+    idx = int((query.data or "voice:1").split(":")[1])
+    voice = voice_by_index(idx)
+    data = await state.get_data()
+    script = (data.get("script") or "").strip()
+    photo_file_id = data.get("photo_file_id")
+    await state.clear()
+    msg = query.message
+    if not isinstance(msg, Message) or not script:
+        if msg:
+            await msg.answer("Что-то потерялось. Нажми /start и начнём сначала.", reply_markup=main_menu())
+        return
+    await _run_job(
+        msg,
+        idea=script,
+        user_script=True,
+        voice_id=voice["id"],
+        photo_file_id=photo_file_id,
+        bot=msg.bot,
+        voice_name=voice["name"],
+    )
+
+
+async def _download_photo(bot: Bot, file_id: str, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    file = await bot.get_file(file_id)
+    await bot.download_file(file.file_path, destination=dest)
+    return dest
 
 
 async def _send_video(message: Message, path: Path, caption: str) -> None:
@@ -133,64 +298,77 @@ async def _send_video(message: Message, path: Path, caption: str) -> None:
         return
     except Exception as exc:
         last = exc
-    raise PipelineError("Не смог отправить mp4 в Telegram.", str(last or ""))
+    raise PipelineError("Не смог отправить готовое видео. Нажми /start и попробуй ещё раз.", str(last or ""))
 
 
-async def on_text(message: Message) -> None:
-    idea = (message.text or "").strip()
-    if not idea or idea.startswith("/"):
-        return
-    if len(idea) < 8:
-        await message.answer("Идея слишком короткая. Напиши 1–3 предложения.")
-        return
+async def _run_job(
+    message: Message,
+    *,
+    idea: str,
+    user_script: bool,
+    voice_id: str | None,
+    photo_file_id: str | None,
+    bot: Bot,
+    voice_name: str = "Сара",
+) -> None:
     if BUSY.locked():
-        await message.answer("Уже собираю другое видео. Напиши ещё раз, когда пришлю готовый ролик.")
+        await message.answer(
+            "⏳ Я уже снимаю другой ролик. Напиши ещё раз, когда пришлю готовое видео.",
+            reply_markup=main_menu(),
+        )
         return
 
-    s = _chat_settings(message.chat.id)
-    async with BUSY:
-        status = await message.answer(
-            f"Принял идею. Формат {s['ratio']}, стиль {s['style']}. Начинаю…"
-        )
+    status = await message.answer("🚀 Поехали. Это займёт несколько минут — я буду писать, что сейчас делаю.")
 
-        async def progress(text: str) -> None:
-            try:
-                await status.edit_text(text)
-            except Exception:
-                try:
-                    await message.answer(text)
-                except Exception:
-                    log.warning("не смог обновить статус: %s", text)
-
-        work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
-        ok = False
+    async def progress(text: str) -> None:
         try:
+            await status.edit_text(text)
+        except Exception:
+            try:
+                await message.answer(text)
+            except Exception:
+                log.warning("status: %s", text)
+
+    work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
+    ok = False
+    async with BUSY:
+        try:
+            photo_path = None
+            if photo_file_id:
+                photo_path = work / "user_photo.jpg"
+                work.mkdir(parents=True, exist_ok=True)
+                await _download_photo(bot, photo_file_id, photo_path)
             video_path, script = await build_video(
                 idea,
                 work,
                 progress,
-                ratio=s["ratio"],
-                style=s["style"],
+                ratio=TIKTOK_RATIO,
+                style="cinematic",
+                voice_id=voice_id,
+                reference_image=photo_path,
+                user_script=user_script,
             )
             preview = format_script(script)
             try:
                 await message.answer(preview[:3500])
             except Exception:
                 pass
-            caption = script.get("title") or "Готово"
+            caption = (script.get("title") or "Готово") + f" · голос {voice_name} · 9:16"
             await _send_video(message, video_path, caption)
             try:
-                await status.edit_text("Готово — видео выше.")
+                await status.edit_text("✅ Готово — видео выше.")
             except Exception:
                 pass
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
-            extra = f"\n\nДетали: {exc.detail}" if exc.detail and exc.detail != exc.user_message else ""
-            await message.answer(exc.user_message + extra)
-        except Exception as exc:
+            await message.answer(exc.user_message, reply_markup=main_menu())
+        except Exception:
             log.exception("unhandled")
-            await message.answer(f"Сборка упала: {type(exc).__name__}: {exc}")
+            await message.answer(
+                "Упс, что-то сломалось на моей стороне. Нажми /start и попробуй ещё раз.",
+                reply_markup=main_menu(),
+            )
         finally:
             if ok or not config.KEEP_FAILED_DIR:
                 shutil.rmtree(work, ignore_errors=True)
@@ -198,8 +376,23 @@ async def on_text(message: Message) -> None:
                 log.warning("оставил рабочие файлы: %s", work)
 
 
-async def on_other(message: Message) -> None:
-    await message.answer("Нужен текст идеи, не файл. Напиши сюжет своими словами.")
+async def on_plain_text(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    if current:
+        return
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        await message.answer("Нажми кнопку в меню — так проще.", reply_markup=main_menu())
+        return
+    await message.answer("Выбери, как снимаем:", reply_markup=main_menu())
+
+
+async def on_other(message: Message, state: FSMContext) -> None:
+    current = await state.get_state()
+    if current == Flow.custom_photo.state:
+        await on_custom_photo(message, state)
+        return
+    await message.answer("Нажми кнопку в меню или пришли текст, когда я попрошу.", reply_markup=main_menu())
 
 
 async def main() -> None:
@@ -215,13 +408,19 @@ async def main() -> None:
         raise SystemExit(exc.user_message) from exc
     Path(config.WORK_DIR).mkdir(parents=True, exist_ok=True)
     bot = Bot(token=config.VIDEOBOT_TELEGRAM_TOKEN)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_help, Command("help"))
-    dp.message.register(cmd_ratio, Command("ratio"))
-    dp.message.register(cmd_style, Command("style"))
-    dp.callback_query.register(on_callback)
-    dp.message.register(on_text, F.text)
+    dp.message.register(cmd_cancel, Command("cancel"))
+    dp.callback_query.register(on_menu, F.data.startswith("menu:"))
+    dp.callback_query.register(on_photo_skip, F.data == "photo:skip")
+    dp.callback_query.register(on_consent, F.data.startswith("consent:"))
+    dp.callback_query.register(on_voice_page, F.data.startswith("vpage:"))
+    dp.callback_query.register(on_voice_pick, F.data.startswith("voice:"))
+    dp.message.register(on_quick_idea, Flow.quick_idea, F.text)
+    dp.message.register(on_custom_script, Flow.custom_script, F.text)
+    dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
+    dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
     log.info("VideoBot polling start")
     await dp.start_polling(bot)
