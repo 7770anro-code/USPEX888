@@ -35,6 +35,7 @@ from uspex_core.modes import (
     SIGNAL_WINDOWS as CORE_SIGNAL_WINDOWS,
     PROFILES as CORE_PROFILES,
     COUNCIL_BUDGET_SEC, CURSOR_VOTE_TIMEOUT_SEC, GROK_VOTE_TIMEOUT_SEC,
+    CURSOR_SPAWN_TIMEOUT_SEC, COUNCIL_CANCEL_SETTLE_SEC,
     TP1_CLOSE_FRACTION as CORE_TP1_FRAC, assert_mode_monotonic,
 )
 from uspex_core.reconcile import evaluate_exchange_absence, classify_restart_positions
@@ -46,7 +47,8 @@ from uspex_core.ai_context import AiContextCache, AiContext
 from uspex_core.entry_window import classify_entry_window
 from uspex_core.latency_decay import write_latency_decay_report
 from uspex_core.fair_value import VenueQuote, robust_fair_value
-from uspex_core.net_edge import estimate_net_edge, executable_price as exec_px
+from uspex_core.net_edge import estimate_net_edge, executable_price as exec_px, net_edge_reject_record
+from uspex_core.task_guard import spawn_exec_with_timeout, settle_cancelled_tasks, vote_from_task
 
 def _clean_env_secret(name):
     # Windows/Notepad/copy-paste can inject BOM, CR/LF, NBSP, zero-width chars,
@@ -2672,7 +2674,7 @@ def candidate(sym,prof,exchange_pref,use_news=True):
         min_net_bps=2.0 if prof=="easy" else (3.0 if prof in ("medium","ai") else 4.0),
     )
     if not net.ok and fv.edge_bps is not None:
-        return None
+        return net_edge_reject_record(net, side=side, score=score, edge_bps=fv.edge_bps)
 
     residual=gap if fv.edge_bps is None else max(gap, float(fv.edge_bps)/100.0)
     return {
@@ -3734,6 +3736,7 @@ def finish_ai_council_memory(t,result,net):
 async def ask_cursor_vote_raw(prompt, timeout_sec=None):
     """Short council vote call — no chat history, hard timeout, fail-closed."""
     timeout_sec=float(timeout_sec if timeout_sec is not None else CURSOR_VOTE_TIMEOUT_SEC)
+    spawn_timeout=float(os.getenv("CURSOR_SPAWN_TIMEOUT_SEC", str(CURSOR_SPAWN_TIMEOUT_SEC)) or CURSOR_SPAWN_TIMEOUT_SEC)
     if not CURSOR_API_KEY:
         return timeout_vote("Cursor", 10.0) | {"reason":"CURSOR_API_KEY missing"}
     agent=_cursor_bin()
@@ -3745,15 +3748,22 @@ async def ask_cursor_vote_raw(prompt, timeout_sec=None):
     t0=now()
     # Serialize CLI votes: parallel cold-starts thrash the agent and blow the council budget.
     async with CURSOR_VOTE_LOCK:
+        proc=None
         try:
             # --trust required on VPS non-interactive cwd; without it agent exits with workspace prompt.
             args=[agent,"-p","--trust","--mode=ask","--output-format","text"]
             if CURSOR_MODEL and CURSOR_MODEL.lower() not in ("auto","default"):
                 args += ["--model",CURSOR_MODEL]
             args.append(full)
-            proc=await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
+            proc, spawn_err = await spawn_exec_with_timeout(
+                args, timeout=spawn_timeout, env=env,
                 cwd="/opt/uspex" if os.path.isdir("/opt/uspex") else None)
+            if spawn_err or proc is None:
+                FUNNEL.cursor.record(spawn_timeout, True)
+                print("CURSOR_CONNECT_TIMEOUT", f"spawn>{spawn_timeout:.1f}s")
+                vote=timeout_vote("Cursor", 10.0, reason=f"CURSOR_CONNECT_TIMEOUT | spawn exceeded {spawn_timeout:.1f}s")
+                vote["journal_code"]=JournalCode.CURSOR_CONNECT_TIMEOUT
+                return vote
             stdout,stderr=await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
             elapsed=now()-t0; FUNNEL.cursor.record(elapsed, False)
             raw=stdout.decode("utf-8","replace").strip()
@@ -3767,10 +3777,17 @@ async def ask_cursor_vote_raw(prompt, timeout_sec=None):
                 return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
                         "reason":"Cursor invalid JSON: "+raw.replace("\n"," ")[:120],"timeout":False}
         except asyncio.TimeoutError:
-            try: proc.kill()
-            except Exception: pass
+            try:
+                if proc is not None:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except Exception:
+                pass
             FUNNEL.cursor.record(timeout_sec, True)
-            return timeout_vote("Cursor", 10.0)
+            print("CURSOR_READ_TIMEOUT", f"vote>{timeout_sec:.1f}s")
+            vote=timeout_vote("Cursor", 10.0, reason=f"CURSOR_READ_TIMEOUT | vote exceeded {timeout_sec:.1f}s")
+            vote["journal_code"]=JournalCode.CURSOR_READ_TIMEOUT
+            return vote
         except Exception as e:
             FUNNEL.cursor.record(max(0.0,now()-t0), False)
             return {"ok":False,"decision":"REJECT","confidence":0,"leverage":10,"flags":["API"],
@@ -3930,6 +3947,15 @@ async def scanner(s):
                             if (cid,sym) in open_trades or now()-last_signal[(cid,sym)]<COOLDOWN: continue
                             sig=candidate(sym,prof,signal_ex_pref,use_news)
                             if not sig: continue
+                            if sig.get("reject"):
+                                last_signal[(cid,sym)]=now()
+                                code=str(sig.get("reject") or JournalCode.NET_EDGE_REJECT)
+                                detail=str(sig.get("reject_detail") or "")
+                                sm["last_event"]=f"{code}: {detail[:80]}"
+                                fn=FUNNEL.funnel(cid); fn.bump("net_edge_reject"); fn.last_event=sm["last_event"]
+                                log_trade_event(cid,code,detail,value=sig.get("net_edge_bps"),sym=sym,profile=prof)
+                                print(code,sym,detail[:200])
+                                continue
                             sm["candidates"]+=1; FUNNEL.funnel(cid).bump("candidates"); sm["last_candidate_ts"]=now(); sm["last_candidate"]=f"{sym} {sig.get('side','')} {float(sig.get('score',0)):.0f}"; sm["last_event"]="candidate -> quality gate"
                             FUNNEL.funnel(cid).last_candidate=sm["last_candidate"]; FUNNEL.funnel(cid).last_candidate_ts=sm["last_candidate_ts"]
                             # Layer B trigger + candidate coalescing (avoid multi-Council on same impulse)
@@ -4008,19 +4034,31 @@ async def scanner(s):
                                         timeout=COUNCIL_BUDGET_SEC,
                                         return_when=asyncio.ALL_COMPLETED,
                                     )
-                                    for p in pending:
-                                        p.cancel()
-                                        try: await p
-                                        except Exception: pass
                                     if pending:
+                                        settle=await settle_cancelled_tasks(pending, timeout=COUNCIL_CANCEL_SETTLE_SEC)
                                         FUNNEL.council.record(COUNCIL_BUDGET_SEC, True)
-                                        cursor_vote = cursor_task.result() if cursor_task in done and not cursor_task.cancelled() else timeout_vote("Cursor", lev)
-                                        grok_vote = grok_task.result() if grok_task in done and not grok_task.cancelled() else timeout_vote("Grok", lev)
+                                        cursor_vote = vote_from_task(cursor_task, timeout_vote("Cursor", lev))
+                                        grok_vote = vote_from_task(grok_task, timeout_vote("Grok", lev))
                                         if cursor_task in pending: fn.bump("cursor_timeout"); log_trade_event(cid,JournalCode.COUNCIL_DEADLINE,"cursor cancelled by budget",sym=sym,profile=prof)
                                         if grok_task in pending: fn.bump("grok_timeout"); log_trade_event(cid,JournalCode.COUNCIL_DEADLINE,"grok cancelled by budget",sym=sym,profile=prof)
+                                        if settle.cancelled:
+                                            fn.bump("council_task_cancelled")
+                                            log_trade_event(cid,JournalCode.COUNCIL_TASK_CANCELLED,
+                                                f"cancelled={settle.cancelled} notes={','.join(settle.notes[:6])}",sym=sym,profile=prof)
+                                            print("COUNCIL_TASK_CANCELLED",sym,settle.cancelled,settle.notes[:6])
+                                        if settle.hung:
+                                            fn.bump("council_task_hung")
+                                            log_trade_event(cid,JournalCode.COUNCIL_TASK_HUNG,
+                                                f"hung={settle.hung} after cancel settle {COUNCIL_CANCEL_SETTLE_SEC:.1f}s",sym=sym,profile=prof)
+                                            print("COUNCIL_TASK_HUNG",sym,settle.hung)
                                     else:
-                                        cursor_vote=cursor_task.result(); grok_vote=grok_task.result()
+                                        cursor_vote=vote_from_task(cursor_task, timeout_vote("Cursor", lev))
+                                        grok_vote=vote_from_task(grok_task, timeout_vote("Grok", lev))
                                         FUNNEL.council.record(now()-council_t0, False)
+                                except asyncio.CancelledError:
+                                    log_trade_event(cid,JournalCode.COUNCIL_TASK_CANCELLED,"scanner CancelledError during council wait",sym=sym,profile=prof)
+                                    print("COUNCIL_SCANNER_CANCELLED",sym)
+                                    raise
                                 except Exception as e:
                                     FUNNEL.council.record(COUNCIL_BUDGET_SEC, True)
                                     cursor_vote=timeout_vote("Cursor", lev); grok_vote=timeout_vote("Grok", lev)
@@ -4031,7 +4069,10 @@ async def scanner(s):
                                 trace.mark("cursor_done"); trace.mark("grok_done"); trace.mark("council_done")
                                 COALESCER.mark_council_done(cid,sym,sig['side'])
                                 if (cursor_vote or {}).get("timeout"):
-                                    fn.bump("cursor_timeout"); log_trade_event(cid,JournalCode.AI_TIMEOUT_CURSOR,(cursor_vote or {}).get("reason",""),sym=sym,profile=prof)
+                                    fn.bump("cursor_timeout")
+                                    code=(cursor_vote or {}).get("journal_code") or JournalCode.AI_TIMEOUT_CURSOR
+                                    if code==JournalCode.CURSOR_CONNECT_TIMEOUT: fn.bump("cursor_spawn_timeout")
+                                    log_trade_event(cid,code,(cursor_vote or {}).get("reason",""),sym=sym,profile=prof)
                                 if (grok_vote or {}).get("timeout"):
                                     fn.bump("grok_timeout"); log_trade_event(cid,JournalCode.AI_TIMEOUT_GROK,(grok_vote or {}).get("reason",""),sym=sym,profile=prof)
                                 allow,council_gate=ai_council_gate(prof,sig["score"],cursor_vote,grok_vote)

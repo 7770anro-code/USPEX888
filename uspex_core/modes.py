@@ -54,6 +54,10 @@ AUTO_COUNCIL_PROFILES = {"easy", "medium", "big", "ai"}
 COUNCIL_BUDGET_SEC = 12.0
 CURSOR_VOTE_TIMEOUT_SEC = 11.0
 GROK_VOTE_TIMEOUT_SEC = 5.0
+# Hard cap on Cursor CLI process start (create_subprocess_exec), separate from vote read timeout.
+CURSOR_SPAWN_TIMEOUT_SEC = 3.0
+# How long to wait after cancelling a council vote task before treating it as hung.
+COUNCIL_CANCEL_SETTLE_SEC = 2.0
 
 TP1_CLOSE_FRACTION = 0.22  # ~20–25%
 

@@ -1,3 +1,16 @@
+# CHANGELOG — USPEX V12.2.1 Scanner Hangfix
+
+## BUILD
+- `USPEX_PRO_DESK_V12_2_1_SCANNER_HANGFIX_2026-08-21`
+- Strategy: `V12_2_1_SCANNER_HANGFIX`
+- Prompt: `P12_2_FAST_CONFIRM_GROK_FAST`
+- Config schema: `C3_INSTITUTIONAL_V1`
+
+## Changes
+- Journal `NET_EDGE_REJECT` when `candidate()` drops a setup on net-edge (was silent `return None`).
+- Cursor CLI spawn has its own timeout (`CURSOR_SPAWN_TIMEOUT_SEC=3`), separate from vote read timeout (11s). Spawn miss → `CURSOR_CONNECT_TIMEOUT`; hung communicate → `CURSOR_READ_TIMEOUT`.
+- Council cancel path no longer `await`s cancelled tasks under `except Exception`. Uses `settle_cancelled_tasks` + `vote_from_task` so child `CancelledError` cannot kill the scanner. Logs `COUNCIL_TASK_CANCELLED` / `COUNCIL_TASK_HUNG`.
+
 # CHANGELOG — USPEX V12.2 Institutional Fast AI
 
 ## BUILD

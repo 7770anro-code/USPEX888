@@ -19,7 +19,7 @@ from uspex_core.coalesce import CandidateCoalescer
 from uspex_core.ai_context import AiContextCache, AiContext
 from uspex_core.entry_window import classify_entry_window
 from uspex_core.latency_decay import simulate_latency_decay, default_snapshots, write_latency_decay_report, LATENCY_STEPS_SEC
-from uspex_core.modes import COUNCIL_BUDGET_SEC, CURSOR_VOTE_TIMEOUT_SEC, GROK_VOTE_TIMEOUT_SEC
+from uspex_core.modes import COUNCIL_BUDGET_SEC, CURSOR_VOTE_TIMEOUT_SEC, GROK_VOTE_TIMEOUT_SEC, CURSOR_SPAWN_TIMEOUT_SEC
 from uspex_core.council import timeout_vote, council_gate
 from uspex_core.journal_codes import JournalCode
 
@@ -30,6 +30,7 @@ class TestLatencyArchitecture(unittest.TestCase):
         self.assertGreaterEqual(COUNCIL_BUDGET_SEC, 8.0)
         self.assertLessEqual(CURSOR_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
         self.assertLessEqual(GROK_VOTE_TIMEOUT_SEC, COUNCIL_BUDGET_SEC)
+        self.assertLess(CURSOR_SPAWN_TIMEOUT_SEC, CURSOR_VOTE_TIMEOUT_SEC)
 
     def test_signal_ttl_expired(self):
         d = evaluate_signal_ttl("medium", age_ms=12000, residual_edge=0.01, min_residual=0.03)

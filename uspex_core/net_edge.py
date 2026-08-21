@@ -40,6 +40,21 @@ def estimate_net_edge(
     )
 
 
+def net_edge_reject_record(net: NetEdgeResult, *, side: str, score: float, edge_bps: Optional[float] = None) -> dict:
+    """Structured reject for candidate() so the scanner can journal NET_EDGE_REJECT."""
+    return {
+        "reject": "NET_EDGE_REJECT",
+        "reject_detail": (
+            f"{net.reason} gross={net.gross_edge_bps:.1f}bps costs={net.expected_costs_bps:.1f} "
+            f"unc={net.uncertainty_bps:.1f} net={net.expected_net_edge_bps:.1f}bps"
+        ),
+        "side": side,
+        "score": float(score),
+        "net_edge_bps": net.expected_net_edge_bps,
+        "edge_bps": edge_bps,
+    }
+
+
 def executable_price(bid: Optional[float], ask: Optional[float], side: str) -> Optional[float]:
     """LONG enters at ask; SHORT at bid. Never use mid as executable reference."""
     s = str(side).upper()
