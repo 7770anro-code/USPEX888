@@ -87,6 +87,9 @@ async def on_other(message: Message) -> None:
 
 
 async def main() -> None:
+    if config.XAI_API_KEY_ERROR:
+        log.error("%s", config.XAI_API_KEY_ERROR)
+        raise SystemExit(config.XAI_API_KEY_ERROR)
     missing = config.missing_secrets()
     if missing:
         raise SystemExit("Нет секретов: " + ", ".join(missing))

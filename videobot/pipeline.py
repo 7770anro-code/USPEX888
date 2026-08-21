@@ -114,6 +114,8 @@ async def _read_error(resp: aiohttp.ClientResponse) -> str:
 
 
 async def grok_script(session: aiohttp.ClientSession, idea: str) -> dict[str, Any]:
+    if config.XAI_API_KEY_ERROR:
+        raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
     if not config.XAI_API_KEY_NEW:
         raise PipelineError("Нет XAI_API_KEY_NEW — сценарий собрать не могу.")
     messages = [

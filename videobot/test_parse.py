@@ -1,5 +1,6 @@
-"""Офлайн-проверка разбора сценария. Без сети и секретов."""
+"""Офлайн-проверка разбора сценария и unwrap Grok-ключа. Без сети."""
 
+from config import unwrap_xai_api_key
 from pipeline import parse_script, scene_durations
 
 
@@ -28,8 +29,41 @@ def test_visual_prompt_alias() -> None:
     assert data["scenes"][0]["visual_prompt"].startswith("A red")
 
 
+def test_unwrap_wrapped_key() -> None:
+    inner = "xai-" + ("a" * 80)
+    key, err = unwrap_xai_api_key("XAI_API_KEY=" + inner)
+    assert err == ""
+    assert key == inner
+    assert len(key) == 84
+    assert key.startswith("xai-")
+
+
+def test_unwrap_plain_key() -> None:
+    inner = "xai-" + ("b" * 80)
+    key, err = unwrap_xai_api_key(inner)
+    assert err == ""
+    assert key == inner
+
+
+def test_unwrap_rejects_bad_shape() -> None:
+    key, err = unwrap_xai_api_key("XAI_API_KEY=not-a-real-key")
+    assert key == ""
+    assert "длина" in err
+    assert "xai-" in err
+
+
+def test_unwrap_empty() -> None:
+    key, err = unwrap_xai_api_key("   ")
+    assert key == ""
+    assert "пустой" in err
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
     test_visual_prompt_alias()
+    test_unwrap_wrapped_key()
+    test_unwrap_plain_key()
+    test_unwrap_rejects_bad_shape()
+    test_unwrap_empty()
     print("ok")
