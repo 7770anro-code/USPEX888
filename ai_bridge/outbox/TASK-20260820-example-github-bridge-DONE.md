@@ -4,8 +4,8 @@ from: cursor
 to: human
 target: uspex
 status: done
-pr: 
-commit: 
+pr: https://github.com/7770anro-code/USPEX888/pull/1
+commit: 025eb2d 
 finished_utc: 2026-08-21T02:01:29Z
 ---
 
