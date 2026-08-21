@@ -20,8 +20,6 @@ VIDEOBOT_TELEGRAM_TOKEN=...
 
 ## Команды по SSH (один раз, после «ок»)
 
-## Команды по SSH (один раз, после «ок»)
-
 С ноутбука, из корня репозитория (ветка с папкой `videobot/`):
 
 ```bash
@@ -32,7 +30,7 @@ ssh cloud@217.28.140.122
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip ffmpeg
+sudo apt-get install -y python3 python3-venv python3-pip ffmpeg fonts-dejavu-core
 
 # отдельный пользователь, не uspex и не vector
 sudo useradd --system --home /opt/videobot --shell /usr/sbin/nologin videobot || true

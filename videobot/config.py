@@ -70,18 +70,22 @@ ELEVENLABS_API_KEY = _clean("ELEVENLABS_API_KEY")
 RUNWAY_API_KEY = _clean("RUNWAY_API_KEY")
 VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
 
-XAI_MODEL = _clean("XAI_MODEL") or "grok-4-1-fast-non-reasoning"
-XAI_FALLBACK_MODEL = _clean("XAI_FALLBACK_MODEL") or "grok-4.5"
+XAI_MODEL = _clean("XAI_MODEL") or "grok-4.5"
+XAI_FALLBACK_MODEL = _clean("XAI_FALLBACK_MODEL") or "grok-4-1-fast-non-reasoning"
 
-ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah, MVP без выбора голоса
+ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah
 ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
 
-# gen4.5 — text-to-video. gen4_turbo — только image-to-video, на T2V не отправляем.
+# gen4.5 — проверенный T2V. seedance2 можно включить через RUNWAY_MODEL.
 RUNWAY_MODEL = _clean("RUNWAY_MODEL") or "gen4.5"
-RUNWAY_RATIO = _clean("RUNWAY_RATIO") or "1280:720"
+RUNWAY_RATIO = _clean("RUNWAY_RATIO") or "720:1280"
 RUNWAY_VERSION = _clean("RUNWAY_VERSION") or "2024-11-06"
 RUNWAY_POLL_SEC = float(_clean("RUNWAY_POLL_SEC") or "5")
 RUNWAY_TIMEOUT_SEC = float(_clean("RUNWAY_TIMEOUT_SEC") or "720")
+HTTP_RETRIES = int(_clean("HTTP_RETRIES") or "4")
+KEEP_FAILED_DIR = (_clean("KEEP_FAILED_DIR") or "1").lower() in ("1", "true", "yes", "on")
+BURN_SUBTITLES = (_clean("BURN_SUBTITLES") or "1").lower() in ("1", "true", "yes", "on")
+DEFAULT_STYLE = _clean("DEFAULT_STYLE") or "cinematic"
 
 WORK_DIR = _clean("WORK_DIR") or "/tmp/videobot"
 

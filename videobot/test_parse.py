@@ -2,11 +2,15 @@
 
 from config import unwrap_xai_api_key
 from pipeline import (
+    format_script,
     parse_script,
+    pick_clip_duration,
+    ratio_wh,
     runway_duration,
     runway_poll_delay,
     runway_prompt_text,
     scene_durations,
+    wrap_caption,
 )
 
 
@@ -26,7 +30,7 @@ def test_fenced_and_extra() -> None:
     data = parse_script(raw)
     assert len(data["scenes"]) == 2
     assert scene_durations(2) == [10, 10]
-    assert scene_durations(3) == [5, 5, 5]
+    assert scene_durations(3) == [10, 10, 10]
 
 
 def test_visual_prompt_alias() -> None:
@@ -84,6 +88,26 @@ def test_runway_poll_delay_min() -> None:
         assert delay < 7.0
 
 
+def test_pick_clip_duration() -> None:
+    assert pick_clip_duration(3.0) == 5
+    assert pick_clip_duration(8.0) == 10
+
+
+def test_ratio_wh() -> None:
+    assert ratio_wh("720:1280") == (720, 1280)
+    assert ratio_wh("1280:720") == (1280, 720)
+
+
+def test_wrap_and_format() -> None:
+    wrapped = wrap_caption("один два три четыре пять шесть семь восемь девять десять", 12)
+    assert "\n" in wrapped
+    text = format_script(
+        {"title": "Тест", "scenes": [{"narration": "Привет мир", "visual_prompt": "x"}]}
+    )
+    assert "Тест" in text
+    assert "Привет мир" in text
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -95,4 +119,7 @@ if __name__ == "__main__":
     test_runway_duration_clamp()
     test_runway_prompt_limit()
     test_runway_poll_delay_min()
+    test_pick_clip_duration()
+    test_ratio_wh()
+    test_wrap_and_format()
     print("ok")
