@@ -88,6 +88,7 @@ BURN_SUBTITLES = (_clean("BURN_SUBTITLES") or "1").lower() in ("1", "true", "yes
 DEFAULT_STYLE = _clean("DEFAULT_STYLE") or "cinematic"
 
 WORK_DIR = _clean("WORK_DIR") or "/tmp/videobot"
+DATA_DIR = _clean("VIDEOBOT_DATA_DIR") or str(Path(__file__).resolve().parent / "data")
 
 
 def missing_secrets() -> list[str]:

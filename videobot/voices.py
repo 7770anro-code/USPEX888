@@ -30,9 +30,15 @@ VOICES: list[dict[str, str]] = [
 assert len(VOICES) == 21
 
 
-def voice_by_index(idx: int) -> dict[str, str]:
-    if 0 <= idx < len(VOICES):
-        return VOICES[idx]
+def catalog_for(extra: list[dict[str, str]] | None = None) -> list[dict[str, str]]:
+    extra = extra or []
+    return list(extra) + list(VOICES)
+
+
+def voice_by_index(idx: int, extra: list[dict[str, str]] | None = None) -> dict[str, str]:
+    catalog = catalog_for(extra)
+    if 0 <= idx < len(catalog):
+        return catalog[idx]
     return VOICES[1]  # Сара
 
 

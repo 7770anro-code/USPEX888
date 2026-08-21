@@ -35,7 +35,7 @@ from pipeline import (
     text_to_image_payload,
     wrap_caption,
 )
-from voices import VOICES, voice_by_index
+from voices import VOICES, catalog_for, voice_by_index
 
 
 def test_plain_json() -> None:
@@ -165,6 +165,10 @@ def test_voices_catalog() -> None:
     ids = [v["id"] for v in VOICES]
     assert len(set(ids)) == 21
     assert voice_by_index(1)["name"] == "Сара"
+    extra = [{"id": "custom-1", "name": "Мой", "tag": "клон"}]
+    assert catalog_for(extra)[0]["id"] == "custom-1"
+    assert voice_by_index(0, extra)["name"] == "Мой"
+    assert voice_by_index(1, extra)["name"] == "Ария"
     assert voice_by_index(99)["id"] == VOICES[1]["id"]
 
 
@@ -343,6 +347,46 @@ def test_last_frame_chains_with_user_photo() -> None:
     assert "No face, age, hair" in SCRIPT_SYSTEM or "без деталей лица" in SCRIPT_SYSTEM.lower() or "No face" in SCRIPT_SYSTEM
 
 
+def test_wave2_thin_api() -> None:
+    from bot import main_menu
+    from wave2 import (
+        ACT_CONSENT_MSG,
+        CLONE_CONSENT_MSG,
+        act_two_payload,
+        clear_user_voices,
+        extend_video_payload,
+        image_upscale_payload,
+        load_user_voices,
+        save_user_voice,
+        video_upscale_payload,
+        voice_design_payload,
+    )
+
+    labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
+    assert labels[0] == "⚡️ Видео за 1 клик"
+    assert labels[1] == "🎬 Своё фото + текст + голос"
+    assert "🧰 Ещё возможности" in labels
+    payload = voice_design_payload("спокойный низкий мужской голос, тёплый, спокойный темп")
+    assert payload["auto_generate_text"] is True
+    assert payload["model_id"] == "eleven_ttv_v3"
+    img = image_upscale_payload("data:image/jpeg;base64,xx")
+    assert img["model"] == "magnific_precision_upscaler_v2"
+    vid = video_upscale_payload("runway://clip")
+    assert vid["resolution"] == "2k"
+    act = act_two_payload("data:image/jpeg;base64,a", "runway://perf")
+    assert act["model"] == "act_two"
+    assert act["character"]["type"] == "image"
+    ext = extend_video_payload("runway://v", "")
+    assert ext["mode"] == "extend"
+    assert ext["promptText"]
+    assert "согласи" in CLONE_CONSENT_MSG.lower()
+    assert "согласи" in ACT_CONSENT_MSG.lower()
+    save_user_voice(0, {"id": "abc", "name": "t", "tag": "клон", "kind": "clone"})
+    assert load_user_voices(0)[0]["id"] == "abc"
+    clear_user_voices(0)
+    assert load_user_voices(0) == []
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -370,4 +414,5 @@ if __name__ == "__main__":
     test_camera_motion_soft()
     test_tiktok_upload_filename()
     test_last_frame_chains_with_user_photo()
+    test_wave2_thin_api()
     print("ok")
