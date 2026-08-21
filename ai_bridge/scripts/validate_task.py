@@ -2,6 +2,7 @@
 """Validate TASK markdown frontmatter. Exit 0=ok, 1=errors. No network/secrets."""
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -31,6 +32,19 @@ def parse(path: Path) -> tuple[dict, list[str]]:
         errs.append(f"{path.name}: target must be uspex|vector")
     if data.get("status") not in STATUSES:
         errs.append(f"{path.name}: bad status {data.get('status')}")
+    needs = (data.get("needs_browser") or "false").strip().lower()
+    if needs in ("1", "true", "yes", "on"):
+        raw_steps = (data.get("browser_steps_json") or "").strip()
+        if raw_steps and raw_steps not in ("[]", '""', "''"):
+            try:
+                steps = json.loads(raw_steps)
+                if not isinstance(steps, list):
+                    errs.append(f"{path.name}: browser_steps_json must be a JSON array")
+            except json.JSONDecodeError:
+                errs.append(f"{path.name}: browser_steps_json is not valid JSON")
+        goal = (data.get("browser_goal") or "").strip().strip('"').strip("'")
+        if not raw_steps and not goal:
+            errs.append(f"{path.name}: needs_browser requires browser_goal or browser_steps_json")
     if "SECRET" in text.upper() and re.search(r"(api[_-]?key|sk-|xai-|token\s*=)", text, re.I):
         # soft warning style hard fail if looks like a key assignment
         if re.search(r"(sk-[A-Za-z0-9_-]{20,}|xai-[A-Za-z0-9_-]{20,})", text):

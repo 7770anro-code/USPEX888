@@ -36,13 +36,29 @@ def main() -> int:
             claim = list(OUTBOX.glob(f"{tid}-CLAIM.md")) or list(OUTBOX.glob(f"{path.stem}-CLAIM.md"))
             if done:
                 continue
-            rows.append((tid, status, meta.get("target", "?"), meta.get("priority", "?"), "claimed" if claim else "free", path.name))
+            needs_browser = (meta.get("needs_browser") or "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            rows.append(
+                (
+                    tid,
+                    status,
+                    meta.get("target", "?"),
+                    meta.get("priority", "?"),
+                    "claimed" if claim else "free",
+                    "browser" if needs_browser else "-",
+                    path.name,
+                )
+            )
     if not rows:
         print("NO_PENDING")
         return 0
-    print(f"{'ID':<42} {'status':<8} {'target':<8} {'pri':<6} {'lock':<8} file")
+    print(f"{'ID':<42} {'status':<8} {'target':<8} {'pri':<6} {'lock':<8} {'nav':<8} file")
     for r in rows:
-        print(f"{r[0]:<42} {r[1]:<8} {r[2]:<8} {r[3]:<6} {r[4]:<8} {r[5]}")
+        print(f"{r[0]:<42} {r[1]:<8} {r[2]:<8} {r[3]:<6} {r[4]:<8} {r[5]:<8} {r[6]}")
     return 0
 
 

@@ -62,3 +62,18 @@ python3 ai_bridge/scripts/complete_task.py TASK-YYYYMMDD-HHMM-slug --summary "..
 ```
 
 Потом: `git add ai_bridge && git commit && git push`.
+
+## Browser tasks (Kernel)
+
+Если в frontmatter `needs_browser: true`:
+
+```bash
+# Secret KERNEL_API_KEY must already be in Cursor Cloud Agents → Secrets
+python3 ai_bridge/scripts/run_browser_task.py ai_bridge/inbox/TASK-….md --out /tmp/browser_report.json
+```
+
+Модуль: `ai_bridge/kernel_browser.py` (create session → Playwright execute on Kernel VM → delete session).
+Ключ никогда не логируется; в отчёт не попадает `cdp_ws_url` (там JWT).
+
+Сниппет для текста Automation: `ai_bridge/AUTOMATION_KERNEL.md`
+(агент не может сам править Automation UI — вставьте сниппет вручную).
