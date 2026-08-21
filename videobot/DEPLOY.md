@@ -103,3 +103,7 @@ sudo systemctl restart videobot.service
 ```
 
 Не выполнять `systemctl restart uspex` / `vector`.
+
+## Roadmap / Backlog (Волна 2)
+
+Не деплоить и не кодить сейчас. Список в [README.md](README.md) § Roadmap: Voice Cloning / Design / STS / Dubbing, act_two, Aleph 2, extend, upscale, Brand Kit, редактор сцен, история, тарифы. Для клонирования голоса и оживления персонажа — то же обязательное согласие кнопкой, что для фото.

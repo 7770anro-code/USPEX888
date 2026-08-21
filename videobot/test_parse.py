@@ -231,6 +231,52 @@ def test_speech_budget_custom() -> None:
     assert 1 <= len(ok["scenes"]) <= MAX_SCENES
 
 
+def test_presets_and_cost() -> None:
+    from presets import (
+        PRESETS,
+        apply_preset,
+        default_job,
+        estimate_cost,
+        voice_settings_payload,
+    )
+
+    assert len(PRESETS) == 5
+    job = apply_preset(default_job(mode="preset"), "viral")
+    assert job["n_scenes"] == 5
+    assert "Подпишись" in job["brief"]
+    vs = voice_settings_payload("energy", "xfst")
+    assert vs["stability"] == 0.30
+    assert vs["speed"] == 1.2
+    assert "use_speaker_boost" in vs
+    est = estimate_cost(n_scenes=5, clip_sec=10, quality="optimal", text="привет мир", need_still=True)
+    assert est["runway"] == 5 * 10 * 12 + 5
+    assert est["eleven_chars"] == len("привет мир")
+    lock = "same woman red coat"
+    prompt = compose_runway_prompt(lock, "walks", "slow cinematic push-in", "energetic action")
+    assert lock in prompt
+    assert "push-in" in prompt
+    assert "energetic" in prompt
+    assert len(prompt) <= RUNWAY_PROMPT_MAX
+
+
+def test_progress_weights() -> None:
+    from presets import StageProgress
+
+    t = StageProgress(5)
+    assert t.percent() == 0
+    t.script_done = True
+    assert t.percent() == 12
+    t.still_done = True
+    assert t.percent() == 20
+    t.tts_done = 5
+    t.video_done = 3
+    assert t.percent() == 20 + 20 + int(round(50 * 3 / 5))
+    t.video_done = 5
+    t.mux_done = True
+    assert t.percent() == 100
+    assert "100%" in t.render("Готово")
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -251,4 +297,6 @@ if __name__ == "__main__":
     test_runway_moderation_person()
     test_consent_gate()
     test_speech_budget_custom()
+    test_presets_and_cost()
+    test_progress_weights()
     print("ok")

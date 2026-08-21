@@ -284,16 +284,26 @@ def enforce_speech_budget(script: dict[str, Any], *, user_script: bool) -> dict[
     return script
 
 
-def compose_runway_prompt(continuity: str, scene_visual: str) -> str:
-    """Один lock на все клипы + действие сцены. continuity не переписывается."""
+def compose_runway_prompt(
+    continuity: str,
+    scene_visual: str,
+    camera: str = "",
+    motion: str = "",
+) -> str:
+    """Один lock на все клипы + действие сцены + камера/динамика (текстом, не API-параметр)."""
     lock = re.sub(r"\s+", " ", (continuity or "").strip())
-    motion = re.sub(r"\s+", " ", (scene_visual or "").strip())
+    bits = [
+        re.sub(r"\s+", " ", (scene_visual or "").strip()),
+        re.sub(r"\s+", " ", (camera or "").strip()),
+        re.sub(r"\s+", " ", (motion or "").strip()),
+    ]
+    action = ", ".join(b for b in bits if b)
     header = "LOCKED LOOK (same person, clothes, location, style): "
     glue = " | CAMERA/ACTION: "
     budget = RUNWAY_PROMPT_MAX - len(header) - len(glue)
     lock_max = min(len(lock), max(280, budget - 120))
     lock_part = lock[:lock_max]
-    motion_part = motion[: max(40, budget - len(lock_part))]
+    motion_part = action[: max(40, budget - len(lock_part))]
     return (header + lock_part + glue + motion_part)[:RUNWAY_PROMPT_MAX]
 
 
@@ -353,7 +363,7 @@ def format_script(script: dict[str, Any]) -> str:
     return "\n".join(lines).strip()
 
 
-def wrap_caption(text: str, width: int = 28) -> str:
+def wrap_caption(text: str, width: int = 24) -> str:
     words = re.sub(r"\s+", " ", (text or "").strip()).split(" ")
     lines: list[str] = []
     cur = ""
@@ -427,6 +437,7 @@ async def grok_script(
     *,
     n_scenes: int = 5,
     user_script: bool = False,
+    extra_brief: str = "",
 ) -> dict[str, Any]:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
@@ -446,6 +457,8 @@ async def grok_script(
             f"Сделай {n_scenes} сцен. continuity — один lock на весь ролик.\n"
             f"Идея:\n{idea.strip()[:2000]}"
         )
+    if extra_brief.strip():
+        user_content += "\n\nДоп. режиссура пресета:\n" + extra_brief.strip()[:1200]
     messages = [
         {"role": "system", "content": SCRIPT_SYSTEM},
         {"role": "user", "content": user_content},
@@ -553,6 +566,7 @@ async def eleven_tts(
     text: str,
     dest: Path,
     voice_id: str | None = None,
+    voice_settings: dict[str, Any] | None = None,
 ) -> Path:
     if not config.ELEVENLABS_API_KEY:
         raise PipelineError("Голос сейчас недоступен. Попробуй ещё раз чуть позже.")
@@ -566,10 +580,12 @@ async def eleven_tts(
         "Content-Type": "application/json",
         "Accept": "audio/mpeg",
     }
-    body = {
+    body: dict[str, Any] = {
         "text": text.strip()[:900],
         "model_id": config.ELEVENLABS_MODEL_ID or "eleven_multilingual_v2",
     }
+    if voice_settings:
+        body["voice_settings"] = voice_settings
     last_err = ""
     tries = max(1, int(config.HTTP_RETRIES))
     raw = b""
@@ -866,6 +882,7 @@ async def runway_clip(
     clip_index: int = 1,
     clip_total: int = 1,
     seed: int | None = None,
+    quality: str = "optimal",
 ) -> Path:
     if not config.RUNWAY_API_KEY:
         raise PipelineError("Камера сейчас недоступна. Попробуй ещё раз чуть позже.")
@@ -876,7 +893,11 @@ async def runway_clip(
     if ratio not in RATIO_PRESETS.values():
         ratio = "720:1280"
     model = config.RUNWAY_MODEL or "gen4.5"
-    i2v_model = model if model in ("gen4.5", "gen4_turbo", "seedance2", "veo3.1", "veo3.1_fast") else "gen4.5"
+    if quality == "fast":
+        model = "gen4_turbo"
+        i2v_model = "gen4_turbo"
+    else:
+        i2v_model = model if model in ("gen4.5", "gen4_turbo", "seedance2", "veo3.1", "veo3.1_fast") else "gen4.5"
     last_fail: PipelineError | None = None
     label = f"клип {clip_index} из {clip_total}"
 
@@ -900,6 +921,9 @@ async def runway_clip(
                         log.warning("I2V %s failed, try gen4_turbo: %s", i2v_model, exc.detail)
                         return await _i2v(prompt_image, "gen4_turbo")
                     raise
+            if quality == "fast":
+                still = await _text_to_image_url(session, visual, ratio)
+                return await _i2v(still, "gen4_turbo")
             if model in RUNWAY_T2V_MODELS:
                 t2v_payload = _clip_payload_base(model, visual, ratio, seconds, seed)
                 try:
@@ -1062,9 +1086,9 @@ async def mux_scene(
         wrapped = wrap_caption(caption)
         escaped = _drawtext_escape(wrapped)
         vf += (
-            f",drawtext=fontfile={font}:text='{escaped}':fontsize=28:"
-            "fontcolor=white:borderw=2:bordercolor=black:"
-            "x=(w-text_w)/2:y=h-th-80"
+            f",drawtext=fontfile={font}:text='{escaped}':fontsize=32:"
+            "fontcolor=white:borderw=3:bordercolor=black:"
+            "x=(w-text_w)/2:y=h-th-96"
         )
     await _run_ffmpeg(
         [
@@ -1156,22 +1180,36 @@ async def build_video(
     voice_id: str | None = None,
     reference_image: Path | str | None = None,
     user_script: bool = False,
+    n_scenes: int | None = None,
+    extra_brief: str = "",
+    voice_settings: dict[str, Any] | None = None,
+    camera: str = "",
+    motion: str = "",
+    quality: str = "optimal",
 ) -> tuple[Path, dict[str, Any]]:
+    from presets import StageProgress
+
     ensure_ffmpeg()
     work_dir.mkdir(parents=True, exist_ok=True)
     ratio = ratio or "720:1280"
     style = style or config.DEFAULT_STYLE or "cinematic"
     width, height = ratio_wh(ratio)
-    n_scenes = target_scene_count(idea)
+    planned = int(n_scenes or target_scene_count(idea))
+    tracker = StageProgress(planned)
+
+    async def report(label: str) -> None:
+        await _notify(progress, tracker.render(label))
+
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        await _notify(progress, "✍️ Пишу сценарий…")
+        await report("✍️ Пишу сценарий…")
         script = await grok_script(
             session,
             idea,
             style=style,
-            n_scenes=n_scenes,
+            n_scenes=planned,
             user_script=user_script,
+            extra_brief=extra_brief,
         )
         script = enforce_speech_budget(script, user_script=user_script)
         scenes = script["scenes"]
@@ -1179,10 +1217,10 @@ async def build_video(
         script["ratio"] = ratio
         script["style"] = style
         total = len(scenes)
+        tracker.n = max(1, total)
+        tracker.script_done = True
+        await report("Сценарий готов")
 
-        # Якорь — одно исходное фото на КАЖДЫЙ клип (штатного character-consistency нет).
-        # Last-frame chaining только если фото пользователя нет: иначе клипы 2+ теряют лицо
-        # и лишний раз бьются о модерацию чужого кадра.
         job_seed = random.randint(0, 2_147_483_647)
         user_supplied_photo = bool(
             (isinstance(reference_image, Path) and reference_image.exists())
@@ -1190,16 +1228,21 @@ async def build_video(
         )
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
-            await _notify(progress, "🖼️ Готовлю твоё фото как первый кадр для всех клипов…")
+            await report("🖼️ Готовлю фото как первый кадр…")
             anchor_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
         elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
             anchor_image = reference_image
         else:
-            await _notify(progress, "🖼️ Рисую общий первый кадр, чтобы лицо и место не прыгали…")
+            await report("🖼️ Общий первый кадр…")
             try:
                 still_url = await _text_to_image_url(
                     session,
-                    compose_runway_prompt(continuity, "medium shot, looking into camera, still"),
+                    compose_runway_prompt(
+                        continuity,
+                        "medium shot, looking into camera, still",
+                        camera,
+                        motion,
+                    ),
                     ratio,
                 )
                 still_path = work_dir / "bible_still.png"
@@ -1211,21 +1254,28 @@ async def build_video(
                 log.warning("shared still failed, T2V with lock: %s", exc.detail)
                 anchor_image = None
         prompt_image = anchor_image
+        tracker.still_done = True
+        await report("Кадр готов")
 
         muxed: list[Path] = []
         for i, scene in enumerate(scenes):
             n = i + 1
-            await _notify(progress, f"🎤 Записываю голос ({n} из {total})…")
+            await report(f"Озвучка {n} из {total}")
             audio = await eleven_tts(
                 session,
                 scene["narration"],
                 work_dir / f"n{i}.mp3",
                 voice_id=voice_id,
+                voice_settings=voice_settings,
             )
-            prompt = compose_runway_prompt(continuity, scene["visual_prompt"])
+            tracker.tts_done = n
+            await report(f"Озвучка готова ({n} из {total})")
+            prompt = compose_runway_prompt(
+                continuity, scene["visual_prompt"], camera, motion
+            )
             audio_sec = await media_duration(audio)
             clip_sec = pick_clip_duration(audio_sec or 10.0)
-            await _notify(progress, f"🎥 Снимаю клип {n} из {total}…")
+            await report(f"Видео {n} из {total}")
             try:
                 clip = await runway_clip(
                     session,
@@ -1237,6 +1287,7 @@ async def build_video(
                     clip_index=n,
                     clip_total=total,
                     seed=job_seed,
+                    quality=quality,
                 )
             except PipelineError:
                 raise
@@ -1255,7 +1306,10 @@ async def build_video(
                 height=height,
             )
             muxed.append(mixed)
-        await _notify(progress, "✂️ Монтирую ролик…")
+            tracker.video_done = n
+            await report(f"Видео {n} из {total}")
+        await report("Монтаж")
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)
-        await _notify(progress, "✅ Готово!")
+        tracker.mux_done = True
+        await report("✅ Готово")
         return out, script
