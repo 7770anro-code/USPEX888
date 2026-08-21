@@ -23,7 +23,13 @@ from aiogram.types import (
 )
 
 import config
-from pipeline import PipelineError, build_video, ensure_ffmpeg, format_script
+from pipeline import (
+    PipelineError,
+    build_video,
+    ensure_ffmpeg,
+    format_script,
+    script_too_long_for_custom,
+)
 from voices import VOICES, voice_by_index, voice_label
 
 logging.basicConfig(
@@ -34,6 +40,16 @@ log = logging.getLogger("videobot")
 
 BUSY = asyncio.Lock()
 TIKTOK_RATIO = "720:1280"
+CONSENT_REQUIRED_MSG = (
+    "Без кнопки согласия я это фото не использую. Нажми /start и подтверди согласие."
+)
+
+
+def photo_start_blocked(photo_file_id: str | None, consent_verified: bool) -> str:
+    """Непустая строка — старт запрещён. Проверять в on_voice_pick и _run_job."""
+    if photo_file_id and not consent_verified:
+        return CONSENT_REQUIRED_MSG
+    return ""
 
 HOW_IT_WORKS = (
     "Как это работает — совсем просто:\n\n"
@@ -152,10 +168,12 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         )
         return
     if data == "menu:custom":
+        await state.clear()
         await state.set_state(Flow.custom_script)
         await msg.answer(
             "🎬 Пришли готовый текст ролика.\n"
-            "Это слова, которые зритель услышит. Можно абзацами — я разрежу на клипы."
+            "Это слова, которые зритель услышит. Можно абзацами — я разрежу на клипы.\n"
+            "Ориентир: не длиннее ~230 слов, иначе озвучка не влезет в 6 клипов."
         )
 
 
@@ -171,7 +189,7 @@ async def on_quick_idea(message: Message, state: FSMContext) -> None:
         user_script=False,
         voice_id=config.ELEVENLABS_VOICE_ID,
         photo_file_id=None,
-        photo_consent=False,
+        consent_verified=False,
         bot=message.bot,
     )
 
@@ -181,7 +199,14 @@ async def on_custom_script(message: Message, state: FSMContext) -> None:
     if len(text) < 20:
         await message.answer("Текста маловато. Напиши речь на 20–40 секунд своими словами.")
         return
-    await state.update_data(script=text)
+    if script_too_long_for_custom(text):
+        await message.answer(
+            "Текст слишком длинный для ролика 30–60 сек: озвучка не влезет в 6 клипов "
+            "по 10 секунд даже с ускорением, последние слова обрежутся.\n"
+            "Сократи примерно до 230–250 слов и пришли снова."
+        )
+        return
+    await state.update_data(script=text, photo_file_id=None, consent_verified=False)
     await state.set_state(Flow.custom_photo)
     await message.answer(
         "Теперь фото — если хочешь своё лицо в ролике, пришли его сюда.\n"
@@ -192,7 +217,7 @@ async def on_custom_script(message: Message, state: FSMContext) -> None:
 
 
 async def _maybe_start_consent(message: Message, state: FSMContext, file_id: str) -> None:
-    await state.update_data(photo_file_id=file_id, photo_consent=False)
+    await state.update_data(photo_file_id=file_id, consent_verified=False)
     await state.set_state(Flow.custom_consent)
     await message.answer(
         "Если на фото живой узнаваемый человек, мне нужно твоё явное согласие.\n\n"
@@ -228,7 +253,7 @@ async def on_photo_skip(query: CallbackQuery, state: FSMContext) -> None:
         if query.message:
             await query.message.answer("Эта кнопка уже не действует. Нажми /start.", reply_markup=main_menu())
         return
-    await state.update_data(photo_file_id=None, photo_consent=False)
+    await state.update_data(photo_file_id=None, consent_verified=False)
     await state.set_state(Flow.custom_voice)
     if query.message:
         await query.message.answer("Выбери голос:", reply_markup=voice_kb(0))
@@ -255,7 +280,7 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
         if query.message:
             await query.message.answer("Фото не нашёл. Нажми /start и пришли его снова.", reply_markup=main_menu())
         return
-    await state.update_data(photo_consent=True)
+    await state.update_data(consent_verified=True)
     await state.set_state(Flow.custom_voice)
     if query.message:
         await query.message.answer(
@@ -301,26 +326,24 @@ async def on_voice_pick(query: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     script = (data.get("script") or "").strip()
     photo_file_id = data.get("photo_file_id")
-    photo_consent = bool(data.get("photo_consent"))
+    consent_verified = bool(data.get("consent_verified"))
     await state.clear()
     msg = query.message
     if not isinstance(msg, Message) or not script:
         if msg:
             await msg.answer("Что-то потерялось. Нажми /start и начнём сначала.", reply_markup=main_menu())
         return
-    if photo_file_id and not photo_consent:
-        await msg.answer(
-            "Без кнопки согласия я это фото не использую. Нажми /start и подтверди согласие.",
-            reply_markup=main_menu(),
-        )
+    blocked = photo_start_blocked(photo_file_id, consent_verified)
+    if blocked:
+        await msg.answer(blocked, reply_markup=main_menu())
         return
     await _run_job(
         msg,
         idea=script,
         user_script=True,
         voice_id=voice["id"],
-        photo_file_id=photo_file_id if photo_consent else None,
-        photo_consent=photo_consent,
+        photo_file_id=photo_file_id if consent_verified else None,
+        consent_verified=consent_verified,
         bot=msg.bot,
         voice_name=voice["name"],
     )
@@ -360,13 +383,11 @@ async def _run_job(
     photo_file_id: str | None,
     bot: Bot,
     voice_name: str = "Сара",
-    photo_consent: bool = False,
+    consent_verified: bool = False,
 ) -> None:
-    if photo_file_id and not photo_consent:
-        await message.answer(
-            "Без кнопки согласия я это фото не использую. Нажми /start.",
-            reply_markup=main_menu(),
-        )
+    blocked = photo_start_blocked(photo_file_id, consent_verified)
+    if blocked:
+        await message.answer(blocked, reply_markup=main_menu())
         return
     if BUSY.locked():
         await message.answer(
@@ -394,7 +415,7 @@ async def _run_job(
 
         try:
             photo_path = None
-            if photo_file_id and photo_consent:
+            if photo_file_id and consent_verified:
                 photo_path = work / "user_photo.jpg"
                 work.mkdir(parents=True, exist_ok=True)
                 await _download_photo(bot, photo_file_id, photo_path)

@@ -1,10 +1,17 @@
 """Офлайн-проверка разбора сценария и unwrap Grok-ключа. Без сети."""
 
+from bot import CONSENT_REQUIRED_MSG, photo_start_blocked
 from config import unwrap_xai_api_key
 from pipeline import (
+    CLIP_SPEECH_BUDGET_SEC,
+    MAX_SCENES,
+    PipelineError,
     RUNWAY_PERSON_MSG,
     RUNWAY_PROMPT_MAX,
+    SCRIPT_TOO_LONG_MSG,
     compose_runway_prompt,
+    enforce_speech_budget,
+    estimate_speech_sec,
     fallback_split_script,
     format_script,
     is_runway_person_moderation,
@@ -18,6 +25,8 @@ from pipeline import (
     runway_poll_delay,
     runway_prompt_text,
     scene_durations,
+    script_too_long_for_custom,
+    split_text_to_speech_budget,
     target_scene_count,
     wrap_caption,
 )
@@ -185,6 +194,43 @@ def test_runway_moderation_person() -> None:
     assert runway_content_moderation()["publicFigureThreshold"] == "auto"
 
 
+def test_consent_gate() -> None:
+    assert photo_start_blocked("file-1", False) == CONSENT_REQUIRED_MSG
+    assert photo_start_blocked("file-1", True) == ""
+    assert photo_start_blocked(None, False) == ""
+    assert photo_start_blocked(None, True) == ""
+
+
+def test_speech_budget_custom() -> None:
+    assert estimate_speech_sec("один два три") < CLIP_SPEECH_BUDGET_SEC
+    parts = split_text_to_speech_budget(" ".join(f"слово{i}" for i in range(80)), CLIP_SPEECH_BUDGET_SEC)
+    assert len(parts) >= 2
+    for part in parts:
+        assert estimate_speech_sec(part) <= CLIP_SPEECH_BUDGET_SEC + 1.5
+    long_text = " ".join(f"слово{i}" for i in range(400))
+    assert script_too_long_for_custom(long_text)
+    script = {
+        "title": "x",
+        "continuity": "lock",
+        "scenes": [{"narration": long_text, "visual_prompt": "cam"}],
+    }
+    try:
+        enforce_speech_budget(script, user_script=True)
+        raise AssertionError("expected too-long")
+    except PipelineError as exc:
+        assert exc.code == "speech_too_long"
+        assert SCRIPT_TOO_LONG_MSG in str(exc.user_message)
+    ok = enforce_speech_budget(
+        {
+            "title": "x",
+            "continuity": "lock",
+            "scenes": [{"narration": " ".join(f"w{i}" for i in range(30)), "visual_prompt": "cam"}],
+        },
+        user_script=True,
+    )
+    assert 1 <= len(ok["scenes"]) <= MAX_SCENES
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -203,4 +249,6 @@ if __name__ == "__main__":
     test_fallback_and_scene_count()
     test_voices_catalog()
     test_runway_moderation_person()
+    test_consent_gate()
+    test_speech_budget_custom()
     print("ok")

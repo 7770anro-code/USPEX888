@@ -175,7 +175,7 @@ def parse_script(raw: str) -> dict[str, Any]:
     if not isinstance(scenes, list) or not scenes:
         raise PipelineError("Не получилось понять сцены. Напиши текст чуть подробнее.")
     cleaned = []
-    for scene in scenes[:6]:
+    for scene in scenes[:MAX_SCENES]:
         if not isinstance(scene, dict):
             continue
         narration = str(scene.get("narration") or "").strip()
@@ -212,6 +212,78 @@ def target_scene_count(text: str) -> int:
     return 6
 
 
+# 10с клип + atempo ≤ ~1.8, чтобы -shortest не резал хвост речи (лимит ffmpeg 2.0).
+CLIP_SPEECH_BUDGET_SEC = 18.0
+MAX_SCENES = 6
+SPEECH_WORDS_PER_SEC = 2.2
+SPEECH_CHARS_PER_SEC = 13.0
+SCRIPT_TOO_LONG_MSG = (
+    "Текст слишком длинный: озвучка не влезет в 6 клипов по 10 секунд "
+    "даже с ускорением, последние слова обрежутся. "
+    "Сократи сценарий примерно до 230–250 слов и пришли снова."
+)
+
+
+def estimate_speech_sec(text: str) -> float:
+    words = len(re.findall(r"\w+", text or "", flags=re.U))
+    chars = len(re.sub(r"\s+", "", text or ""))
+    return max(words / SPEECH_WORDS_PER_SEC, chars / SPEECH_CHARS_PER_SEC)
+
+
+def max_speech_sec_for_clip(clip_sec: int = 10) -> float:
+    return min(CLIP_SPEECH_BUDGET_SEC, float(clip_sec) * 1.8)
+
+
+def script_too_long_for_custom(text: str) -> bool:
+    return estimate_speech_sec(text) > MAX_SCENES * max_speech_sec_for_clip(10)
+
+
+def split_text_to_speech_budget(text: str, budget_sec: float) -> list[str]:
+    words = re.findall(r"\S+", text or "")
+    if not words:
+        return []
+    chunks: list[str] = []
+    cur: list[str] = []
+    for word in words:
+        trial = " ".join(cur + [word])
+        if cur and estimate_speech_sec(trial) > budget_sec:
+            chunks.append(" ".join(cur))
+            cur = [word]
+        else:
+            cur.append(word)
+    if cur:
+        chunks.append(" ".join(cur))
+    return chunks
+
+
+def enforce_speech_budget(script: dict[str, Any], *, user_script: bool) -> dict[str, Any]:
+    """Режет длинные сцены на доп. клипы; в кастомном режиме не молча обрезает речь."""
+    budget = max_speech_sec_for_clip(10)
+    visual_fallback = "slow push-in, natural motion, keep locked look"
+    out: list[dict[str, str]] = []
+    for scene in script.get("scenes") or []:
+        nar = str(scene.get("narration") or "").strip()
+        vis = str(scene.get("visual_prompt") or visual_fallback)
+        parts = split_text_to_speech_budget(nar, budget)
+        if not parts and nar:
+            parts = [nar]
+        for i, part in enumerate(parts):
+            out.append(
+                {
+                    "narration": part,
+                    "visual_prompt": vis if i == 0 else visual_fallback,
+                }
+            )
+    if user_script and len(out) > MAX_SCENES:
+        raise PipelineError(
+            SCRIPT_TOO_LONG_MSG,
+            f"scenes={len(out)} speech_sec={estimate_speech_sec(' '.join(s['narration'] for s in out)):.1f}",
+            code="speech_too_long",
+        )
+    script["scenes"] = out[:MAX_SCENES]
+    return script
+
+
 def compose_runway_prompt(continuity: str, scene_visual: str) -> str:
     """Один lock на все клипы + действие сцены. continuity не переписывается."""
     lock = re.sub(r"\s+", " ", (continuity or "").strip())
@@ -229,7 +301,7 @@ def fallback_split_script(text: str, n: int = 5) -> dict[str, Any]:
     words = re.findall(r"\S+", text or "")
     if not words:
         raise PipelineError("Пустой сценарий. Напиши текст ролика.")
-    n = max(4, min(6, n))
+    n = max(4, min(MAX_SCENES, n))
     chunk = max(1, (len(words) + n - 1) // n)
     scenes = []
     for i in range(n):
@@ -361,7 +433,7 @@ async def grok_script(
     if not config.XAI_API_KEY_NEW:
         raise PipelineError("Нет XAI_API_KEY_NEW — сценарий собрать не могу.")
     style_key = style if style in STYLES else "cinematic"
-    n_scenes = max(4, min(6, int(n_scenes or 5)))
+    n_scenes = max(4, min(MAX_SCENES, int(n_scenes or 5)))
     if user_script:
         user_content = (
             f"Стиль: {style_key} — {STYLES[style_key]}\n"
@@ -567,6 +639,14 @@ async def _runway_poll(
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 raw = await resp.text()
+                if resp.status in RETRY_STATUSES:
+                    log.warning(
+                        "Runway poll HTTP %s task_id=%s — повтор до дедлайна",
+                        resp.status,
+                        task_id,
+                    )
+                    await asyncio.sleep(runway_poll_delay())
+                    continue
                 if resp.status >= 400:
                     detail = _clip(f"HTTP {resp.status}: {raw}")
                     failure_code = _failure_code_from_http_body(raw)
@@ -578,7 +658,7 @@ async def _runway_poll(
         except PipelineError:
             raise
         except Exception as exc:
-            log.warning("Runway poll error: %s", exc)
+            log.warning("Runway poll error task_id=%s: %s", task_id, exc)
             await asyncio.sleep(runway_poll_delay())
             continue
         last_status = str(data.get("status") or "")
@@ -608,9 +688,25 @@ async def _runway_poll(
                 used_image=used_image,
             )
         await asyncio.sleep(runway_poll_delay())
+    log.error(
+        "Runway poll timeout task_id=%s last_status=%s timeout=%ss — "
+        "задача на стороне Runway могла продолжать расходовать кредиты, пробую cancel",
+        task_id,
+        last_status or "unknown",
+        int(config.RUNWAY_TIMEOUT_SEC),
+    )
+    cancelled = await _runway_cancel(session, task_id)
+    if not cancelled:
+        log.error(
+            "Runway task still running after local timeout task_id=%s last_status=%s "
+            "(cancel/delete не удался, кредиты могут списываться дальше)",
+            task_id,
+            last_status or "unknown",
+        )
     raise PipelineError(
         "Runway слишком долго генерирует клип, остановил ожидание.",
-        f"status={last_status or 'unknown'} timeout={int(config.RUNWAY_TIMEOUT_SEC)}s",
+        f"task_id={task_id} status={last_status or 'unknown'} "
+        f"timeout={int(config.RUNWAY_TIMEOUT_SEC)}s cancel={'ok' if cancelled else 'failed-still-running'}",
     )
 
 
@@ -626,6 +722,38 @@ def _failure_code_from_http_body(raw: str) -> str:
     if not code and isinstance(nested, dict):
         code = nested.get("code") or nested.get("failureCode") or ""
     return str(code or "")
+
+
+async def _runway_cancel(session: aiohttp.ClientSession, task_id: str) -> bool:
+    """Best-effort DELETE /v1/tasks/{id}. True если 200/204/404."""
+    headers = {
+        "Authorization": f"Bearer {config.RUNWAY_API_KEY}",
+        "X-Runway-Version": config.RUNWAY_VERSION or RUNWAY_VERSION,
+    }
+    try:
+        async with session.delete(
+            f"{RUNWAY_HOST}/v1/tasks/{task_id}",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            raw = await resp.text()
+            if resp.status in (200, 204, 404):
+                log.info("Runway cancel task_id=%s http=%s", task_id, resp.status)
+                return True
+            log.warning(
+                "Runway cancel failed task_id=%s http=%s body=%s — задача могла остаться висеть",
+                task_id,
+                resp.status,
+                _clip(raw, 200),
+            )
+            return False
+    except Exception as exc:
+        log.warning(
+            "Runway cancel exception task_id=%s: %s — задача могла остаться висеть",
+            task_id,
+            exc,
+        )
+        return False
 
 
 async def _runway_submit(
@@ -916,6 +1044,13 @@ async def mux_scene(
 ) -> Path:
     vdur = await media_duration(video) or 10.0
     adur = await media_duration(audio) or vdur
+    if vdur > 0.2 and adur > 0.2 and (adur / vdur) > 2.0 + 1e-3:
+        raise PipelineError(
+            "Озвучка этой сцены длиннее клипа даже на максимальном ускорении. "
+            "Сократи текст и попробуй снова — иначе последние слова обрежутся.",
+            f"audio={adur:.1f}s video={vdur:.1f}s",
+            code="speech_too_long",
+        )
     tempo = adur / vdur if vdur > 0.2 and adur > 0.2 else 1.0
     tempo = max(0.5, min(2.0, tempo))
     vf = (
@@ -1038,10 +1173,8 @@ async def build_video(
             n_scenes=n_scenes,
             user_script=user_script,
         )
+        script = enforce_speech_budget(script, user_script=user_script)
         scenes = script["scenes"]
-        if len(scenes) > 6:
-            scenes = scenes[:6]
-            script["scenes"] = scenes
         continuity = script.get("continuity") or ""
         script["ratio"] = ratio
         script["style"] = style
