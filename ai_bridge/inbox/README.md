@@ -8,3 +8,6 @@ git add ai_bridge/inbox && git commit -m "ai-inbox: ..." && git push
 ```
 
 Пока Mac выключен — push с другого устройства достаточен. Cursor заберёт при следующей сессии.
+
+Пример `TASK-20260820-example-github-bridge` закрыт после первого успешного
+цикла (claim + DONE в outbox). Новые задачи кладите через `new_task.py`.
