@@ -142,9 +142,10 @@ class TestLatencyArchitecture(unittest.TestCase):
             self.assertIn(needle, src)
 
     def test_version_v12_2(self):
-        from uspex_core.versioning import BUILD_ID, STRATEGY_VERSION
+        from uspex_core.versioning import BUILD_ID, STRATEGY_VERSION, CONFIG_SCHEMA_VERSION
         self.assertIn("V12_2", BUILD_ID)
-        self.assertIn("INSTITUTIONAL", STRATEGY_VERSION)
+        self.assertIn("SCANNER_HANGFIX", STRATEGY_VERSION)
+        self.assertIn("INSTITUTIONAL", CONFIG_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

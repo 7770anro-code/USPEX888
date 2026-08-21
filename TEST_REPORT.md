@@ -4,10 +4,10 @@
 
 | Suite | Command | Exit | Status |
 |---|---|---|---|
-| Hangfix | `python3 -m unittest tests.test_scanner_hangfix` | (this PR) | |
-| Unit V3 | `python3 -m unittest tests.test_v3_institutional` | (this PR) | |
-| Latency/TTL/LayerAB | `python3 -m unittest tests.test_latency_architecture` | (this PR) | |
-| V12 suite | `python3 -m unittest tests.test_uspex_v12_suite` | (this PR) | |
+| Hangfix | `python3 -m unittest tests.test_scanner_hangfix` | 0 | PASS |
+| Unit V3 | `python3 -m unittest tests.test_v3_institutional` | 0 | PASS |
+| Latency/TTL/LayerAB | `python3 -m unittest tests.test_latency_architecture` | 0 | PASS |
+| V12 suite | `python3 -m unittest tests.test_uspex_v12_suite` | 0 | PASS |
 
 NOT RUN (need live VPS after deploy):
 - DEMO_INTEGRATION_live_bybit_shadow
