@@ -1,6 +1,6 @@
 """Офлайн-проверка разбора сценария и unwrap Grok-ключа. Без сети."""
 
-from bot import CONSENT_REQUIRED_MSG, photo_start_blocked
+from bot import CONSENT_REQUIRED_MSG, photo_start_blocked, tiktok_upload_filename
 from config import unwrap_xai_api_key
 from pipeline import (
     CLIP_SPEECH_BUDGET_SEC,
@@ -9,6 +9,7 @@ from pipeline import (
     RUNWAY_CREDITS_MSG,
     RUNWAY_PERSON_MSG,
     RUNWAY_PROMPT_MAX,
+    SCRIPT_SYSTEM,
     SCRIPT_TOO_LONG_MSG,
     compose_runway_prompt,
     enforce_speech_budget,
@@ -138,14 +139,16 @@ def test_wrap_and_format() -> None:
 
 
 def test_compose_runway_prompt_lock() -> None:
-    lock = "25yo woman, short black hair, green parka, neon alley, cinematic grain"
-    a = compose_runway_prompt(lock, "slow push-in, she looks at camera")
-    b = compose_runway_prompt(lock, "handheld pan left, she walks")
+    lock = "red coat, rainy street, cinematic grain"
+    a = compose_runway_prompt(lock, "slow subtle push-in, subtle head turn")
+    b = compose_runway_prompt(lock, "gentle pan, camera stays level")
     assert lock in a and lock in b
     assert "LOCKED LOOK" in a
+    assert "clothes, location" in a
+    assert "same person" not in a
     assert len(a) <= RUNWAY_PROMPT_MAX
     assert "push-in" in a
-    assert "pan left" in b
+    assert "gentle pan" in b
 
 
 def test_fallback_and_scene_count() -> None:
@@ -284,11 +287,12 @@ def test_presets_and_cost() -> None:
     est = estimate_cost(n_scenes=5, clip_sec=10, quality="optimal", text="привет мир", need_still=True)
     assert est["runway"] == 5 * 10 * 12 + 5
     assert est["eleven_chars"] == len("привет мир")
-    lock = "same woman red coat"
-    prompt = compose_runway_prompt(lock, "walks", "slow cinematic push-in", "energetic action")
+    lock = "red coat rainy street"
+    prompt = compose_runway_prompt(lock, "subtle head turn", "slow subtle push-in", "minimal body movement")
     assert lock in prompt
     assert "push-in" in prompt
-    assert "energetic" in prompt
+    assert "minimal body movement" in prompt
+    assert "energetic" not in prompt
     assert len(prompt) <= RUNWAY_PROMPT_MAX
 
 
@@ -308,6 +312,35 @@ def test_progress_weights() -> None:
     t.mux_done = True
     assert t.percent() == 100
     assert "100%" in t.render("Готово")
+
+
+def test_camera_motion_soft() -> None:
+    from presets import CAMERA, MOTION
+
+    blob = " ".join(v["prompt"] for v in list(CAMERA.values()) + list(MOTION.values())).lower()
+    for banned in ("spin", "dramatic", "energetic", "extreme close-up"):
+        assert banned not in blob
+    assert CAMERA["lock"]["prompt"] == "camera holds static"
+    assert "subtle head turn" in MOTION["nat"]["prompt"]
+    assert MOTION["min"]["prompt"] == "minimal body movement"
+
+
+def test_tiktok_upload_filename() -> None:
+    assert tiktok_upload_filename("Мой ролик") == "Мой_ролик_tiktok.mp4"
+    assert tiktok_upload_filename("  ") == "video_tiktok.mp4"
+    assert tiktok_upload_filename("Hello / World??").endswith("_tiktok.mp4")
+    assert "/" not in tiktok_upload_filename("a/b")
+
+
+def test_last_frame_chains_with_user_photo() -> None:
+    import inspect
+
+    from pipeline import build_video
+
+    src = inspect.getsource(build_video)
+    assert "last_frame_data_uri" in src
+    assert "not user_supplied_photo" not in src
+    assert "No face, age, hair" in SCRIPT_SYSTEM or "без деталей лица" in SCRIPT_SYSTEM.lower() or "No face" in SCRIPT_SYSTEM
 
 
 if __name__ == "__main__":
@@ -334,4 +367,7 @@ if __name__ == "__main__":
     test_speech_budget_custom()
     test_presets_and_cost()
     test_progress_weights()
+    test_camera_motion_soft()
+    test_tiktok_upload_filename()
+    test_last_frame_chains_with_user_photo()
     print("ok")

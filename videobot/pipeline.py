@@ -40,18 +40,18 @@ SCRIPT_SYSTEM = """Ты режиссёр вертикальных TikTok-рол�
 
 {
   "title": "короткий заголовок",
-  "continuity": "ONE locked English description for EVERY shot: character (age, face, hair, clothes), location, lighting, color grade, visual style. No camera motion here. Must stay identical across shots.",
+  "continuity": "ONE locked English description for EVERY shot: clothes, location, lighting, color grade, visual style. No face, age, hair, eyes or likeness. No camera motion here. Must stay identical across shots.",
   "scenes": [
     {
       "narration": "озвучка на языке пользователя",
-      "visual_prompt": "English CAMERA AND ACTION ONLY: move, gesture, framing. Do NOT re-describe face, clothes, or location."
+      "visual_prompt": "English CAMERA AND ACTION ONLY, one short sentence. Soft only: subtle head turn, camera holds static, slow push-in, minimal body movement. Do NOT re-describe face, clothes, or location. No spin, dramatic, extreme close-up, energetic."
     }
   ]
 }
 
 Правила:
-- continuity пишется ОДИН раз — единственное описание персонажа и места.
-- visual_prompt сцены — только действие камеры, без нового лица и локации.
+- continuity пишется ОДИН раз — одежда, место, свет, стиль. Без деталей лица.
+- visual_prompt сцены — только мягкое движение камеры и тела, без нового лица и локации.
 - Сцен от 4 до 6. Каждая ~10 секунд речи (примерно 18–28 слов). Итого 40–60 секунд.
 - Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
 - Без текста на экране, логотипов, знаменитостей, NSFW, watermark.
@@ -284,7 +284,7 @@ def split_text_to_speech_budget(text: str, budget_sec: float) -> list[str]:
 def enforce_speech_budget(script: dict[str, Any], *, user_script: bool) -> dict[str, Any]:
     """Режет длинные сцены на доп. клипы; в кастомном режиме не молча обрезает речь."""
     budget = max_speech_sec_for_clip(10)
-    visual_fallback = "slow push-in, natural motion, keep locked look"
+    visual_fallback = "slow subtle push-in, minimal body movement"
     out: list[dict[str, str]] = []
     for scene in script.get("scenes") or []:
         nar = str(scene.get("narration") or "").strip()
@@ -323,7 +323,7 @@ def compose_runway_prompt(
         re.sub(r"\s+", " ", (motion or "").strip()),
     ]
     action = ", ".join(b for b in bits if b)
-    header = "LOCKED LOOK (same person, clothes, location, style): "
+    header = "LOCKED LOOK (same clothes, location, lighting, style): "
     glue = " | CAMERA/ACTION: "
     budget = RUNWAY_PROMPT_MAX - len(header) - len(glue)
     lock_max = min(len(lock), max(280, budget - 120))
@@ -346,14 +346,14 @@ def fallback_split_script(text: str, n: int = 5) -> dict[str, Any]:
         scenes.append(
             {
                 "narration": part,
-                "visual_prompt": "slow push-in, natural motion, keep locked look",
+                "visual_prompt": "slow subtle push-in, minimal body movement",
             }
         )
     if not scenes:
         raise PipelineError("Не смог разрезать сценарий на сцены.")
     return {
         "title": "Мой ролик",
-        "continuity": "same protagonist and location throughout, consistent lighting and clothes, photoreal",
+        "continuity": "same clothes and location throughout, consistent lighting, photoreal",
         "scenes": scenes,
     }
 
@@ -479,7 +479,7 @@ async def grok_script(
     else:
         user_content = (
             f"Стиль: {style_key} — {STYLES[style_key]}\n"
-            f"Сделай {n_scenes} сцен. continuity — один lock на весь ролик.\n"
+            f"Сделай {n_scenes} сцен. continuity — одежда/локация/стиль, без лица.\n"
             f"Идея:\n{idea.strip()[:2000]}"
         )
     if extra_brief.strip():
@@ -1259,10 +1259,6 @@ async def build_video(
         await report("Сценарий готов")
 
         job_seed = random.randint(0, 2_147_483_647)
-        user_supplied_photo = bool(
-            (isinstance(reference_image, Path) and reference_image.exists())
-            or (isinstance(reference_image, str) and reference_image.startswith(("data:", "http")))
-        )
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
             await report("🖼️ Готовлю фото как первый кадр…")
@@ -1330,7 +1326,8 @@ async def build_video(
                 )
             except PipelineError:
                 raise
-            if prompt_image and n < total and not user_supplied_photo:
+            # Клип 1: якорь (фото или still). Клипы 2+: last frame, иначе снова якорь.
+            if prompt_image and n < total:
                 try:
                     prompt_image = await last_frame_data_uri(clip, work_dir / f"tail{i}.jpg")
                 except PipelineError as exc:

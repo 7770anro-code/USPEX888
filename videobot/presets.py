@@ -78,17 +78,17 @@ QUALITY: dict[str, dict[str, Any]] = {
 }
 
 CAMERA: dict[str, dict[str, str]] = {
-    "lock": {"label": "Статично", "prompt": "locked tripod, almost no camera move"},
-    "push": {"label": "Плавное приближение", "prompt": "slow cinematic push-in"},
-    "pull": {"label": "Плавное отдаление", "prompt": "slow cinematic pull-out"},
-    "pan": {"label": "Слева-направо", "prompt": "gentle pan left to right"},
-    "orbit": {"label": "Облёт", "prompt": "slow orbit around the subject"},
+    "lock": {"label": "Статично", "prompt": "camera holds static"},
+    "push": {"label": "Плавное приближение", "prompt": "slow subtle push-in"},
+    "pull": {"label": "Плавное отдаление", "prompt": "slow subtle pull-back"},
+    "pan": {"label": "Слева-направо", "prompt": "gentle pan, camera stays level"},
+    "orbit": {"label": "Облёт", "prompt": "very slow small-arc orbit around the subject"},
 }
 
 MOTION: dict[str, dict[str, str]] = {
-    "min": {"label": "Минимальное", "prompt": "subtle micro-motion, subject mostly still"},
-    "nat": {"label": "Естественное", "prompt": "natural body language, breathing, small gestures"},
-    "dyn": {"label": "Динамичное", "prompt": "energetic action, strong subject motion"},
+    "min": {"label": "Минимальное", "prompt": "minimal body movement"},
+    "nat": {"label": "Естественное", "prompt": "subtle head turn, small natural gestures"},
+    "dyn": {"label": "Динамичное", "prompt": "a bit more body movement, still gentle"},
 }
 
 # voice_idx — индекс в voices.VOICES, в UI не показываем id.

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -606,22 +607,39 @@ async def _download_photo(bot: Bot, file_id: str, dest: Path) -> Path:
     return dest
 
 
-async def _send_video(message: Message, path: Path, caption: str) -> None:
+def tiktok_upload_filename(title: str = "") -> str:
+    slug = re.sub(r"[^\w]+", "_", (title or "").strip(), flags=re.UNICODE)
+    slug = re.sub(r"_+", "_", slug).strip("_")[:48]
+    return f"{slug or 'video'}_tiktok.mp4"
+
+
+async def _send_video(message: Message, path: Path, caption: str, *, filename: str = "") -> None:
+    name = filename or tiktok_upload_filename(path.stem)
     last: Exception | None = None
+    video_ok = False
     for attempt in range(3):
         try:
-            await message.answer_video(FSInputFile(path), caption=caption[:900])
-            return
+            await message.answer_video(FSInputFile(path, filename=name), caption=caption[:900])
+            video_ok = True
+            break
         except Exception as exc:
             last = exc
             log.warning("send_video attempt %s: %s", attempt + 1, exc)
             await asyncio.sleep(1.5 * (attempt + 1))
+    if not video_ok:
+        try:
+            await message.answer_document(FSInputFile(path, filename=name), caption=caption[:900])
+            return
+        except Exception as exc:
+            last = exc
+        raise PipelineError("Не смог отправить готовое видео. Нажми /start и попробуй ещё раз.", str(last or ""))
     try:
-        await message.answer_document(FSInputFile(path), caption=caption[:900])
-        return
+        await message.answer_document(
+            FSInputFile(path, filename=name),
+            caption="Файл в полном качестве для загрузки в TikTok",
+        )
     except Exception as exc:
-        last = exc
-    raise PipelineError("Не смог отправить готовое видео. Нажми /start и попробуй ещё раз.", str(last or ""))
+        log.warning("send_document extra: %s", exc)
 
 
 async def _run_job(
@@ -696,7 +714,12 @@ async def _run_job(
                 pass
             q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
-            await _send_video(message, video_path, caption)
+            await _send_video(
+                message,
+                video_path,
+                caption,
+                filename=tiktok_upload_filename(str(script.get("title") or "video")),
+            )
             try:
                 await status.edit_text("✅ Готово — видео выше.")
             except Exception:
