@@ -3,11 +3,10 @@ id: TASK-20260820-example-github-bridge
 from: cursor
 to: human
 target: uspex
-status: inbox
+status: claimed
 priority: normal
 created_utc: 2026-08-20T00:00:00Z
 ---
-
 # Example: GitHub AI bridge is live
 
 ## Goal
