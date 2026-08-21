@@ -160,6 +160,13 @@ def test_runway_moderation_person() -> None:
     err = runway_fail_error("SAFETY.INPUT.IMAGE", "FAILED: likeness of a person")
     assert err.code == "moderation_person"
     assert err.user_message == RUNWAY_PERSON_MSG
+    assert "политика по реальным людям" in err.user_message
+    assert "текстовый режим" in err.user_message
+    policy = runway_fail_error(
+        "SAFETY.INPUT.IMAGE",
+        "use of an image, video or audio of another person without their permission",
+    )
+    assert policy.code == "moderation_person"
     text_err = runway_fail_error("SAFETY.INPUT.TEXT", "prompt blocked")
     assert text_err.code == "moderation"
     assert runway_content_moderation()["publicFigureThreshold"] == "auto"

@@ -74,8 +74,8 @@ RETRY_STATUSES = frozenset({429, 502, 503, 504})
 
 # Явные тексты при модерации Runway (docs 21.08.2026: FAILED + failureCode SAFETY.*).
 RUNWAY_PERSON_MSG = (
-    "Runway отклонил это фото (политика по реальным людям). "
-    "Попробуй другое фото или текстовый режим без фото."
+    "Runway отклонил это фото (политика по реальным людям), "
+    "попробуйте другое фото или текстовый режим."
 )
 RUNWAY_SAFETY_MSG = (
     "Runway не пропустил этот запрос по правилам контента. "
@@ -84,7 +84,8 @@ RUNWAY_SAFETY_MSG = (
 
 _PERSON_MOD_RE = re.compile(
     r"PUBLIC[_\s-]?FIGURE|LIKENESS|CELEBRITY|REAL PEOPLE|ANOTHER PERSON|"
-    r"SAFETY\.(INPUT|OUTPUT)\.(IMAGE|VIDEO|AUDIO)|"
+    r"WITHOUT THEIR PERMISSION|SAFETY\.(INPUT|OUTPUT)\.(IMAGE|VIDEO|AUDIO)|"
+    r"INPUT_PREPROCESSING\.SAFETY\.(IMAGE|VIDEO|AUDIO)|"
     r"\bFACES?\b|\bPEOPLE\b|\bPERSON\b(?!AL)",
     re.I,
 )
@@ -800,6 +801,29 @@ async def file_to_data_uri(path: Path, dest_jpeg: Path | None = None) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
 
 
+async def last_frame_data_uri(video: Path, dest_jpeg: Path) -> str:
+    """Последний кадр клипа → promptImage следующего (last-frame chaining)."""
+    dest_jpeg.parent.mkdir(parents=True, exist_ok=True)
+    await _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-sseof",
+            "-0.2",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            str(dest_jpeg),
+        ]
+    )
+    if not dest_jpeg.exists() or dest_jpeg.stat().st_size < 80:
+        raise PipelineError("Не снялся последний кадр клипа.")
+    return await file_to_data_uri(dest_jpeg, dest_jpeg.with_name(dest_jpeg.stem + "_ref.jpg"))
+
+
 async def _run_ffmpeg(args: list[str]) -> None:
     proc = await asyncio.create_subprocess_exec(
         *args,
@@ -974,16 +998,16 @@ async def build_video(
         script["style"] = style
         total = len(scenes)
 
-        prompt_image: str | None = None
-        # Один и тот же promptImage на ВСЕ клипы — единственный штатный способ
-        # консистентности лица (отдельного character-consistency в API нет).
-        # TODO: last-frame chaining (последний кадр клипа N → promptImage клипа N+1).
+        # Штатного character-consistency в API нет: якорь — одно исходное фото
+        # на клип 1; дальше last-frame chaining (кадр N → promptImage N+1).
+        # Если кадр не снялся — снова якорь (то же исходное фото).
         job_seed = random.randint(0, 2_147_483_647)
+        anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
             await _notify(progress, "🖼️ Готовлю твоё фото как первый кадр для всех клипов…")
-            prompt_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
+            anchor_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
         elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
-            prompt_image = reference_image
+            anchor_image = reference_image
         else:
             await _notify(progress, "🖼️ Рисую общий первый кадр, чтобы лицо и место не прыгали…")
             try:
@@ -994,12 +1018,13 @@ async def build_video(
                 )
                 still_path = work_dir / "bible_still.png"
                 await _download(session, still_url, still_path)
-                prompt_image = await file_to_data_uri(still_path, work_dir / "bible_ref.jpg")
+                anchor_image = await file_to_data_uri(still_path, work_dir / "bible_ref.jpg")
             except PipelineError as exc:
                 if getattr(exc, "code", "").startswith("moderation"):
                     raise
                 log.warning("shared still failed, T2V with lock: %s", exc.detail)
-                prompt_image = None
+                anchor_image = None
+        prompt_image = anchor_image
 
         muxed: list[Path] = []
         for i, scene in enumerate(scenes):
@@ -1029,6 +1054,12 @@ async def build_video(
                 )
             except PipelineError:
                 raise
+            if prompt_image and n < total:
+                try:
+                    prompt_image = await last_frame_data_uri(clip, work_dir / f"tail{i}.jpg")
+                except PipelineError as exc:
+                    log.warning("last-frame chain fallback to anchor: %s", exc.detail)
+                    prompt_image = anchor_image
             mixed = await mux_scene(
                 clip,
                 audio,
