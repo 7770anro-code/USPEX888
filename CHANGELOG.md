@@ -7,6 +7,8 @@
 - Config schema: `C3_INSTITUTIONAL_V1`
 
 ## Changes
+- Demo Terminal UX: opening Control Center → Bybit Demo no longer sets `users.scanning=0`.
+- Demo Terminal observability: show Shadow ON/OFF, scanner ONLINE/STOP + mode, and last `trade_events` pulse (no trading/risk changes).
 - Separate `XAI_VOTE_MODEL` (default `grok-4-1-fast-non-reasoning`).
 - Council budget 12s; Cursor vote timeout 11s; Grok 5s.
 - Cursor votes: `--trust`, serialized `CURSOR_VOTE_LOCK`.

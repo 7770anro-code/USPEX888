@@ -783,18 +783,45 @@ def bybit_demo_trade_menu():
         [{"text":"👑 Назад в админку","callback_data":"admin"}]
     ]}
 
+def demo_terminal_observability(cid):
+    """UX-only pulse for Demo Terminal. Does not change scan/shadow/risk."""
+    cid=str(cid)
+    us=user(cid)
+    scan=bool(us[7]) if us else False
+    mode=(us[5] if us else "—")
+    uni=(us[6] if us else "—")
+    online=bool(scan and execution_mode(cid)=="demo")
+    shadow="ON (zero orders)" if SHADOW_MODE else "OFF (DEMO orders allowed)"
+    sm=scanner_metrics[cid]
+    last_j="—"
+    try:
+        c=con()
+        row=c.execute("select event,sym,ts from trade_events where chat_id=? order by id desc limit 1",(cid,)).fetchone()
+        c.close()
+        if row:
+            ev,sym,ts=row
+            age=max(0.0, now()-float(ts or 0))
+            last_j=f"{ev} {sym or ''} • {age:.0f}s ago".strip()
+    except Exception:
+        last_j="—"
+    return (
+        f"🪙 Рынок         Top-{uni}\n"
+        f"👻 Shadow        {shadow}\n"
+        f"📡 Сканер        {'🟢 ONLINE' if online else '⚪ STOP'} • {mode}\n"
+        f"💓 Last          {last_j} • cycles {int(sm.get('cycles') or 0)}"
+    )
+
 async def bybit_demo_terminal_text(session,cid):
     w=await bybit_demo_wallet_snapshot(session)
     p=await bybit_demo_positions_snapshot(session)
     ps=p.get("positions",[]) if p.get("ok") else []
     unreal=sum(x["unrealisedPnl"] for x in ps)
-    us=user(str(cid)); scan=bool(us[7])
     money=(f"💰 Equity        ${w['equity']:.2f}\n🏦 Wallet        ${w['wallet']:.2f}\n💵 Available     ${w['available']:.2f}\n📈 Unreal PnL    ${unreal:+.2f}\n"
            if w.get("ok") else "💰 Equity        API ERROR\n")
     return ("🟦 USPEX • BYBIT DEMO TERMINAL\n━━━━━━━━━━━━━━━━━━\n"+money+
-            f"📂 DEMO позиции {len(ps)} / {limit_text(str(cid))}\n🪙 Рынок         Top-{us[6]}\n"
-            f"📡 Сканер        {'🟢 ONLINE' if scan and execution_mode(str(cid))=='demo' else '⚪ STOP'}\n"
-            "━━━━━━━━━━━━━━━━━━\n🎯 Ручной: сигнал + твои параметры.\n🤖 AUTO: USPEX + Cursor + Grok → только полный Triple AI consensus + revalidation.\n🔒 Только Demo Trading.")
+            f"📂 DEMO позиции {len(ps)} / {limit_text(str(cid))}\n"
+            + demo_terminal_observability(cid)+"\n"
+            "━━━━━━━━━━━━━━━━━━\n🎯 Ручной: сигнал + твои параметры.\n🤖 AUTO: USPEX + Cursor + Grok → только полный Triple AI consensus + revalidation.\n🔒 Только Demo Trading.\n💡 Обновить статус: 💰 Обновить баланс — открытие этого экрана сканер не останавливает.")
 
 def _admin_guard(cid):
     return is_admin(cid)
@@ -3359,7 +3386,8 @@ async def telegram_loop(s):
                     elif action=="scoreboard": await send(s,cid,pro_scoreboard_text(cid),admin_menu())
                     elif action=="journal": await send(s,cid,admin_journal_text(cid),admin_menu())
                     elif action=="bybit":
-                        set_mode(cid,scan=False); pending_manual.pop(cid,None); set_execution_mode(cid,"demo")
+                        # View-only: do not stop the scanner or drop a pending manual signal.
+                        set_execution_mode(cid,"demo")
                         await send(s,cid,await bybit_demo_terminal_text(s,cid),bybit_demo_trade_menu())
                     elif action=="grokdiag": await send(s,cid,await grok_diag_text(s),admin_menu())
 

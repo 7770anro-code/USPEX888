@@ -355,6 +355,30 @@ class TestJournalScoreboardShadowRisk(unittest.TestCase):
         self.assertIn("WOULD_OPEN", src)
         self.assertIn("continue", src)
 
+    def test_51_opening_demo_terminal_does_not_stop_scanner(self):
+        src = (ROOT / "main_USPEX_PRO_DESK_V12.py").read_text(encoding="utf-8")
+        start = src.find('elif action=="bybit":')
+        end = src.find('elif action=="grokdiag"', start)
+        self.assertGreater(start, 0)
+        self.assertGreater(end, start)
+        block = src[start:end]
+        self.assertIn("bybit_demo_terminal_text", block)
+        self.assertNotIn("set_mode(cid,scan=False)", block)
+        self.assertNotIn("pending_manual.pop", block)
+
+    def test_52_demo_terminal_shows_shadow_and_last_event(self):
+        src = (ROOT / "main_USPEX_PRO_DESK_V12.py").read_text(encoding="utf-8")
+        start = src.find("def demo_terminal_observability(")
+        end = src.find("async def bybit_demo_terminal_text(")
+        self.assertGreater(start, 0)
+        self.assertGreater(end, start)
+        block = src[start:end]
+        self.assertIn("SHADOW_MODE", block)
+        self.assertIn("trade_events", block)
+        self.assertIn("scanner_metrics", block)
+        term = src[end:src.find("def _admin_guard(", end)]
+        self.assertIn("demo_terminal_observability(cid)", term)
+
     def test_50_portfolio_guard(self):
         ok = portfolio_guard(
             available=1000, equity=1200, new_margin=100, live_margin=200,
