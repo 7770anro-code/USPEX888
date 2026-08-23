@@ -107,7 +107,7 @@ sudo systemctl restart videobot.service
 ## Ночной night_runner (после отдельного «ок»)
 
 Только `/opt/videobot`. Units: `videobot-night.service` + `videobot-night.timer`.
-Не стартовать, пока владелец не напишет «ок». `NIGHT_AUTOPOST` держать `0`, пока нет App Review и OAuth.
+Не стартовать, пока владелец не напишет «ок». Первая неделя: `NIGHT_REQUIRE_CONFIRM=1`, `NIGHT_AUTOPOST=0` — публикация только после да/нет в Telegram (`/night`). Полный автопост позже: `/night_mode auto`.
 
 ```bash
 sudo cp /opt/videobot/videobot-night.service /etc/systemd/system/

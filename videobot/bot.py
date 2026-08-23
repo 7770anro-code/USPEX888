@@ -394,9 +394,8 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 
 
 async def on_night_callback(query: CallbackQuery) -> None:
-    owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
     chat_id = query.message.chat.id if query.message else 0
-    if owner and int(chat_id) != owner:
+    if not _is_night_owner(chat_id):
         await query.answer("Только владелец.")
         return
     data = query.data or ""
@@ -405,13 +404,13 @@ async def on_night_callback(query: CallbackQuery) -> None:
     except Exception:
         pass
     from night_post import publish_job_id
-    from night_store import WAIT_CONFIRM, jobs_for_date, update_job
+    from night_store import PUBLISH_UNKNOWN, WAIT_CONFIRM, jobs_for_date, update_job
     from night_time import today_msk
 
     msg = query.message
     if data == "night:skipall":
         for job in jobs_for_date(today_msk().isoformat()):
-            if job.get("status") == WAIT_CONFIRM:
+            if job.get("status") in (WAIT_CONFIRM, PUBLISH_UNKNOWN):
                 update_job(int(job["id"]), status="video_ready", last_error="owner skipped")
         if isinstance(msg, Message):
             await msg.answer("Ок, ролики остаются локально. Постинг не трогаю.")
@@ -419,7 +418,7 @@ async def on_night_callback(query: CallbackQuery) -> None:
     if data == "night:okall":
         texts = []
         for job in jobs_for_date(today_msk().isoformat()):
-            if job.get("status") == WAIT_CONFIRM:
+            if job.get("status") in (WAIT_CONFIRM, PUBLISH_UNKNOWN):
                 texts.append(await publish_job_id(int(job["id"])))
         if isinstance(msg, Message):
             await msg.answer("\n\n".join(texts)[:3900] or "Нет задач в ожидании.")
@@ -437,18 +436,77 @@ async def on_night_callback(query: CallbackQuery) -> None:
             await msg.answer(text[:3900])
 
 
-async def cmd_night(message: Message, state: FSMContext) -> None:
+def _is_night_owner(chat_id: int) -> bool:
     owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
-    if owner and int(message.chat.id) != owner:
+    return (not owner) or int(chat_id) == owner
+
+
+def night_confirm_kb(job_ids: list[int]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for jid in job_ids[:6]:
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"Да · {jid}", callback_data=f"night:ok:{jid}"),
+                InlineKeyboardButton(text=f"Нет · {jid}", callback_data=f"night:skip:{jid}"),
+            ]
+        )
+    if job_ids:
+        rows.append([InlineKeyboardButton(text="Опубликовать все", callback_data="night:okall")])
+        rows.append([InlineKeyboardButton(text="Только сохранить", callback_data="night:skipall")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def cmd_night(message: Message, state: FSMContext) -> None:
+    if not _is_night_owner(message.chat.id):
         await message.answer("Эта команда только для владельца ночного пайплайна.")
         return
-    from night_report import status_text
+    from night_report import mode_text, status_text
+    from night_store import pending_owner_ids
+    from night_time import today_msk
 
     try:
-        text = status_text()
+        text = status_text() + "\n\n" + mode_text()
     except Exception as exc:
         text = f"Ночной пайплайн: {type(exc).__name__}"
-    await message.answer(text[:3900], reply_markup=main_menu())
+    wait_ids = pending_owner_ids(today_msk().isoformat())
+    kb = night_confirm_kb(wait_ids) if wait_ids else main_menu()
+    await message.answer(text[:3900], reply_markup=kb)
+
+
+async def cmd_night_mode(message: Message, state: FSMContext) -> None:
+    if not _is_night_owner(message.chat.id):
+        await message.answer("Эта команда только для владельца ночного пайплайна.")
+        return
+    from night_report import mode_text
+    from night_store import set_publish_mode
+
+    raw = (message.text or "").strip().split(maxsplit=1)
+    arg = raw[1].strip().lower() if len(raw) > 1 else ""
+    if arg in {"confirm", "данет", "safe"}:
+        set_publish_mode(confirm=True, autopost=False)
+        await message.answer(
+            "Включил режим первой недели: идеи+видео сами, публикация только после да/нет.\n"
+            + mode_text(),
+            reply_markup=main_menu(),
+        )
+        return
+    if arg in {"auto", "autopost"}:
+        set_publish_mode(confirm=False, autopost=True)
+        await message.answer(
+            "Включил полный автопост без подтверждения. "
+            "Имеет смысл после App Review и прогрева аккаунтов.\n"
+            + mode_text()
+            + "\nВернуть да/нет: /night_mode confirm",
+            reply_markup=main_menu(),
+        )
+        return
+    await message.answer(
+        mode_text()
+        + "\n\n/night — отчёт и кнопки да/нет\n"
+        + "/night_mode confirm — только с подтверждением (default)\n"
+        + "/night_mode auto — без подтверждения (позже, после App Review)",
+        reply_markup=main_menu(),
+    )
 
 
 async def _start_clone_voice(msg: Message, state: FSMContext) -> None:
@@ -1547,6 +1605,7 @@ async def main() -> None:
     dp.message.register(cmd_help, Command("help"))
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.message.register(cmd_night, Command("night"))
+    dp.message.register(cmd_night_mode, Command("night_mode"))
     dp.callback_query.register(on_night_callback, F.data.startswith("night:"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))

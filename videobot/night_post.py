@@ -1,6 +1,7 @@
 """Модуль 3: TikTok Content Posting API + Instagram Graph API.
 
-Публикация только если NIGHT_AUTOPOST=1 и токены аккаунта заданы.
+Автопост ночью — только если require_confirm=0 и autopost=1.
+Подтверждение владельца в Telegram публикует даже при NIGHT_AUTOPOST=0.
 Не обходим App Review: unaudited TikTok → inbox/draft; Instagram без
 Business/Creator + instagram_content_publish → явный блокер в отчёте.
 Секреты в логи не пишем — только имена переменных.
@@ -17,7 +18,14 @@ import aiohttp
 
 import config
 from night_accounts import Account, ig_creds, tiktok_token
-from night_circuit import INSTAGRAM, POST_GATE, TIKTOK, CircuitOpen, with_breaker
+from night_circuit import (
+    INSTAGRAM,
+    POST_GATE,
+    TIKTOK,
+    CircuitOpen,
+    RetryableHttpError,
+    with_breaker,
+)
 
 log = logging.getLogger("videobot.night")
 
@@ -34,6 +42,24 @@ class PostBlocker(RuntimeError):
         self.vars_needed = vars_needed or []
 
 
+# Timeout после создания publish/container — не ретраим POST, только статус по ID.
+RETRYABLE_EXC = (
+    RetryableHttpError,
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientOSError,
+    ConnectionError,
+)
+
+TIKTOK_OK_STATUS = {"PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"}
+TIKTOK_WAIT_STATUS = {
+    "PROCESSING",
+    "PROCESSING_UPLOAD",
+    "PROCESSING_DOWNLOAD",
+    "UPLOADING",
+    "DOWNLOADING",
+}
+
+
 class PostResult:
     def __init__(
         self,
@@ -45,6 +71,8 @@ class PostResult:
         error: str = "",
         blocker: bool = False,
         vars_needed: list[str] | None = None,
+        publish_id: str = "",
+        container_id: str = "",
     ) -> None:
         self.platform = platform
         self.ok = ok
@@ -53,7 +81,8 @@ class PostResult:
         self.error = error
         self.blocker = blocker
         self.vars_needed = vars_needed or []
-        self.publish_id = ""
+        self.publish_id = publish_id
+        self.container_id = container_id
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -93,15 +122,37 @@ async def _json(resp: aiohttp.ClientResponse) -> dict[str, Any]:
 def is_manual_error(text: str) -> bool:
     low = (text or "").lower()
     keys = (
-        "oauth", "unauthenticated", "unauthorized", "forbidden", "scope",
-        "audit", "review", "permission", "moderation", "safety",
-        "unsupported", "invalid video", "format",
+        "oauth", "unauthenticated", "unauthorized", "401", "403",
+        "forbidden", "scope", "audit", "review", "permission",
+        "moderation", "rejected", "rejection", "safety",
+        "unsupported", "invalid video", "format", "spam",
+        "unaudited", "app review",
     )
     return any(k in low for k in keys)
 
 
 def is_retryable_http(status: int) -> bool:
-    return status in (429, 500, 502, 503, 504) or status == 0
+    return status in (429, 500, 502, 503, 504)
+
+
+def is_timeout_error(exc: BaseException) -> bool:
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    return isinstance(exc, aiohttp.ServerTimeoutError) or "timeout" in type(exc).__name__.lower()
+
+
+def classify_job_status(results: list[PostResult]) -> str:
+    from night_store import MANUAL_REVIEW, POSTED, PUBLISH_UNKNOWN, VIDEO_READY
+
+    if any(r.mode == "publish_unknown" for r in results):
+        return PUBLISH_UNKNOWN
+    if any(r.blocker and is_manual_error(r.error) for r in results):
+        return MANUAL_REVIEW
+    if any(is_manual_error(r.error) for r in results if r.error and not r.ok):
+        return MANUAL_REVIEW
+    if any(r.ok for r in results):
+        return POSTED
+    return VIDEO_READY
 
 
 def _tiktok_err(data: dict[str, Any]) -> str:
@@ -142,28 +193,7 @@ async def post_tiktok(
     if not TIKTOK.allow():
         return PostResult("tiktok", False, error="circuit open: tiktok", blocker=False)
     if existing_publish_id:
-        try:
-            st = await tiktok_status(session, token, existing_publish_id)
-            status = str(((st.get("data") or {}) if isinstance(st.get("data"), dict) else {}).get("status") or "")
-            if status.upper() in {"PUBLISH_COMPLETE", "SEND_TO_USER_INBOX"}:
-                return PostResult("tiktok", True, mode="resume", url=f"tiktok:publish_id={existing_publish_id}")
-            if status.upper() == "FAILED":
-                return PostResult("tiktok", False, error="publish failed after resume", blocker=is_manual_error(status))
-            return PostResult(
-                "tiktok",
-                False,
-                mode="publish_unknown",
-                url=f"tiktok:publish_id={existing_publish_id}",
-                error="PUBLISH_UNKNOWN: статус не подтверждён, повторный init не делаю",
-            )
-        except Exception as exc:
-            return PostResult(
-                "tiktok",
-                False,
-                mode="publish_unknown",
-                url=f"tiktok:publish_id={existing_publish_id}",
-                error=f"PUBLISH_UNKNOWN: {type(exc).__name__}",
-            )
+        return await _tiktok_resume(session, token, existing_publish_id)
     mode = config.NIGHT_TIKTOK_MODE if config.NIGHT_TIKTOK_MODE in ("inbox", "direct") else "inbox"
     size = video.stat().st_size
     headers = {
@@ -173,6 +203,7 @@ async def post_tiktok(
 
     async def _init() -> dict[str, Any]:
         await POST_GATE.wait()
+        aigc_info = {"is_aigc": True}
         if mode == "direct":
             body: dict[str, Any] = {
                 "post_info": {
@@ -181,7 +212,7 @@ async def post_tiktok(
                     "disable_duet": False,
                     "disable_comment": False,
                     "disable_stitch": False,
-                    "is_aigc": True,
+                    **aigc_info,
                 },
                 "source_info": {
                     "source": "FILE_UPLOAD",
@@ -192,23 +223,38 @@ async def post_tiktok(
             }
             url = TIKTOK_DIRECT_INIT
         else:
+            # inbox тоже помечаем AIGC — TikTok требует is_aigc для AI-видео
             body = {
+                "post_info": aigc_info,
                 "source_info": {
                     "source": "FILE_UPLOAD",
                     "video_size": size,
                     "chunk_size": size,
                     "total_chunk_count": 1,
-                }
+                },
             }
             url = TIKTOK_INBOX_INIT
         async with session.post(url, headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-            return await _json(resp)
+            data = await _json(resp)
+            status = int(data.get("_status") or resp.status or 0)
+            if is_retryable_http(status):
+                raise RetryableHttpError(status, _tiktok_err(data))
+            return data
 
     try:
-        data = await with_breaker(TIKTOK, _init, retries=3)
+        data = await with_breaker(TIKTOK, _init, retries=3, retry_for=RETRYABLE_EXC)
     except CircuitOpen:
         return PostResult("tiktok", False, error="circuit open: tiktok")
     except Exception as exc:
+        if is_timeout_error(exc):
+            return PostResult(
+                "tiktok",
+                False,
+                mode="publish_unknown",
+                error="PUBLISH_UNKNOWN: timeout на init, повторный POST не делаю",
+            )
+        if is_manual_error(str(exc)):
+            return PostResult("tiktok", False, error=f"{type(exc).__name__}", blocker=True)
         return PostResult("tiktok", False, error=f"{type(exc).__name__}")
 
     err = data.get("error") if isinstance(data.get("error"), dict) else {}
@@ -220,7 +266,13 @@ async def post_tiktok(
                 " Блокер: TikTok app без review. Нужен App Review (video.publish) "
                 "или оставьте NIGHT_TIKTOK_MODE=inbox (черновик в inbox, scope video.upload)."
             )
-        return PostResult("tiktok", False, mode=mode, error=(msg + hint)[:400], blocker=True)
+        return PostResult(
+            "tiktok",
+            False,
+            mode=mode,
+            error=(msg + hint)[:400],
+            blocker=True,
+        )
 
     payload = data.get("data") if isinstance(data.get("data"), dict) else {}
     upload_url = str(payload.get("upload_url") or "")
@@ -247,18 +299,82 @@ async def post_tiktok(
         status = await _put()
     except Exception as exc:
         TIKTOK.fail()
-        return PostResult("tiktok", False, mode=mode, error=f"upload {type(exc).__name__}")
+        return PostResult(
+            "tiktok",
+            False,
+            mode="publish_unknown",
+            url=f"tiktok:publish_id={publish_id}" if publish_id else "",
+            error=f"PUBLISH_UNKNOWN: upload {type(exc).__name__}",
+            publish_id=publish_id,
+        )
+    if is_retryable_http(status):
+        TIKTOK.fail()
+        return PostResult(
+            "tiktok",
+            False,
+            mode="publish_unknown" if publish_id else mode,
+            url=f"tiktok:publish_id={publish_id}" if publish_id else "",
+            error=f"upload HTTP {status}",
+            publish_id=publish_id,
+        )
     if status >= 400:
         TIKTOK.fail()
-        return PostResult("tiktok", False, mode=mode, error=f"upload HTTP {status}")
+        return PostResult(
+            "tiktok",
+            False,
+            mode=mode,
+            error=f"upload HTTP {status}",
+            blocker=is_manual_error(f"HTTP {status}"),
+            publish_id=publish_id,
+        )
 
     # inbox: SEND_TO_USER_INBOX; direct: PUBLISH_COMPLETE
     link = f"tiktok:publish_id={publish_id}"
     note = "черновик в inbox (нужно подтверждение в приложении TikTok)" if mode == "inbox" else "direct/SELF_ONLY"
-    log.info("tiktok uploaded account=%s mode=%s", account.id, mode)
-    result = PostResult("tiktok", True, mode=f"{mode}/{note}", url=link)
-    result.publish_id = publish_id
-    return result
+    log.info("tiktok uploaded account=%s mode=%s aigc=1", account.id, mode)
+    return PostResult("tiktok", True, mode=f"{mode}/{note}", url=link, publish_id=publish_id)
+
+
+async def _tiktok_resume(
+    session: aiohttp.ClientSession, token: str, existing_publish_id: str
+) -> PostResult:
+    try:
+        st = await tiktok_status(session, token, existing_publish_id)
+        status = str(((st.get("data") or {}) if isinstance(st.get("data"), dict) else {}).get("status") or "")
+        status_u = status.upper()
+        if status_u in TIKTOK_OK_STATUS:
+            return PostResult(
+                "tiktok",
+                True,
+                mode="resume",
+                url=f"tiktok:publish_id={existing_publish_id}",
+                publish_id=existing_publish_id,
+            )
+        if status_u == "FAILED":
+            msg = _tiktok_err(st) if st.get("error") else "publish failed after resume"
+            return PostResult(
+                "tiktok",
+                False,
+                error=msg,
+                blocker=is_manual_error(msg + " " + status),
+            )
+        return PostResult(
+            "tiktok",
+            False,
+            mode="publish_unknown",
+            url=f"tiktok:publish_id={existing_publish_id}",
+            error="PUBLISH_UNKNOWN: статус не подтверждён, повторный init не делаю",
+            publish_id=existing_publish_id,
+        )
+    except Exception as exc:
+        return PostResult(
+            "tiktok",
+            False,
+            mode="publish_unknown",
+            url=f"tiktok:publish_id={existing_publish_id}",
+            error=f"PUBLISH_UNKNOWN: {type(exc).__name__}",
+            publish_id=existing_publish_id,
+        )
 
 
 async def post_instagram(
@@ -266,6 +382,8 @@ async def post_instagram(
     account: Account,
     video: Path,
     caption: str,
+    *,
+    existing_container_id: str = "",
 ) -> PostResult:
     user_id, token = ig_creds(account)
     if not user_id or not token:
@@ -283,6 +401,9 @@ async def post_instagram(
         )
     if not INSTAGRAM.allow():
         return PostResult("instagram", False, error="circuit open: instagram")
+
+    if existing_container_id:
+        return await _instagram_finish(session, user_id, token, existing_container_id)
 
     public = public_url_for(video)
 
@@ -304,13 +425,25 @@ async def post_instagram(
         async with session.post(url, data=params, timeout=aiohttp.ClientTimeout(total=60)) as resp:
             data = await _json(resp)
             data["_mode"] = mode_used
+            status = int(data.get("_status") or resp.status or 0)
+            if is_retryable_http(status):
+                raise RetryableHttpError(status, str(data.get("error") or status))
             return data
 
     try:
-        created = await with_breaker(INSTAGRAM, _create, retries=3)
+        created = await with_breaker(INSTAGRAM, _create, retries=3, retry_for=RETRYABLE_EXC)
     except CircuitOpen:
         return PostResult("instagram", False, error="circuit open: instagram")
     except Exception as exc:
+        if is_timeout_error(exc):
+            return PostResult(
+                "instagram",
+                False,
+                mode="publish_unknown",
+                error="PUBLISH_UNKNOWN: timeout на create, повторный POST не делаю",
+            )
+        if is_manual_error(str(exc)):
+            return PostResult("instagram", False, error=f"{type(exc).__name__}", blocker=True)
         return PostResult("instagram", False, error=f"{type(exc).__name__}")
 
     if created.get("error") or created.get("_status", 200) >= 400:
@@ -319,7 +452,7 @@ async def post_instagram(
         blocker = any(
             x in msg.lower()
             for x in ("permission", "review", "instagram_content_publish", "page", "business")
-        )
+        ) or is_manual_error(msg)
         extra = ""
         if blocker:
             extra = (
@@ -348,18 +481,35 @@ async def post_instagram(
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
-                if resp.status >= 400:
+                if is_retryable_http(resp.status) or resp.status >= 400:
                     return PostResult(
                         "instagram",
                         False,
-                        mode="resumable",
+                        mode="publish_unknown" if is_retryable_http(resp.status) else "resumable",
                         error=f"rupload HTTP {resp.status}",
+                        container_id=container,
+                        blocker=not is_retryable_http(resp.status) and is_manual_error(f"HTTP {resp.status}"),
                     )
         except Exception as exc:
             INSTAGRAM.fail()
-            return PostResult("instagram", False, error=f"rupload {type(exc).__name__}")
+            return PostResult(
+                "instagram",
+                False,
+                mode="publish_unknown",
+                error=f"PUBLISH_UNKNOWN: rupload {type(exc).__name__}",
+                container_id=container,
+            )
 
-    # poll container
+    return await _instagram_finish(session, user_id, token, container)
+
+
+async def _instagram_finish(
+    session: aiohttp.ClientSession,
+    user_id: str,
+    token: str,
+    container: str,
+) -> PostResult:
+    finished = False
     for _ in range(24):
         await asyncio.sleep(5)
         try:
@@ -373,15 +523,24 @@ async def post_instagram(
             continue
         code = str(st.get("status_code") or "").upper()
         if code == "FINISHED":
+            finished = True
             break
         if code in {"ERROR", "EXPIRED"}:
+            msg = str(st.get("status") or code)
             return PostResult(
                 "instagram",
                 False,
-                error=str(st.get("status") or code),
+                error=msg,
+                blocker=is_manual_error(msg),
             )
-    else:
-        return PostResult("instagram", False, error="container timeout")
+    if not finished:
+        return PostResult(
+            "instagram",
+            False,
+            mode="publish_unknown",
+            error="PUBLISH_UNKNOWN: container timeout, повторный create не делаю",
+            container_id=container,
+        )
 
     async def _publish() -> dict[str, Any]:
         async with session.post(
@@ -389,18 +548,43 @@ async def post_instagram(
             data={"creation_id": container, "access_token": token},
             timeout=aiohttp.ClientTimeout(total=60),
         ) as resp:
-            return await _json(resp)
+            data = await _json(resp)
+            status = int(data.get("_status") or resp.status or 0)
+            if is_retryable_http(status):
+                raise RetryableHttpError(status, str(data.get("error") or status))
+            return data
 
     try:
-        pub = await with_breaker(INSTAGRAM, _publish, retries=3)
+        pub = await with_breaker(INSTAGRAM, _publish, retries=3, retry_for=RETRYABLE_EXC)
     except Exception as exc:
-        return PostResult("instagram", False, error=f"publish {type(exc).__name__}")
+        if is_timeout_error(exc) or isinstance(exc, RetryableHttpError):
+            return PostResult(
+                "instagram",
+                False,
+                mode="publish_unknown",
+                error=f"PUBLISH_UNKNOWN: publish {type(exc).__name__}",
+                container_id=container,
+            )
+        return PostResult(
+            "instagram",
+            False,
+            error=f"publish {type(exc).__name__}",
+            container_id=container,
+            blocker=is_manual_error(str(exc)),
+        )
     if pub.get("error") or pub.get("_status", 200) >= 400:
         err = pub.get("error") if isinstance(pub.get("error"), dict) else {}
-        return PostResult("instagram", False, error=str(err.get("message") or "publish failed"))
+        msg = str(err.get("message") or "publish failed")
+        return PostResult(
+            "instagram",
+            False,
+            error=msg,
+            container_id=container,
+            blocker=is_manual_error(msg),
+        )
     media_id = str(pub.get("id") or container)
-    log.info("instagram published account=%s", account.id)
-    return PostResult("instagram", True, mode="reels", url=f"instagram:media_id={media_id}")
+    log.info("instagram published")
+    return PostResult("instagram", True, mode="reels", url=f"instagram:media_id={media_id}", container_id=container)
 
 
 async def publish_account(
@@ -411,15 +595,18 @@ async def publish_account(
     *,
     tiktok_publish_id: str = "",
     ig_container_id: str = "",
+    confirmed: bool = False,
 ) -> list[PostResult]:
+    from night_store import autopost_enabled
+
     results: list[PostResult] = []
-    if not config.NIGHT_AUTOPOST:
+    if not confirmed and not autopost_enabled():
         results.append(
             PostResult(
                 "tiktok",
                 False,
                 blocker=True,
-                error="NIGHT_AUTOPOST=0 — постинг выключен, файл сохранён локально",
+                error="автопост выключен — публикация только после да/нет в Telegram",
                 vars_needed=["NIGHT_AUTOPOST"],
             )
         )
@@ -428,7 +615,7 @@ async def publish_account(
                 "instagram",
                 False,
                 blocker=True,
-                error="NIGHT_AUTOPOST=0 — постинг выключен, файл сохранён локально",
+                error="автопост выключен — публикация только после да/нет в Telegram",
                 vars_needed=["NIGHT_AUTOPOST"],
             )
         )
@@ -436,14 +623,51 @@ async def publish_account(
     results.append(
         await post_tiktok(session, account, video, caption, existing_publish_id=tiktok_publish_id)
     )
-    results.append(await post_instagram(session, account, video, caption))
+    results.append(
+        await post_instagram(
+            session, account, video, caption, existing_container_id=ig_container_id
+        )
+    )
     return results
 
 
+def persist_publish_results(job_id: int, job: dict[str, Any], results: list[PostResult]) -> str:
+    from night_store import update_job
+
+    tt = next((r for r in results if r.platform == "tiktok"), PostResult("tiktok", False))
+    ig = next((r for r in results if r.platform == "instagram"), PostResult("instagram", False))
+    errors = [r.error for r in results if r.error]
+    status = classify_job_status(results)
+
+    def _keep_id(result: PostResult, old: str, attr: str) -> str:
+        current = getattr(result, attr) or ""
+        if result.mode == "publish_unknown":
+            return current or old
+        if current:
+            return current
+        # FAILED / moderation — старый ID больше не используем, иначе вечный resume
+        return ""
+
+    update_job(
+        job_id,
+        status=status,
+        tiktok_url=tt.url or str(job.get("tiktok_url") or ""),
+        instagram_url=ig.url or str(job.get("instagram_url") or ""),
+        tiktok_mode=tt.mode,
+        instagram_mode=ig.mode,
+        tiktok_publish_id=_keep_id(tt, str(job.get("tiktok_publish_id") or ""), "publish_id"),
+        ig_container_id=_keep_id(ig, str(job.get("ig_container_id") or ""), "container_id"),
+        last_error=(" | ".join(errors))[:400],
+        locked_at=None,
+        worker_id="",
+    )
+    return status
+
+
 async def publish_job_id(job_id: int) -> str:
-    """Подтверждение владельца из Telegram: публикуем уже готовый файл."""
+    """Подтверждение владельца из Telegram: публикуем уже готовый файл этого аккаунта."""
     from night_accounts import load_accounts
-    from night_store import get_job, update_job, MANUAL_REVIEW, POSTED, PUBLISH_UNKNOWN, VIDEO_READY
+    from night_store import get_job, video_belongs_to_account
 
     job = get_job(job_id)
     if not job:
@@ -451,8 +675,11 @@ async def publish_job_id(job_id: int) -> str:
     video = Path(str(job.get("video_path") or ""))
     if not video.is_file():
         return "Файл видео не найден — публиковать нечего."
+    acc_id = str(job.get("account_id") or "")
+    if not video_belongs_to_account(str(video), acc_id, str(job.get("run_date") or "")):
+        return "Этот файл не из папки аккаунта — один ролик на все три аккаунта не публикую."
     accounts = {a.id: a for a in load_accounts()}
-    acc = accounts.get(str(job.get("account_id")))
+    acc = accounts.get(acc_id)
     if not acc:
         return "Аккаунт задачи неизвестен."
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
@@ -464,25 +691,9 @@ async def publish_job_id(job_id: int) -> str:
             str(job.get("caption") or job.get("title") or ""),
             tiktok_publish_id=str(job.get("tiktok_publish_id") or ""),
             ig_container_id=str(job.get("ig_container_id") or ""),
+            confirmed=True,
         )
-    tt = next((r for r in results if r.platform == "tiktok"), None)
-    ig = next((r for r in results if r.platform == "instagram"), None)
-    errors = [r.error for r in results if r and r.error]
-    status = POSTED if any(r.ok for r in results) else VIDEO_READY
-    if any(r and r.mode == "publish_unknown" for r in results):
-        status = PUBLISH_UNKNOWN
-    if any(r and r.blocker and is_manual_error(r.error) for r in results):
-        status = MANUAL_REVIEW
-    update_job(
-        job_id,
-        status=status,
-        tiktok_url=(tt.url if tt else ""),
-        instagram_url=(ig.url if ig else ""),
-        tiktok_publish_id=(tt.publish_id if tt else "") or str(job.get("tiktok_publish_id") or ""),
-        last_error=(" | ".join(errors))[:400],
-        locked_at=None,
-        worker_id="",
-    )
+    persist_publish_results(job_id, job, results)
     return format_job_result(job_id, results)
 
 

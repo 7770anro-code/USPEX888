@@ -16,7 +16,12 @@ def format_report(payload: dict[str, Any]) -> str:
     lines = [
         "Успех 888 · утренний отчёт",
         f"Дата: {payload.get('date')} · видео: {payload.get('videos_ok', 0)}/{payload.get('videos_planned', 0)}",
-        f"Идей: {payload.get('ideas', 0)} · автопост: {'on' if payload.get('autopost') else 'off'}",
+        f"Идей: {payload.get('ideas', 0)} · автопост: {'on' if payload.get('autopost') else 'off'}"
+        + (
+            " · публикация: да/нет в Telegram"
+            if payload.get("require_confirm", True)
+            else ""
+        ),
         "",
     ]
     for job in payload.get("jobs") or []:
@@ -92,8 +97,26 @@ async def send_telegram(text: str, *, reply_markup: dict[str, Any] | None = None
         return False
 
 
+def mode_text() -> str:
+    from night_store import autopost_enabled, require_confirm
+
+    confirm = require_confirm()
+    auto = autopost_enabled()
+    if confirm or not auto:
+        return (
+            "Режим: идеи и видео сами, публикация только после да/нет "
+            "(/night или кнопки утром). Это default первой недели.\n"
+            "Полный автопост позже: /night_mode auto "
+            "(или NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1)."
+        )
+    return (
+        "Режим: полный автопост без подтверждения. "
+        "Вернуть да/нет: /night_mode confirm."
+    )
+
+
 def status_text() -> str:
-    from night_store import jobs_for_date, last_run
+    from night_store import autopost_enabled, jobs_for_date, last_run, require_confirm
     from night_time import today_msk
 
     last = last_run()
@@ -108,7 +131,8 @@ def status_text() -> str:
             "videos_ok": sum(1 for j in jobs if j.get("video_path")),
             "videos_planned": len(jobs),
             "ideas": len(jobs),
-            "autopost": config.NIGHT_AUTOPOST,
+            "autopost": autopost_enabled(),
+            "require_confirm": require_confirm(),
             "jobs": [
                 {
                     "account": j.get("account_id"),

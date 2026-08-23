@@ -501,6 +501,147 @@ def test_clone_posts_voices_add() -> None:
     assert "ELEVEN_IVC_URL" in src
 
 
+def test_night_policy_defaults() -> None:
+    import inspect
+    import shutil
+    import tempfile
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    import config
+    import store
+    from night_ideas import DENY_RE, assign_to_accounts, parse_ideas
+    from night_post import PostResult, classify_job_status, is_manual_error, is_retryable_http, post_tiktok
+    from night_store import (
+        MANUAL_REVIEW,
+        POSTING,
+        PUBLISH_UNKNOWN,
+        VIDEO_READY,
+        consecutive_moderation,
+        create_job,
+        recover_stale,
+        require_confirm,
+        set_publish_mode,
+        update_job,
+        video_belongs_to_account,
+    )
+
+    assert is_retryable_http(429)
+    assert is_retryable_http(503)
+    assert not is_retryable_http(400)
+    assert not is_retryable_http(401)
+    assert is_manual_error("oauth scope unaudited")
+    assert is_manual_error("App Review permission denied")
+    assert is_manual_error("moderation rejected")
+    assert is_manual_error("unsupported format")
+    assert not is_manual_error("connection reset")
+    assert classify_job_status([PostResult("tiktok", False, mode="publish_unknown", error="timeout")]) == PUBLISH_UNKNOWN
+    assert classify_job_status([PostResult("tiktok", False, error="oauth forbidden", blocker=True)]) == MANUAL_REVIEW
+
+    src = inspect.getsource(post_tiktok)
+    assert "is_aigc" in src
+    assert "TIKTOK_INBOX_INIT" in src
+    assert "existing_publish_id" in src
+    assert "publish_unknown" in src
+
+    from night_post import post_instagram
+
+    ig_src = inspect.getsource(post_instagram)
+    assert "existing_container_id" in ig_src
+    assert "PUBLISH_UNKNOWN" in ig_src
+
+    denied = parse_ideas(
+        '{"ideas":[{"kind":"motivational","title":"Про Путина","plot":"Политик говорит речь на площади долго.",'
+        '"caption":"#news","score":9},{"kind":"absurd","title":"Синий чайник","plot":"Чайник спорит с будильником утром.",'
+        '"caption":"#абсурд","score":8}]}'
+    )
+    assert DENY_RE.search("знаменитость и celebrity")
+    assert all("путин" not in i["title"].lower() for i in denied)
+    assert any(i["title"] == "Синий чайник" for i in denied)
+
+    class _Acc:
+        def __init__(self, aid: str, theme: str) -> None:
+            self.id = aid
+            self.theme = theme
+
+    ideas = [
+        {"kind": "motivational", "tokens": ["таймер", "утро"], "hashtags": ["фокус"], "caption": "#фокус", "title": "A"},
+        {"kind": "absurd", "tokens": ["чайник", "спор"], "hashtags": ["абсурд"], "caption": "#абсурд", "title": "B"},
+        {"kind": "motivational", "tokens": ["блокнот", "план"], "hashtags": ["план"], "caption": "#план", "title": "C"},
+    ]
+    picked = assign_to_accounts(
+        ideas,
+        [_Acc("motiv", "motivational"), _Acc("absurd", "absurd"), _Acc("brand", "mixed")],
+        limit=3,
+    )
+    assert len(picked) == 3
+    assert len({id(idea) for _, idea in picked}) == 3
+    assert {acc.id for acc, _ in picked} == {"motiv", "absurd", "brand"}
+
+    tmp = tempfile.mkdtemp()
+    old = config.DATA_DIR
+    old_out = config.NIGHT_OUTBOX
+    config.DATA_DIR = tmp
+    config.NIGHT_OUTBOX = str(Path(tmp) / "outbox")
+    store.reset_for_tests()
+    try:
+        assert require_confirm() is True
+        set_publish_mode(confirm=False, autopost=True)
+        from night_store import autopost_enabled
+
+        assert require_confirm() is False
+        assert autopost_enabled() is True
+        set_publish_mode(confirm=True, autopost=False)
+        assert require_confirm() is True
+        day = "2026-08-23"
+        acc_dir = Path(config.NIGHT_OUTBOX) / day / "motiv"
+        acc_dir.mkdir(parents=True)
+        video = acc_dir / "final.mp4"
+        video.write_bytes(b"mp4")
+        assert video_belongs_to_account(str(video), "motiv", day)
+        assert not video_belongs_to_account(str(video), "absurd", day)
+        jid = create_job(
+            {
+                "run_date": day,
+                "account_id": "motiv",
+                "kind": "motivational",
+                "title": "x",
+                "status": POSTING,
+            }
+        )
+        stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        update_job(
+            jid,
+            video_path=str(video),
+            tiktok_publish_id="pub-1",
+            locked_at=stale,
+            worker_id="old",
+        )
+        # recover_stale смотрит locked_at в SQL; update_job пишет locked_at
+        n = recover_stale(minutes=40)
+        from night_store import get_job
+
+        job = get_job(jid)
+        assert job is not None
+        assert job["status"] == PUBLISH_UNKNOWN
+        assert n >= 1
+        update_job(jid, status=MANUAL_REVIEW, last_error="moderation")
+        assert consecutive_moderation(day) >= 1
+    finally:
+        config.DATA_DIR = old
+        config.NIGHT_OUTBOX = old_out
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    from bot import cmd_night_mode, night_confirm_kb
+
+    kb = night_confirm_kb([11, 12])
+    data = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "night:ok:11" in data
+    assert "night:okall" in data
+    assert "night_mode" in inspect.getsource(cmd_night_mode)
+
+
 def test_upscale_result_uses_video_upscale() -> None:
     import inspect
 
@@ -548,5 +689,6 @@ if __name__ == "__main__":
     test_preset_topic_goes_to_cost()
     test_watermark_ffmpeg_overlay()
     test_clone_posts_voices_add()
+    test_night_policy_defaults()
     test_upscale_result_uses_video_upscale()
     print("ok")

@@ -20,6 +20,14 @@ class CircuitOpen(RuntimeError):
         self.name = name
 
 
+class RetryableHttpError(RuntimeError):
+    """429 / 5xx — единственные HTTP, которые можно повторять."""
+
+    def __init__(self, status: int, message: str = "") -> None:
+        self.status = int(status)
+        super().__init__(message or f"HTTP {self.status}")
+
+
 class CircuitBreaker:
     def __init__(self, name: str, *, threshold: int = 3, cooldown_sec: float = 300) -> None:
         self.name = name

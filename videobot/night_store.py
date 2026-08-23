@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS night_runs (
     report TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS night_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_night_jobs_date ON night_jobs(run_date);
 CREATE INDEX IF NOT EXISTS idx_night_ideas_hash ON night_ideas(idea_hash);
 """
@@ -119,20 +124,26 @@ def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 
 def recover_stale(*, minutes: int | None = None) -> int:
-    """Зависшие generating/posting → video_ready если файл есть, иначе pending."""
+    """Зависшие generating/posting: если уже есть publish/container ID — PUBLISH_UNKNOWN."""
     ensure()
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=int(minutes or config.NIGHT_STALE_MINUTES))
     mark = cutoff.isoformat(timespec="seconds")
     n = 0
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT id, status, video_path, locked_at FROM night_jobs "
-            "WHERE status IN (?, ?) AND locked_at IS NOT NULL AND locked_at < ?",
+            "SELECT id, status, video_path, locked_at, tiktok_publish_id, ig_container_id "
+            "FROM night_jobs WHERE status IN (?, ?) AND locked_at IS NOT NULL AND locked_at < ?",
             (GENERATING, POSTING, mark),
         ).fetchall()
         for row in rows:
             video = Path(str(row["video_path"] or ""))
-            nxt = VIDEO_READY if video.is_file() else PENDING
+            has_pub = bool(str(row["tiktok_publish_id"] or "").strip() or str(row["ig_container_id"] or "").strip())
+            if str(row["status"]) == POSTING and has_pub:
+                nxt = PUBLISH_UNKNOWN
+            elif video.is_file():
+                nxt = VIDEO_READY
+            else:
+                nxt = PENDING
             conn.execute(
                 "UPDATE night_jobs SET status = ?, locked_at = NULL, worker_id = '', "
                 "last_error = ?, updated_at = ? WHERE id = ?",
@@ -294,3 +305,75 @@ def last_run() -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM night_runs ORDER BY created_at DESC LIMIT 1").fetchone()
     return _row(row)
+
+
+def get_setting(key: str) -> str | None:
+    ensure()
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM night_settings WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return None
+    return str(row["value"])
+
+
+def set_setting(key: str, value: str) -> None:
+    ensure()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO night_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, str(value), _now()),
+        )
+        conn.commit()
+
+
+def bool_setting(key: str, default: bool) -> bool:
+    raw = get_setting(key)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def require_confirm() -> bool:
+    """Утро = да/нет, пока владелец явно не включит автопост."""
+    return bool_setting("require_confirm", config.NIGHT_REQUIRE_CONFIRM)
+
+
+def autopost_enabled() -> bool:
+    """Полный автопост без кнопок. По умолчанию выключен (env NIGHT_AUTOPOST=0)."""
+    return bool_setting("autopost", config.NIGHT_AUTOPOST)
+
+
+def set_publish_mode(*, confirm: bool, autopost: bool) -> None:
+    set_setting("require_confirm", "1" if confirm else "0")
+    set_setting("autopost", "1" if autopost else "0")
+
+
+def pending_owner_ids(run_date: str) -> list[int]:
+    return [
+        int(job["id"])
+        for job in jobs_for_date(run_date)
+        if job.get("status") in (WAIT_CONFIRM, PUBLISH_UNKNOWN)
+    ]
+
+
+def consecutive_moderation(run_date: str) -> int:
+    """Сколько последних задач дня подряд ушли в moderation / MANUAL_REVIEW."""
+    n = 0
+    for job in reversed(jobs_for_date(run_date)):
+        err = str(job.get("last_error") or "").lower()
+        if job.get("status") == MANUAL_REVIEW or "moderation" in err or "rejection" in err:
+            n += 1
+            continue
+        break
+    return n
+
+
+def video_belongs_to_account(video_path: str, account_id: str, run_date: str) -> bool:
+    """Один mp4 — один аккаунт. Чужой outbox не публикуем."""
+    video = Path(video_path)
+    expected = Path(config.NIGHT_OUTBOX) / run_date / account_id
+    try:
+        video.resolve().relative_to(expected.resolve())
+        return True
+    except (OSError, ValueError):
+        return False

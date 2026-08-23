@@ -52,8 +52,10 @@ SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной �
 - State machine в SQLite: `pending → ideas_ready → generating → video_ready → posting → posted | failed` (+ `wait_confirm` / `publish_unknown` / `manual_review`). Путь к mp4 пишется в `video_ready` сразу; рестарт не переснимает аккаунт, если файл уже есть. Stale `generating`/`posting` старше `NIGHT_STALE_MINUTES` снимаются с лока.
 - Зависшие `generating`/`posting` (stale lock) возвращаются в `pending` или `video_ready`.
 - Дедуп идей 21 день (Jaccard) + запрет похожих тем в один день.
-- По умолчанию **утро = да/нет в Telegram** (`NIGHT_REQUIRE_CONFIRM=1`): идеи и видео сами, публикация только после кнопки. Полный автопост позже: `NIGHT_REQUIRE_CONFIRM=0` и `NIGHT_AUTOPOST=1`.
-- Автопост выключен, пока нет токенов / App Review. Fallback — файл в outbox + блокер в отчёте (имена переменных, не значения). TikTok: `is_aigc=true`. Timeout → `PUBLISH_UNKNOWN`, без повторного init.
+- По умолчанию **утро = да/нет в Telegram** (`/night`, кнопки): идеи и видео сами, реальный пост только после подтверждения владельца. Полный автопост позже: `/night_mode auto` или `NIGHT_REQUIRE_CONFIRM=0` и `NIGHT_AUTOPOST=1`.
+- Один файл не уходит на все 3 аккаунта: разные идеи, хуки, голос, стиль. Denylist реальных людей и опасных тем. Стоп после нескольких moderation/rejection подряд.
+- Кнопка «Да» публикует даже при `NIGHT_AUTOPOST=0`. Автопост ночью без кнопок — только после явной настройки.
+- TikTok: `is_aigc=true` (inbox и direct). Timeout → `PUBLISH_UNKNOWN`: не повторяем POST, сначала статус по publish/container ID. Runway timeout — poll сохранённого task ID. Ретраи только 429/5xx/сеть; OAuth/App Review/формат/модерация → `MANUAL_REVIEW`.
 - Между постами случайная пауза `NIGHT_POST_PAUSE_MIN`…`MAX`. После нескольких moderation подряд — стоп.
 
 ```bash

@@ -22,7 +22,7 @@ from joblock import JobLock
 from night_accounts import load_accounts
 from night_circuit import CircuitOpen, jitter_pause
 from night_ideas import assign_to_accounts, generate_ideas
-from night_post import PostResult, publish_account
+from night_post import persist_publish_results, publish_account
 from night_report import confirm_markup, format_report, send_telegram
 from night_store import (
     FAILED,
@@ -30,18 +30,21 @@ from night_store import (
     IDEAS_READY,
     MANUAL_REVIEW,
     PENDING,
-    POSTED,
     POSTING,
     VIDEO_READY,
     WAIT_CONFIRM,
+    accounts_with_video,
+    autopost_enabled,
+    consecutive_moderation,
     create_job,
     insert_idea,
     jobs_for_date,
     lock_job,
     mark_video_ready,
+    pending_owner_ids,
     recover_stale,
+    require_confirm,
     save_run,
-    accounts_with_video,
     update_job,
     worker_id,
 )
@@ -64,9 +67,11 @@ def _outbox(day: str, account_id: str) -> Path:
 
 def _blockers_from_accounts(accounts) -> list[str]:
     lines: list[str] = []
-    if not config.NIGHT_AUTOPOST:
+    if require_confirm() or not autopost_enabled():
         lines.append(
-            "NIGHT_AUTOPOST=0 — автопостинг выключен. Включите после App Review и OAuth."
+            "Первая неделя: идеи и видео сами, публикация — да/нет утром в Telegram "
+            "(/night или кнопки). Полный автопост позже: /night_mode auto "
+            "или NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1."
         )
     for acc in accounts:
         if not acc.has_tiktok:
@@ -81,7 +86,7 @@ def _blockers_from_accounts(accounts) -> list[str]:
                 "Нужен IG Business/Creator + Facebook Page + instagram_content_publish "
                 "(часто Meta App Review). Не обходим."
             )
-    if config.NIGHT_AUTOPOST and not config.NIGHT_PUBLIC_VIDEO_BASE_URL:
+    if autopost_enabled() and not config.NIGHT_PUBLIC_VIDEO_BASE_URL:
         lines.append(
             "NIGHT_PUBLIC_VIDEO_BASE_URL пуст — Instagram video_url недоступен, "
             "используем resumable upload на rupload.facebook.com."
@@ -110,7 +115,7 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
             runway_credits=int(cost.get("runway") or 0),
             eleven_chars=int(cost.get("eleven_chars") or 0),
         )
-        if config.NIGHT_REQUIRE_CONFIRM:
+        if require_confirm():
             update_job(int(job["id"]), status=WAIT_CONFIRM)
         log.info("job %s video_ready %s", job["id"], video)
     except CircuitOpen as exc:
@@ -139,46 +144,53 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
 
 
 async def _post_job(session: aiohttp.ClientSession, job: dict, account) -> None:
+    from night_store import video_belongs_to_account
+
     video = Path(str(job.get("video_path") or ""))
     if not video.is_file():
         update_job(int(job["id"]), last_error="video_path отсутствует, пост пропущен")
         return
-    lock_job(int(job["id"]), POSTING, worker_id())
-    try:
-        results = await publish_account(session, account, video, str(job.get("caption") or job.get("title") or ""))
-    except Exception as exc:
+    if not video_belongs_to_account(str(video), str(account.id), str(job.get("run_date") or "")):
         update_job(
             int(job["id"]),
-            status=VIDEO_READY,
+            status=MANUAL_REVIEW,
+            last_error="отказ: один файл на несколько аккаунтов не публикую",
+            locked_at=None,
+            worker_id="",
+        )
+        return
+    lock_job(int(job["id"]), POSTING, worker_id())
+    try:
+        results = await publish_account(
+            session,
+            account,
+            video,
+            str(job.get("caption") or job.get("title") or ""),
+            tiktok_publish_id=str(job.get("tiktok_publish_id") or ""),
+            ig_container_id=str(job.get("ig_container_id") or ""),
+            confirmed=False,
+        )
+    except Exception as exc:
+        has_id = bool(job.get("tiktok_publish_id") or job.get("ig_container_id"))
+        update_job(
+            int(job["id"]),
+            status="publish_unknown" if has_id else VIDEO_READY,
             last_error=f"post fallback: {type(exc).__name__}",
             locked_at=None,
             worker_id="",
         )
         log.warning("post failed, kept local file job=%s", job["id"])
         return
-    tt = next((r for r in results if r.platform == "tiktok"), PostResult("tiktok", False))
-    ig = next((r for r in results if r.platform == "instagram"), PostResult("instagram", False))
-    errors = [r.error for r in results if r.error]
-    blockers = [v for r in results for v in r.vars_needed]
-    posted_any = tt.ok or ig.ok
-    update_job(
-        int(job["id"]),
-        status=POSTED if posted_any and not errors else VIDEO_READY,
-        tiktok_url=tt.url,
-        instagram_url=ig.url,
-        tiktok_mode=tt.mode,
-        instagram_mode=ig.mode,
-        last_error=(" | ".join(errors) + ((" vars: " + ", ".join(blockers)) if blockers else ""))[:400],
-        locked_at=None,
-        worker_id="",
-    )
+    persist_publish_results(int(job["id"]), job, results)
 
 
 async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
     ensure_ffmpeg()
     recover_stale()
     day = today_msk().isoformat()
-    if config.NIGHT_REQUIRE_CONFIRM:
+    confirm = require_confirm()
+    auto = autopost_enabled()
+    if confirm:
         for job in jobs_for_date(day):
             if job.get("status") == VIDEO_READY and Path(str(job.get("video_path") or "")).is_file():
                 update_job(int(job["id"]), status=WAIT_CONFIRM)
@@ -197,7 +209,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                 "videos_ok": 0,
                 "videos_planned": n_videos,
                 "ideas": 0,
-                "autopost": config.NIGHT_AUTOPOST,
+                "autopost": auto,
                 "jobs": [],
                 "owner_blockers": ["videobot.lock занят живым ботом или другим night_runner"],
             }
@@ -247,11 +259,17 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                     await _render_job(job, acc, idea, n_scenes=n_scenes)
                 except Exception as exc:
                     log.warning("render stop/continue: %s", type(exc).__name__)
-                    if isinstance(exc, PipelineError) and getattr(exc, "code", "") == "moderation":
-                        mod_hits += 1
+                    if isinstance(exc, PipelineError) and getattr(exc, "code", "") in (
+                        "moderation",
+                        "moderation_person",
+                    ):
                         update_job(int(job["id"]), status=MANUAL_REVIEW, last_error="moderation")
+                        mod_hits = consecutive_moderation(day)
                         if mod_hits >= config.NIGHT_MODERATION_STOP:
                             log.error("moderation stop after %s hits", mod_hits)
+                            owner_blockers.append(
+                                f"Стоп: {mod_hits} moderation/rejection подряд. Правки вручную."
+                            )
                             break
                     if isinstance(exc, PipelineError) and (
                         getattr(exc, "code", "") == "credits"
@@ -262,13 +280,18 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                 if pause:
                     await asyncio.sleep(pause)
 
-            if (not config.NIGHT_REQUIRE_CONFIRM) and config.NIGHT_AUTOPOST:
+            if (not confirm) and auto:
                 posted_jobs = jobs_for_date(day)
                 acc_map = {a.id: a for a in accounts}
                 first_post = True
                 for row in posted_jobs:
                     if row.get("status") not in (VIDEO_READY, WAIT_CONFIRM):
                         continue
+                    if consecutive_moderation(day) >= config.NIGHT_MODERATION_STOP:
+                        owner_blockers.append(
+                            "Стоп публикации: несколько moderation/rejection подряд."
+                        )
+                        break
                     acc = acc_map.get(str(row["account_id"]))
                     if not acc:
                         continue
@@ -281,7 +304,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
             else:
                 owner_blockers.append(
                     "Публикация ждёт да/нет утром в Telegram (кнопки или /night). "
-                    "Полный автопост: NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1."
+                    "Полный автопост позже: /night_mode auto."
                 )
     except Exception as exc:
         log.exception("night run failed")
@@ -295,7 +318,8 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
         "videos_ok": sum(1 for j in rows if Path(str(j.get("video_path") or "")).is_file()),
         "videos_planned": n_videos,
         "ideas": len(ideas) if "ideas" in locals() else 0,
-        "autopost": config.NIGHT_AUTOPOST,
+        "autopost": auto,
+        "require_confirm": confirm,
         "jobs": [
             {
                 "account": j.get("account_id"),
@@ -320,7 +344,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     if notify:
-        wait_ids = [int(j["id"]) for j in rows if j.get("status") == WAIT_CONFIRM]
+        wait_ids = pending_owner_ids(day)
         await send_telegram(text, reply_markup=confirm_markup(wait_ids) if wait_ids else None)
     print(text, end="")
     return {"text": text, "payload": payload}
