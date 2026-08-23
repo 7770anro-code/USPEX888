@@ -41,8 +41,33 @@ SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной �
 
 В «Ещё возможности»: голос по описанию, Speech-to-Speech, upscale любого файла, Seedance extend.
 
+## Ночной пайплайн «Успех 888»
+
+Автономный ночной прогон **без автопостинга**. Готовит вертикальные пакеты 9:16 под ручную загрузку в TikTok и Instagram.
+
+```
+календарь JSON → слоты дня → оценка кредитов → shadow-план
+                                 ↘ (только NIGHT_RENDER=1 / --render) съёмка
+пакет в data/outbox/YYYY-MM-DD/<slot>/  + утренний отчёт в Telegram
+```
+
+- Календарь: `calendar.example.json` (на сервере копия `calendar.json`). Фото людей в слотах запрещены.
+- По умолчанию **shadow**: сценарий не пишется через Grok, Runway/ElevenLabs не вызываются. В outbox — подписи, хештеги, `meta.json`.
+- Съёмка — явный `--render` или `NIGHT_RENDER=1`. Дневной потолок кредитов и `max_jobs` в календаре. Нехватка кредитов — fail-closed, остальные слоты не стартуют.
+- Уже `packed` за дату не переснимается без `--force`.
+- Замок `data/videobot.lock`: ночь и живой Telegram-бот не снимают одновременно.
+- Автопостинг в соцсети **выключен**. Выкладка — руками из outbox.
+- Владелец: `/night` в боте. Timer: `videobot-night.timer` (02:15).
+
+```bash
+cd videobot
+python night_run.py --date 2026-08-24          # shadow
+python night_run.py --render --no-telegram     # съёмка, без отчёта
+python test_night.py
+```
+
 ## Пока не трогаем
 
 Тарифы и лимиты кредитов **на пользователя** — специально в конце: там реальные деньги, ошибка дороже дня ожидания.
 
-Ещё позже: Dubbing, video-to-video (Aleph 2), Brand Kit, редактор сцен, история проектов.
+Ещё позже: автопостинг TikTok/Instagram, Dubbing, video-to-video (Aleph 2), Brand Kit, редактор сцен, история проектов.

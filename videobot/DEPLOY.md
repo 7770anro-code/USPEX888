@@ -104,6 +104,27 @@ sudo systemctl restart videobot.service
 
 Не выполнять `systemctl restart uspex` / `vector`.
 
+## Ночной пайплайн (после отдельного «ок»)
+
+Изоляция та же: только `/opt/videobot`, units `videobot-night.service` + `videobot-night.timer`.
+По умолчанию **shadow** (`NIGHT_RENDER=0`) — кредиты не тратятся.
+
+```bash
+sudo cp /opt/videobot/calendar.example.json /opt/videobot/calendar.json
+sudo chown videobot:videobot /opt/videobot/calendar.json
+# в .env: NIGHT_CALENDAR=/opt/videobot/calendar.json
+#         NIGHT_OWNER_CHAT_ID=<telegram chat id владельца>
+#         NIGHT_RENDER=0
+sudo cp /opt/videobot/videobot-night.service /etc/systemd/system/
+sudo cp /opt/videobot/videobot-night.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now videobot-night.timer
+sudo systemctl list-timers videobot-night.timer --no-pager
+sudo -u videobot /opt/videobot/venv/bin/python /opt/videobot/night_run.py --date 2026-08-24
+```
+
+Съёмка ночью — только после явного `NIGHT_RENDER=1` в `.env`. Автопостинг в TikTok/Instagram не включать.
+
 ## Roadmap / Backlog (Волна 2)
 
 Не деплоить и не кодить сейчас. Список в [README.md](README.md) § Roadmap: Voice Cloning / Design / STS / Dubbing, act_two, Aleph 2, extend, upscale, Brand Kit, редактор сцен, история, тарифы. Для клонирования голоса и оживления персонажа — то же обязательное согласие кнопкой, что для фото.

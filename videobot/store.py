@@ -1,4 +1,4 @@
-"""SQLite: клон голоса по user_id, водяной знак, последний ролик."""
+"""SQLite: клон голоса по user_id, водяной знак, последний ролик, ночные слоты."""
 
 from __future__ import annotations
 
@@ -82,6 +82,46 @@ def init_db() -> None:
             conn.commit()
         _READY.add(key)
         _migrate_json_voices()
+    _ensure_night_tables()
+
+
+_NIGHT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS night_jobs (
+    run_date TEXT NOT NULL,
+    slot_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    preset TEXT NOT NULL DEFAULT '',
+    topic TEXT NOT NULL DEFAULT '',
+    platforms TEXT NOT NULL DEFAULT '',
+    quality TEXT NOT NULL DEFAULT '',
+    runway_credits INTEGER NOT NULL DEFAULT 0,
+    outbox TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (run_date, slot_id)
+);
+CREATE TABLE IF NOT EXISTS night_runs (
+    run_id TEXT PRIMARY KEY,
+    run_date TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    planned INTEGER NOT NULL DEFAULT 0,
+    rendered INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    runway_used INTEGER NOT NULL DEFAULT 0,
+    report TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+"""
+
+
+def _ensure_night_tables() -> None:
+    path = db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(path), timeout=30) as conn:
+        conn.executescript(_NIGHT_SCHEMA)
+        conn.commit()
 
 
 def _row_voice(row: sqlite3.Row) -> dict[str, str]:
@@ -259,3 +299,138 @@ def _migrate_json_voices() -> None:
         except OSError:
             log.warning("не смог убрать JSON голосов %s", path)
         log.info("перенёс голоса из %s в SQLite", path.name)
+
+
+def upsert_night_job(
+    *,
+    run_date: str,
+    slot_id: str,
+    status: str,
+    preset: str = "",
+    topic: str = "",
+    platforms: list[str] | None = None,
+    quality: str = "",
+    runway_credits: int = 0,
+    outbox: str = "",
+    error: str = "",
+) -> None:
+    init_db()
+    now = _now()
+    plats = ",".join(platforms or [])
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO night_jobs (run_date, slot_id, status, preset, topic, platforms, "
+            "quality, runway_credits, outbox, error, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(run_date, slot_id) DO UPDATE SET "
+            "status = excluded.status, preset = excluded.preset, topic = excluded.topic, "
+            "platforms = excluded.platforms, quality = excluded.quality, "
+            "runway_credits = excluded.runway_credits, outbox = excluded.outbox, "
+            "error = excluded.error, updated_at = excluded.updated_at",
+            (
+                run_date,
+                slot_id,
+                status,
+                preset,
+                topic,
+                plats,
+                quality,
+                int(runway_credits),
+                outbox,
+                error,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+
+def _job_row(row: sqlite3.Row) -> dict[str, Any]:
+    plats = [p for p in str(row["platforms"] or "").split(",") if p]
+    return {
+        "run_date": str(row["run_date"]),
+        "slot_id": str(row["slot_id"]),
+        "status": str(row["status"]),
+        "preset": str(row["preset"] or ""),
+        "topic": str(row["topic"] or ""),
+        "platforms": plats,
+        "quality": str(row["quality"] or ""),
+        "runway_credits": int(row["runway_credits"] or 0),
+        "outbox": str(row["outbox"] or ""),
+        "error": str(row["error"] or ""),
+    }
+
+
+def list_night_jobs(run_date: str) -> list[dict[str, Any]]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM night_jobs WHERE run_date = ? ORDER BY created_at, slot_id",
+            (run_date,),
+        ).fetchall()
+    return [_job_row(row) for row in rows]
+
+
+def packed_night_slot_ids(run_date: str) -> set[str]:
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT slot_id FROM night_jobs WHERE run_date = ? AND status = 'packed'",
+            (run_date,),
+        ).fetchall()
+    return {str(row["slot_id"]) for row in rows}
+
+
+def save_night_run(
+    *,
+    run_id: str,
+    run_date: str,
+    mode: str,
+    planned: int,
+    rendered: int,
+    failed: int,
+    skipped: int,
+    runway_used: int,
+    report: str,
+) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO night_runs (run_id, run_date, mode, planned, rendered, "
+            "failed, skipped, runway_used, report, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                run_date,
+                mode,
+                int(planned),
+                int(rendered),
+                int(failed),
+                int(skipped),
+                int(runway_used),
+                report,
+                _now(),
+            ),
+        )
+        conn.commit()
+
+
+def get_last_night_run() -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM night_runs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": str(row["run_id"]),
+        "run_date": str(row["run_date"]),
+        "mode": str(row["mode"]),
+        "planned": int(row["planned"] or 0),
+        "rendered": int(row["rendered"] or 0),
+        "failed": int(row["failed"] or 0),
+        "skipped": int(row["skipped"] or 0),
+        "runway_used": int(row["runway_used"] or 0),
+        "report": str(row["report"] or ""),
+    }

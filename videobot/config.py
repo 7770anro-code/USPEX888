@@ -92,6 +92,13 @@ WATERMARK_LOGO = _clean("WATERMARK_LOGO")
 WORK_DIR = _clean("WORK_DIR") or "/tmp/videobot"
 DATA_DIR = _clean("VIDEOBOT_DATA_DIR") or str(Path(__file__).resolve().parent / "data")
 
+NIGHT_CALENDAR = _clean("NIGHT_CALENDAR") or str(
+    Path(__file__).resolve().parent / "calendar.example.json"
+)
+NIGHT_OUTBOX = _clean("NIGHT_OUTBOX") or str(Path(DATA_DIR) / "outbox")
+NIGHT_RENDER = (_clean("NIGHT_RENDER") or "0").lower() in ("1", "true", "yes", "on")
+NIGHT_OWNER_CHAT_ID = int(_clean("NIGHT_OWNER_CHAT_ID") or "0")
+
 
 def missing_secrets() -> list[str]:
     names = [
@@ -109,6 +116,16 @@ def missing_secrets() -> list[str]:
     missing = [name for name, value in zip(names, values) if not value]
     if XAI_API_KEY_ERROR:
         missing = [n for n in missing if n != "XAI_API_KEY_NEW"]
+    return missing
+
+
+def missing_render_secrets() -> list[str]:
+    """Ключи съёмки. Telegram для ночи необязателен."""
+    names = ["XAI_API_KEY_NEW", "ELEVENLABS_API_KEY", "RUNWAY_API_KEY"]
+    values = [XAI_API_KEY_NEW, ELEVENLABS_API_KEY, RUNWAY_API_KEY]
+    missing = [name for name, value in zip(names, values) if not value]
+    if XAI_API_KEY_ERROR and "XAI_API_KEY_NEW" not in missing:
+        missing.insert(0, "XAI_API_KEY_NEW")
     return missing
 
 

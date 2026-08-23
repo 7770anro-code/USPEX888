@@ -1,0 +1,60 @@
+{
+  "name": "Успех 888",
+  "timezone": "Europe/Moscow",
+  "owner_chat_id": 0,
+  "daily_budget_runway": 400,
+  "max_jobs": 2,
+  "quality_default": "fast",
+  "watermark": false,
+  "slots": [
+    {
+      "id": "mon-viral-hour",
+      "weekdays": ["mon"],
+      "preset": "viral",
+      "topic": "3 привычки, которые возвращают тебе час каждый день",
+      "platforms": ["tiktok", "instagram"]
+    },
+    {
+      "id": "tue-brand-focus",
+      "weekdays": ["tue"],
+      "preset": "brand",
+      "topic": "Почему много задач — это не продуктивность, а шум",
+      "platforms": ["tiktok", "instagram"]
+    },
+    {
+      "id": "wed-meme-notes",
+      "weekdays": ["wed"],
+      "preset": "meme",
+      "topic": "Когда открыл заметки с планами и понял, что это список желаний",
+      "platforms": ["tiktok"]
+    },
+    {
+      "id": "thu-ad-offer",
+      "weekdays": ["thu"],
+      "preset": "ad",
+      "topic": "Как упаковать оффер в 20 секунд, чтобы досмотрели до конца",
+      "platforms": ["tiktok", "instagram"]
+    },
+    {
+      "id": "fri-viral-start",
+      "weekdays": ["fri"],
+      "preset": "viral",
+      "topic": "Страх начать стоит дороже любой ошибки за первый месяц",
+      "platforms": ["tiktok", "instagram"]
+    },
+    {
+      "id": "sat-cine-city",
+      "weekdays": ["sat"],
+      "preset": "cine",
+      "topic": "Ночной город и одно решение, которое меняет неделю",
+      "platforms": ["instagram"]
+    },
+    {
+      "id": "sun-brand-review",
+      "weekdays": ["sun"],
+      "preset": "brand",
+      "topic": "Воскресный разбор: что сработало за неделю и что выкинуть",
+      "platforms": ["tiktok", "instagram"]
+    }
+  ]
+}
