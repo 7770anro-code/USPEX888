@@ -24,6 +24,14 @@ from pipeline import (
 
 log = logging.getLogger("videobot.night")
 
+DENY_RE = re.compile(
+    r"путин|зеленск|трамп|байден|навальн|киев|москва\s+атак|"
+    r"суицид|самоубий|наркот|героин|кокаин|"
+    r"знаменитост|селебрити|celebrity|real person|узнаваемо(е|го)\s+лиц|"
+    r"нацист|теракт|расстрел",
+    re.I,
+)
+
 STOPWORDS = {
     "и", "в", "во", "на", "что", "как", "для", "это", "не", "ни", "с", "со", "по",
     "из", "к", "у", "о", "же", "бы", "а", "но", "или", "если", "чтобы", "то",
@@ -109,6 +117,9 @@ def parse_ideas(raw: str) -> list[dict[str, Any]]:
         plot = " ".join(str(item.get("plot") or "").split())[:500]
         caption = str(item.get("caption") or "").strip()[:2200]
         if len(title) < 4 or len(plot) < 12:
+            continue
+        blob = f"{title} {plot} {caption}"
+        if DENY_RE.search(blob):
             continue
         tokens = tokenize(title, plot, caption)
         try:

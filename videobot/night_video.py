@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import config
+import pipeline as pipeline_mod
 from night_accounts import Account
 from night_circuit import ELEVEN, RUNWAY, CircuitOpen
 from presets import camera_prompt, estimate_cost, motion_prompt, voice_settings_payload
-from pipeline import PipelineError, build_video
+from pipeline import PipelineError, build_video, is_runway_safety_fail, is_runway_person_moderation
 
 log = logging.getLogger("videobot.night")
 
@@ -48,6 +49,7 @@ async def render_idea(
         f"Тип: {idea.get('kind')}. Хук: {idea.get('hook') or idea.get('title')}. "
         f"{idea.get('plot') or ''}"
     )
+    pipeline_mod.CANCEL_ON_TIMEOUT = False
     try:
         video, script = await build_video(
             str(idea.get("plot") or idea.get("title") or ""),
@@ -71,7 +73,12 @@ async def render_idea(
     except PipelineError as exc:
         if getattr(exc, "code", "") == "credits" or "credit" in (exc.detail or "").lower():
             RUNWAY.fail()
+        if is_runway_safety_fail("", exc.detail) or is_runway_person_moderation("", exc.detail):
+            RUNWAY.fail()
+            exc.code = "moderation"
         raise
+    finally:
+        pipeline_mod.CANCEL_ON_TIMEOUT = True
     dest_mp4.parent.mkdir(parents=True, exist_ok=True)
     src = Path(video)
     if src.resolve() != dest_mp4.resolve():

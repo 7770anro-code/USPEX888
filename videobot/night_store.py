@@ -22,6 +22,9 @@ VIDEO_READY = "video_ready"
 POSTING = "posting"
 POSTED = "posted"
 FAILED = "failed"
+PUBLISH_UNKNOWN = "publish_unknown"
+MANUAL_REVIEW = "manual_review"
+WAIT_CONFIRM = "wait_confirm"
 
 ACTIVE_LOCK = (GENERATING, POSTING)
 
@@ -44,6 +47,8 @@ CREATE TABLE IF NOT EXISTS night_jobs (
     instagram_url TEXT NOT NULL DEFAULT '',
     tiktok_mode TEXT NOT NULL DEFAULT '',
     instagram_mode TEXT NOT NULL DEFAULT '',
+    tiktok_publish_id TEXT NOT NULL DEFAULT '',
+    ig_container_id TEXT NOT NULL DEFAULT '',
     runway_credits INTEGER NOT NULL DEFAULT 0,
     eleven_chars INTEGER NOT NULL DEFAULT 0,
     locked_at TEXT,
@@ -89,6 +94,14 @@ def ensure() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(path), timeout=30) as conn:
         conn.executescript(_SCHEMA)
+        for col, spec in (
+            ("tiktok_publish_id", "TEXT NOT NULL DEFAULT ''"),
+            ("ig_container_id", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE night_jobs ADD COLUMN {col} {spec}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
 
 
@@ -169,6 +182,13 @@ def recent_idea_tokens(*, days: int) -> list[set[str]]:
     return out
 
 
+def get_job(job_id: int) -> dict[str, Any] | None:
+    ensure()
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM night_jobs WHERE id = ?", (int(job_id),)).fetchone()
+    return _row(row)
+
+
 def jobs_for_date(run_date: str) -> list[dict[str, Any]]:
     ensure()
     with _connect() as conn:
@@ -224,7 +244,8 @@ def update_job(job_id: int, **fields: Any) -> None:
         return
     fields = {k: v for k, v in fields.items() if k in {
         "status", "last_error", "video_path", "tiktok_url", "instagram_url",
-        "tiktok_mode", "instagram_mode", "runway_credits", "eleven_chars",
+        "tiktok_mode", "instagram_mode", "tiktok_publish_id", "ig_container_id",
+        "runway_credits", "eleven_chars",
         "locked_at", "worker_id", "title", "plot", "caption",
     }}
     fields["updated_at"] = _now()

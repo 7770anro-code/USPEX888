@@ -23,14 +23,16 @@ from night_accounts import load_accounts
 from night_circuit import CircuitOpen, jitter_pause
 from night_ideas import assign_to_accounts, generate_ideas
 from night_post import PostResult, publish_account
-from night_report import format_report, send_telegram
+from night_report import confirm_markup, format_report, send_telegram
 from night_store import (
     FAILED,
     GENERATING,
+    MANUAL_REVIEW,
     PENDING,
     POSTED,
     POSTING,
     VIDEO_READY,
+    WAIT_CONFIRM,
     create_job,
     insert_idea,
     jobs_for_date,
@@ -106,6 +108,8 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
             runway_credits=int(cost.get("runway") or 0),
             eleven_chars=int(cost.get("eleven_chars") or 0),
         )
+        if config.NIGHT_REQUIRE_CONFIRM:
+            update_job(int(job["id"]), status=WAIT_CONFIRM)
         log.info("job %s video_ready %s", job["id"], video)
     except CircuitOpen as exc:
         update_job(int(job["id"]), status=PENDING, last_error=str(exc), locked_at=None, worker_id="")
@@ -226,11 +230,18 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                 )
                 jobs.append(({"id": jid, "run_date": day, **idea, "account_id": acc.id}, acc, idea))
 
+            mod_hits = 0
             for job, acc, idea in jobs:
                 try:
                     await _render_job(job, acc, idea, n_scenes=n_scenes)
                 except Exception as exc:
                     log.warning("render stop/continue: %s", type(exc).__name__)
+                    if isinstance(exc, PipelineError) and getattr(exc, "code", "") == "moderation":
+                        mod_hits += 1
+                        update_job(int(job["id"]), status=MANUAL_REVIEW, last_error="moderation")
+                        if mod_hits >= config.NIGHT_MODERATION_STOP:
+                            log.error("moderation stop after %s hits", mod_hits)
+                            break
                     if isinstance(exc, PipelineError) and (
                         getattr(exc, "code", "") == "credits"
                         or "кредит" in (exc.user_message or "").lower()
@@ -240,21 +251,27 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                 if pause:
                     await asyncio.sleep(pause)
 
-            posted_jobs = jobs_for_date(day)
-            acc_map = {a.id: a for a in accounts}
-            first_post = True
-            for row in posted_jobs:
-                if row.get("status") != VIDEO_READY:
-                    continue
-                acc = acc_map.get(str(row["account_id"]))
-                if not acc:
-                    continue
-                if not first_post and not smoke:
-                    await asyncio.sleep(
-                        jitter_pause(config.NIGHT_POST_PAUSE_MIN, config.NIGHT_POST_PAUSE_MAX)
-                    )
-                first_post = False
-                await _post_job(session, row, acc)
+            if (not config.NIGHT_REQUIRE_CONFIRM) and config.NIGHT_AUTOPOST:
+                posted_jobs = jobs_for_date(day)
+                acc_map = {a.id: a for a in accounts}
+                first_post = True
+                for row in posted_jobs:
+                    if row.get("status") not in (VIDEO_READY, WAIT_CONFIRM):
+                        continue
+                    acc = acc_map.get(str(row["account_id"]))
+                    if not acc:
+                        continue
+                    if not first_post and not smoke:
+                        await asyncio.sleep(
+                            jitter_pause(config.NIGHT_POST_PAUSE_MIN, config.NIGHT_POST_PAUSE_MAX)
+                        )
+                    first_post = False
+                    await _post_job(session, row, acc)
+            else:
+                owner_blockers.append(
+                    "Публикация ждёт да/нет утром в Telegram (кнопки или /night). "
+                    "Полный автопост: NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1."
+                )
     except Exception as exc:
         log.exception("night run failed")
         owner_blockers.append(f"прогон оборвался: {type(exc).__name__}")
@@ -292,7 +309,8 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
     if notify:
-        await send_telegram(text)
+        wait_ids = [int(j["id"]) for j in rows if j.get("status") == WAIT_CONFIRM]
+        await send_telegram(text, reply_markup=confirm_markup(wait_ids) if wait_ids else None)
     print(text, end="")
     return {"text": text, "payload": payload}
 

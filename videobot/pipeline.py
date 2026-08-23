@@ -70,6 +70,7 @@ RATIO_PRESETS = {
 }
 
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
+CANCEL_ON_TIMEOUT = True
 
 
 # Явные тексты при модерации Runway (docs 21.08.2026: FAILED + failureCode SAFETY.*).
@@ -737,7 +738,9 @@ async def _runway_poll(
         last_status or "unknown",
         int(config.RUNWAY_TIMEOUT_SEC),
     )
-    cancelled = await _runway_cancel(session, task_id)
+    cancelled = False
+    if CANCEL_ON_TIMEOUT:
+        cancelled = await _runway_cancel(session, task_id)
     if not cancelled:
         log.error(
             "Runway task still running after local timeout task_id=%s last_status=%s "
@@ -847,6 +850,29 @@ async def _runway_submit(
     raise PipelineError("Runway недоступен.", last_err or _clip(raw, 240))
 
 
+async def _resume_or_submit(
+    session: aiohttp.ClientSession,
+    path: str,
+    payload: dict[str, Any],
+    dest: Path,
+    *,
+    used_image: bool = False,
+) -> str:
+    """После timeout не создаём новую задачу — сначала poll сохранённого task id."""
+    side = dest.with_suffix(dest.suffix + ".runway_id")
+    if side.is_file():
+        tid = side.read_text(encoding="utf-8").strip()
+        if tid:
+            log.info("Runway resume poll task_id=%s file=%s", tid, dest.name)
+            return await _runway_poll(session, tid, used_image=used_image)
+    tid = await _runway_submit(session, path, payload, used_image=used_image)
+    try:
+        side.write_text(tid, encoding="utf-8")
+    except OSError:
+        log.warning("не записал Runway task id рядом с %s", dest.name)
+    return await _runway_poll(session, tid, used_image=used_image)
+
+
 async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Path:
     tries = max(1, int(config.HTTP_RETRIES))
     last_err = ""
@@ -888,9 +914,17 @@ def text_to_image_payload(prompt: str, ratio: str) -> dict[str, Any]:
     }
 
 
-async def _text_to_image_url(session: aiohttp.ClientSession, prompt: str, ratio: str) -> str:
+async def _text_to_image_url(
+    session: aiohttp.ClientSession,
+    prompt: str,
+    ratio: str,
+    dest_hint: Path | None = None,
+) -> str:
     """Общий still для цепочки I2V, если пользователь не прислал фото."""
-    task_id = await _runway_submit(session, "/v1/text_to_image", text_to_image_payload(prompt, ratio))
+    payload = text_to_image_payload(prompt, ratio)
+    if dest_hint is not None:
+        return await _resume_or_submit(session, "/v1/text_to_image", payload, dest_hint)
+    task_id = await _runway_submit(session, "/v1/text_to_image", payload)
     return await _runway_poll(session, task_id)
 
 
@@ -939,8 +973,9 @@ async def runway_clip(
     async def _i2v(image: str, mdl: str) -> Path:
         payload = _clip_payload_base(mdl, visual, ratio, seconds, seed)
         payload["promptImage"] = image
-        task_id = await _runway_submit(session, "/v1/image_to_video", payload, used_image=True)
-        video_url = await _runway_poll(session, task_id, used_image=True)
+        video_url = await _resume_or_submit(
+            session, "/v1/image_to_video", payload, dest, used_image=True
+        )
         return await _download(session, video_url, dest)
 
     for round_i in range(2):
@@ -957,13 +992,12 @@ async def runway_clip(
                         return await _i2v(prompt_image, "gen4_turbo")
                     raise
             if quality == "fast":
-                still = await _text_to_image_url(session, visual, ratio)
+                still = await _text_to_image_url(session, visual, ratio, dest.with_name(dest.stem + "_still.hint"))
                 return await _i2v(still, "gen4_turbo")
             if model in RUNWAY_T2V_MODELS:
                 t2v_payload = _clip_payload_base(model, visual, ratio, seconds, seed)
                 try:
-                    task_id = await _runway_submit(session, "/v1/text_to_video", t2v_payload)
-                    video_url = await _runway_poll(session, task_id)
+                    video_url = await _resume_or_submit(session, "/v1/text_to_video", t2v_payload, dest)
                     return await _download(session, video_url, dest)
                 except PipelineError as exc:
                     if is_runway_user_facing(exc) and getattr(exc, "code", "") != "credits":
@@ -972,7 +1006,7 @@ async def runway_clip(
                     if status not in (400, 404, 422):
                         raise
                     log.warning("T2V rejected (%s), fallback still+I2V: %s", status, exc.detail)
-            still = await _text_to_image_url(session, visual, ratio)
+            still = await _text_to_image_url(session, visual, ratio, dest.with_name(dest.stem + "_still.hint"))
             return await _i2v(still, "gen4_turbo")
         except PipelineError as exc:
             last_fail = exc
@@ -1334,6 +1368,7 @@ async def build_video(
                         motion,
                     ),
                     ratio,
+                    work_dir / "bible_still.hint",
                 )
                 still_path = work_dir / "bible_still.png"
                 await _download(session, still_url, still_path)

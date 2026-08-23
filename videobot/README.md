@@ -52,8 +52,9 @@ SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной �
 - State machine в SQLite: `pending → generating → video_ready → posting → posted | failed`. Путь к mp4 пишется в `video_ready` сразу, рестарт не перегенерирует.
 - Зависшие `generating`/`posting` (stale lock) возвращаются в `pending` или `video_ready`.
 - Дедуп идей 21 день (Jaccard) + запрет похожих тем в один день.
-- Автопост выключен, пока нет токенов / App Review: `NIGHT_AUTOPOST=0`. Fallback — файл в outbox + блокер в отчёте (имена переменных, не значения).
-- Между постами случайная пауза `NIGHT_POST_PAUSE_MIN`…`MAX`.
+- По умолчанию **утро = да/нет в Telegram** (`NIGHT_REQUIRE_CONFIRM=1`): идеи и видео сами, публикация только после кнопки. Полный автопост позже: `NIGHT_REQUIRE_CONFIRM=0` и `NIGHT_AUTOPOST=1`.
+- Автопост выключен, пока нет токенов / App Review. Fallback — файл в outbox + блокер в отчёте (имена переменных, не значения). TikTok: `is_aigc=true`. Timeout → `PUBLISH_UNKNOWN`, без повторного init.
+- Между постами случайная пауза `NIGHT_POST_PAUSE_MIN`…`MAX`. После нескольких moderation подряд — стоп.
 
 ```bash
 python night_runner.py --smoke --no-telegram

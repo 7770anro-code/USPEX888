@@ -393,6 +393,50 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Ок, отменил. Можно начать заново.", reply_markup=main_menu())
 
 
+async def on_night_callback(query: CallbackQuery) -> None:
+    owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
+    chat_id = query.message.chat.id if query.message else 0
+    if owner and int(chat_id) != owner:
+        await query.answer("Только владелец.")
+        return
+    data = query.data or ""
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    from night_post import publish_job_id
+    from night_store import WAIT_CONFIRM, jobs_for_date, update_job
+    from night_time import today_msk
+
+    msg = query.message
+    if data == "night:skipall":
+        for job in jobs_for_date(today_msk().isoformat()):
+            if job.get("status") == WAIT_CONFIRM:
+                update_job(int(job["id"]), status="video_ready", last_error="owner skipped")
+        if isinstance(msg, Message):
+            await msg.answer("Ок, ролики остаются локально. Постинг не трогаю.")
+        return
+    if data == "night:okall":
+        texts = []
+        for job in jobs_for_date(today_msk().isoformat()):
+            if job.get("status") == WAIT_CONFIRM:
+                texts.append(await publish_job_id(int(job["id"])))
+        if isinstance(msg, Message):
+            await msg.answer("\n\n".join(texts)[:3900] or "Нет задач в ожидании.")
+        return
+    if data.startswith("night:skip:"):
+        jid = int(data.split(":")[-1])
+        update_job(jid, status="video_ready", last_error="owner skipped")
+        if isinstance(msg, Message):
+            await msg.answer(f"Задача {jid}: только локально.")
+        return
+    if data.startswith("night:ok:"):
+        jid = int(data.split(":")[-1])
+        text = await publish_job_id(jid)
+        if isinstance(msg, Message):
+            await msg.answer(text[:3900])
+
+
 async def cmd_night(message: Message, state: FSMContext) -> None:
     owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
     if owner and int(message.chat.id) != owner:
@@ -1503,6 +1547,7 @@ async def main() -> None:
     dp.message.register(cmd_help, Command("help"))
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.message.register(cmd_night, Command("night"))
+    dp.callback_query.register(on_night_callback, F.data.startswith("night:"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
     dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")

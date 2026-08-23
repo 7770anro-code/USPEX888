@@ -53,20 +53,36 @@ def _scrub(text: str) -> str:
     return text
 
 
-async def send_telegram(text: str) -> bool:
+def confirm_markup(job_ids: list[int]) -> dict[str, Any] | None:
+    if not job_ids:
+        return None
+    rows: list[list[dict[str, str]]] = []
+    for jid in job_ids[:6]:
+        rows.append(
+            [
+                {"text": f"Да · {jid}", "callback_data": f"night:ok:{jid}"},
+                {"text": f"Нет · {jid}", "callback_data": f"night:skip:{jid}"},
+            ]
+        )
+    rows.append([{"text": "Опубликовать все", "callback_data": "night:okall"}])
+    rows.append([{"text": "Только сохранить", "callback_data": "night:skipall"}])
+    return {"inline_keyboard": rows}
+
+
+async def send_telegram(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
     token = config.VIDEOBOT_TELEGRAM_TOKEN
     chat = int(config.NIGHT_OWNER_CHAT_ID or 0)
     if not token or chat <= 0:
         log.info("telegram report skipped (need VIDEOBOT_TELEGRAM_TOKEN and NIGHT_OWNER_CHAT_ID)")
         return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
+    body: dict[str, Any] = {"chat_id": chat, "text": text[:3900], "disable_web_page_preview": True}
+    if reply_markup:
+        body["reply_markup"] = reply_markup
     try:
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                url,
-                json={"chat_id": chat, "text": text[:3900], "disable_web_page_preview": True},
-            ) as resp:
+            async with session.post(url, json=body) as resp:
                 if resp.status >= 400:
                     log.warning("telegram report HTTP %s", resp.status)
                     return False
