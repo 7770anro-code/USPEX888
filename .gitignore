@@ -6,3 +6,8 @@ __pycache__/
 venv/
 *.pyc
 .DS_Store
+videobot/data/user_*.json
+videobot/data/user_*.json.bak
+videobot/data/last/
+videobot/data/outbox/
+videobot/data/*.lock

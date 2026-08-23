@@ -1,0 +1,19 @@
+[Unit]
+Description=VideoBot Telegram (idea to 15-20s video)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=videobot
+Group=videobot
+WorkingDirectory=/opt/videobot
+EnvironmentFile=/opt/videobot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/videobot/venv/bin/python /opt/videobot/bot.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=VideoBot Успех 888 night_runner (not the Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=videobot
+Group=videobot
+WorkingDirectory=/opt/videobot
+EnvironmentFile=/opt/videobot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/videobot/venv/bin/python /opt/videobot/night_runner.py
+Nice=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

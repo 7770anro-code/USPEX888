@@ -1,0 +1,10 @@
+[Unit]
+Description=VideoBot night_runner 02:15 Europe/Moscow
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
