@@ -49,7 +49,7 @@ SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной �
 
 - Синтетика only: без фото людей, без Act Two, без клона голоса.
 - `VIDEOS_PER_NIGHT` (по умолчанию 3) — по одному ролику на аккаунт, разный голос/темп/стиль.
-- State machine в SQLite: `pending → generating → video_ready → posting → posted | failed`. Путь к mp4 пишется в `video_ready` сразу, рестарт не перегенерирует.
+- State machine в SQLite: `pending → ideas_ready → generating → video_ready → posting → posted | failed` (+ `wait_confirm` / `publish_unknown` / `manual_review`). Путь к mp4 пишется в `video_ready` сразу; рестарт не переснимает аккаунт, если файл уже есть. Stale `generating`/`posting` старше `NIGHT_STALE_MINUTES` снимаются с лока.
 - Зависшие `generating`/`posting` (stale lock) возвращаются в `pending` или `video_ready`.
 - Дедуп идей 21 день (Jaccard) + запрет похожих тем в один день.
 - По умолчанию **утро = да/нет в Telegram** (`NIGHT_REQUIRE_CONFIRM=1`): идеи и видео сами, публикация только после кнопки. Полный автопост позже: `NIGHT_REQUIRE_CONFIRM=0` и `NIGHT_AUTOPOST=1`.

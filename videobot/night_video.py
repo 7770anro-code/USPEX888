@@ -10,7 +10,7 @@ from typing import Any
 import config
 import pipeline as pipeline_mod
 from night_accounts import Account
-from night_circuit import ELEVEN, RUNWAY, CircuitOpen
+from night_circuit import ELEVEN, ELEVEN_GATE, RUNWAY, RUNWAY_GATE, CircuitOpen
 from presets import camera_prompt, estimate_cost, motion_prompt, voice_settings_payload
 from pipeline import PipelineError, build_video, is_runway_safety_fail, is_runway_person_moderation
 
@@ -44,6 +44,8 @@ async def render_idea(
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     if not RUNWAY.allow() or not ELEVEN.allow():
         raise CircuitOpen("runway" if not RUNWAY.allow() else "elevenlabs")
+    await RUNWAY_GATE.wait()
+    await ELEVEN_GATE.wait()
     brief = (
         "Только синтетические сцены, без реальных людей и узнаваемых лиц. "
         f"Тип: {idea.get('kind')}. Хук: {idea.get('hook') or idea.get('title')}. "

@@ -189,6 +189,15 @@ def get_job(job_id: int) -> dict[str, Any] | None:
     return _row(row)
 
 
+def accounts_with_video(run_date: str) -> set[str]:
+    """Аккаунты с готовым mp4 за дату — рестарт их не переснимает."""
+    return {
+        str(job.get("account_id") or "")
+        for job in jobs_for_date(run_date)
+        if job.get("account_id") and Path(str(job.get("video_path") or "")).is_file()
+    }
+
+
 def jobs_for_date(run_date: str) -> list[dict[str, Any]]:
     ensure()
     with _connect() as conn:

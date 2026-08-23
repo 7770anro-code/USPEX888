@@ -27,6 +27,7 @@ from night_report import confirm_markup, format_report, send_telegram
 from night_store import (
     FAILED,
     GENERATING,
+    IDEAS_READY,
     MANUAL_REVIEW,
     PENDING,
     POSTED,
@@ -40,6 +41,7 @@ from night_store import (
     mark_video_ready,
     recover_stale,
     save_run,
+    accounts_with_video,
     update_job,
     worker_id,
 )
@@ -176,6 +178,10 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
     ensure_ffmpeg()
     recover_stale()
     day = today_msk().isoformat()
+    if config.NIGHT_REQUIRE_CONFIRM:
+        for job in jobs_for_date(day):
+            if job.get("status") == VIDEO_READY and Path(str(job.get("video_path") or "")).is_file():
+                update_job(int(job["id"]), status=WAIT_CONFIRM)
     accounts = load_accounts()
     n_videos = 1 if smoke else int(config.VIDEOS_PER_NIGHT)
     n_ideas = 5 if smoke else int(config.NIGHT_IDEAS_PER_NIGHT)
@@ -209,7 +215,12 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
             ideas = await generate_ideas(session, n=n_ideas)
             for idea in ideas:
                 insert_idea(idea, day)
-            assigned = assign_to_accounts(ideas, accounts[:n_videos], limit=n_videos)
+            save_run(run_id, day, IDEAS_READY, f"ideas_ready {len(ideas)}")
+            already = accounts_with_video(day)
+            shoot = [a for a in accounts if a.id not in already][:n_videos]
+            assigned = assign_to_accounts(
+                ideas, shoot, limit=n_videos, existing_jobs=jobs_for_date(day)
+            )
             if smoke:
                 assigned = assigned[:1]
             jobs = []
@@ -225,7 +236,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                         "caption": idea["caption"],
                         "idea_hash": idea["idea_hash"],
                         "tokens": idea["tokens"],
-                        "status": PENDING,
+                        "status": IDEAS_READY,
                     }
                 )
                 jobs.append(({"id": jid, "run_date": day, **idea, "account_id": acc.id}, acc, idea))

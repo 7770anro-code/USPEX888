@@ -89,12 +89,30 @@ def too_similar(tokens: list[str], history: list[set[str]], *, threshold: float 
     return any(jaccard(now, old) >= threshold for old in history)
 
 
-def same_day_conflict(tokens: list[str], used_today: list[set[str]]) -> bool:
-    now = set(tokens)
-    if any(jaccard(now, old) >= 0.4 for old in used_today):
+def extract_hashtags(caption: str) -> list[str]:
+    return [m.group(1).lower() for m in re.finditer(r"#([A-Za-zА-Яа-яЁё0-9_]+)", caption or "")]
+
+
+def same_day_conflict(
+    idea: dict[str, Any],
+    *,
+    account_id: str,
+    existing_jobs: list[dict[str, Any]] | None = None,
+    used_today: list[set[str]] | None = None,
+) -> bool:
+    now = set(idea.get("tokens") or [])
+    tags = set(idea.get("hashtags") or extract_hashtags(str(idea.get("caption") or "")))
+    if any(jaccard(now, old) >= 0.4 for old in (used_today or [])):
         return True
-    tags = {t for t in now if t.startswith("#") or False}
-    # хештеги в caption без #
+    for job in existing_jobs or []:
+        if str(job.get("account_id") or "") != str(account_id):
+            continue
+        old_tokens = {t for t in str(job.get("tokens") or "").split() if t}
+        old_tags = extract_hashtags(str(job.get("caption") or ""))
+        if tags and set(old_tags) & tags:
+            return True
+        if old_tokens and jaccard(now, old_tokens) >= 0.4:
+            return True
     return False
 
 
@@ -135,6 +153,7 @@ def parse_ideas(raw: str) -> list[dict[str, Any]]:
                 "hook": str(item.get("hook") or title)[:120],
                 "score": max(1.0, min(10.0, score)),
                 "tokens": tokens,
+                "hashtags": extract_hashtags(caption),
                 "idea_hash": idea_hash(tokens),
             }
         )
@@ -267,8 +286,9 @@ def assign_to_accounts(
     accounts: list[Any],
     *,
     limit: int,
+    existing_jobs: list[dict[str, Any]] | None = None,
 ) -> list[tuple[Any, dict[str, Any]]]:
-    """По одной идее на аккаунт, тема совпадает; mixed берёт лучший остаток."""
+    """По одной идее на аккаунт. Не повторяем тему/хештеги этого дня на том же аккаунте."""
     leftover = list(ideas)
     picked: list[tuple[Any, dict[str, Any]]] = []
     today_used: list[set[str]] = []
@@ -281,13 +301,17 @@ def assign_to_accounts(
                 "motivational" if acc.theme == "motivational" else "absurd"
             ):
                 continue
-            if too_similar(idea["tokens"], today_used, threshold=0.4):
+            if same_day_conflict(
+                idea, account_id=acc.id, existing_jobs=existing_jobs, used_today=today_used
+            ):
                 continue
             match = idea
             break
         if match is None:
             for idea in leftover:
-                if too_similar(idea["tokens"], today_used, threshold=0.4):
+                if same_day_conflict(
+                    idea, account_id=acc.id, existing_jobs=existing_jobs, used_today=today_used
+                ):
                     continue
                 match = idea
                 break
