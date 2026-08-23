@@ -51,6 +51,7 @@ from presets import (
     motion_prompt,
     voice_settings_payload,
 )
+from joblock import JobLock
 from store import (
     clear_user_voices,
     delete_cloned_voice,
@@ -115,7 +116,9 @@ HOW_IT_WORKS = (
     "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
-    "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
+    "Клон голоса — отдельная кнопка «Разрешаю клонировать голос».\n\n"
+    "Ночной пайплайн «Успех 888» готовит пакеты для TikTok/Instagram сам. "
+    "Автопостинга нет. Владелец: /night."
 )
 
 
@@ -390,6 +393,20 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Ок, отменил. Можно начать заново.", reply_markup=main_menu())
+
+
+async def cmd_night(message: Message, state: FSMContext) -> None:
+    owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
+    if owner and int(message.chat.id) != owner:
+        await message.answer("Эта команда только для владельца ночного пайплайна.")
+        return
+    from night import status_text
+
+    try:
+        text = status_text()
+    except Exception as exc:
+        text = f"Ночной пайплайн: {exc}"
+    await message.answer(text[:3900], reply_markup=main_menu())
 
 
 async def _start_clone_voice(msg: Message, state: FSMContext) -> None:
@@ -889,6 +906,14 @@ async def _run_job(
         )
         return
     await BUSY.acquire()
+    file_lock = JobLock()
+    if not file_lock.acquire():
+        BUSY.release()
+        await message.answer(
+            "⏳ Ночной пайплайн или другой рендер уже снимает. Напиши позже.",
+            reply_markup=main_menu(),
+        )
+        return
     ok = False
     work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
     try:
@@ -965,6 +990,7 @@ async def _run_job(
             else:
                 log.warning("оставил рабочие файлы: %s", work)
     finally:
+        file_lock.release()
         BUSY.release()
 
 
@@ -1478,6 +1504,7 @@ async def main() -> None:
     dp.message.register(cmd_start, CommandStart())
     dp.message.register(cmd_help, Command("help"))
     dp.message.register(cmd_cancel, Command("cancel"))
+    dp.message.register(cmd_night, Command("night"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
     dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")
