@@ -35,6 +35,8 @@ RUNWAY_I2V_MODELS = frozenset(
 )
 RUNWAY_VEO_MODELS = frozenset({"veo3", "veo3.1", "veo3.1_fast"})
 RUNWAY_SEEDANCE_MODELS = frozenset({"seedance2", "seedance2_5", "seedance2_fast", "seedance2_mini"})
+# Seedance 2.5 — ByteDance через тот же ключ. Photoreal-лицо в still: SAFETY.THIRD_PARTY.
+# I2V first-frame + audio=false → INPUT_VALIDATION. Не в UI, не дефолт.
 RUNWAY_GEMINI_IMAGE = frozenset({"gemini_image3_pro", "gemini_image3.1_flash"})
 GEMINI_IMAGE_RATIO = {
     "720:1280": "768:1344",
