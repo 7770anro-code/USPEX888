@@ -321,12 +321,164 @@ def test_progress_weights() -> None:
 def test_camera_motion_soft() -> None:
     from presets import CAMERA, MOTION
 
-    blob = " ".join(v["prompt"] for v in list(CAMERA.values()) + list(MOTION.values())).lower()
+    soft_keys = ("lock", "push", "pull", "pan", "min", "nat")
+    blob = " ".join(
+        v["prompt"]
+        for d in (CAMERA, MOTION)
+        for k, v in d.items()
+        if k in soft_keys
+    ).lower()
     for banned in ("spin", "dramatic", "energetic", "extreme close-up"):
         assert banned not in blob
     assert CAMERA["lock"]["prompt"] == "camera holds static"
     assert "subtle head turn" in MOTION["nat"]["prompt"]
     assert MOTION["min"]["prompt"] == "minimal body movement"
+    assert "punch-in" in CAMERA["punch"]["prompt"]
+    assert "steps" in MOTION["drive"]["prompt"]
+
+
+def test_night_script_quality_and_hook() -> None:
+    import inspect
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    import config
+    import store
+    from night_ideas import IDEA_SYSTEM, parse_ideas
+    from night_store import create_job, get_job, insert_idea
+    from pipeline import (
+        SCRIPT_SYSTEM_PHOTO,
+        SCRIPT_SYSTEM_SYNTH,
+        grok_script,
+        hook_opens_narration,
+        scene_has_cta,
+        script_quality_issues,
+        script_system_for,
+    )
+
+    assert "Soft only" in SCRIPT_SYSTEM_PHOTO
+    assert "No spin, dramatic, extreme close-up, energetic." in SCRIPT_SYSTEM_PHOTO
+    assert "Soft only" not in SCRIPT_SYSTEM_SYNTH
+    assert "Energy allowed" in SCRIPT_SYSTEM_SYNTH
+    assert "18–28" in SCRIPT_SYSTEM_SYNTH
+    assert "continuity" in SCRIPT_SYSTEM_SYNTH.lower()
+    assert "No face" in SCRIPT_SYSTEM_SYNTH
+    assert script_system_for(photo_lock=True) == SCRIPT_SYSTEM_PHOTO
+    assert script_system_for(photo_lock=False) == SCRIPT_SYSTEM_SYNTH
+
+    src = inspect.getsource(grok_script)
+    assert "xai_creative_models" in src
+    assert "script_quality_issues" in src
+    assert "photo_lock" in src
+    from night_ideas import _grok_raw
+
+    assert "xai_creative_models" in inspect.getsource(_grok_raw)
+    from config import xai_creative_models
+
+    models = xai_creative_models()
+    assert models[0] == "grok-4.5" or models[0].startswith("grok-4.5")
+    assert "grok-4.5" in models
+
+    hook = "Не прыгай выше головы — поставь таймер на пять минут."
+    assert hook_opens_narration(hook, hook + " Сейчас, не завтра.")
+    assert not hook_opens_narration(hook, "Одна ступень — пять минут фокуса.")
+    assert scene_has_cta("Поставь таймер на пять минут и не листай дальше.")
+    assert not scene_has_cta("Лестница светлеет с каждым шагом вверх.")
+
+    old = {
+        "title": "Лестница Микро",
+        "scenes": [
+            {"narration": "Одна ступень — пять минут фокуса.", "visual_prompt": "static"},
+            {"narration": "Не прыгай выше головы, шагай.", "visual_prompt": "push-in"},
+            {"narration": "Лестница светлеет вместе с тобой.", "visual_prompt": "soft"},
+            {"narration": "Просто сделай первый шаг.", "visual_prompt": "hold"},
+        ],
+    }
+    issues = script_quality_issues(old, hook=hook, n_scenes=4)
+    assert "короткая" in issues.lower() or "слов" in issues
+    assert "хука" in issues
+
+    long1 = (
+        "Не прыгай выше головы — поставь таймер на пять минут. "
+        "Телефон снова тянет руку? Спроси себя: ты сейчас работаешь или просто листаешь?"
+    )
+    long2 = (
+        "Коллега уже закрыл ноутбук, а ты всё ещё «ещё одну вкладку». "
+        "Поставь таймер, закрой мессенджер и сделай один кусок задачи до сигнала."
+    )
+    long3 = (
+        "Сигнал прозвенел — ты дописал абзац, не идеальный, но живой. "
+        "Почему ждать понедельника, если пять минут уже сдвинули лестницу?"
+    )
+    long4 = (
+        "Завтра снова будет шум. Сохрани этот ролик и завтра утром "
+        "повтори тот же таймер — одна ступень, не марафон. Подпишись, если шагаешь с нами."
+    )
+    for blob in (long1, long2, long3, long4):
+        assert 18 <= len(blob.split()) <= 32
+    good = {
+        "title": "Лестница Микро",
+        "scenes": [
+            {"narration": long1, "visual_prompt": "punch-in"},
+            {"narration": long2, "visual_prompt": "reach"},
+            {"narration": long3, "visual_prompt": "turn"},
+            {"narration": long4, "visual_prompt": "cta"},
+        ],
+    }
+    assert script_quality_issues(good, hook=hook, n_scenes=4) == ""
+
+    from night_video import render_idea
+
+    nv = inspect.getsource(render_idea)
+    assert 'camera_prompt("punch"' in nv
+    assert 'motion_prompt("drive")' in nv
+    assert "hook=hook" in nv
+    assert "цепляющая фраза" in IDEA_SYSTEM or "0:00" in IDEA_SYSTEM
+
+    parsed = parse_ideas(
+        '{"ideas":[{"kind":"motivational","title":"Лестница Микро",'
+        '"plot":"Пиксельный герой поднимается по ступеням по пять минут фокуса.",'
+        '"caption":"Пять минут — одна ступень. #Успех888","hook":"Не прыгай выше головы","score":9}]}'
+    )
+    assert parsed[0]["hook"] == "Не прыгай выше головы"
+
+    tmp = tempfile.mkdtemp()
+    old_dir = config.DATA_DIR
+    config.DATA_DIR = tmp
+    store.reset_for_tests()
+    try:
+        iid = insert_idea(
+            {
+                "kind": "motivational",
+                "title": "Лестница Микро",
+                "plot": "plot",
+                "caption": "cap",
+                "hook": "Не прыгай выше головы",
+                "idea_hash": "h",
+                "tokens": ["лестница"],
+            },
+            "2026-08-24",
+        )
+        assert iid >= 1
+        jid = create_job(
+            {
+                "run_date": "2026-08-24",
+                "account_id": "motiv",
+                "kind": "motivational",
+                "title": "Лестница Микро",
+                "plot": "plot",
+                "caption": "cap",
+                "hook": "Не прыгай выше головы",
+            }
+        )
+        job = get_job(jid)
+        assert job is not None
+        assert job["hook"] == "Не прыгай выше головы"
+    finally:
+        config.DATA_DIR = old_dir
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_tiktok_upload_filename() -> None:
@@ -953,6 +1105,7 @@ if __name__ == "__main__":
     test_progress_weights()
     test_camera_motion_soft()
     test_tiktok_upload_filename()
+    test_night_script_quality_and_hook()
     test_last_frame_chains_with_user_photo()
     test_wave2_thin_api()
     test_store_sqlite_voices_and_prefs()

@@ -83,12 +83,20 @@ CAMERA: dict[str, dict[str, str]] = {
     "pull": {"label": "Плавное отдаление", "prompt": "slow subtle pull-back"},
     "pan": {"label": "Слева-направо", "prompt": "gentle pan, camera stays level"},
     "orbit": {"label": "Облёт", "prompt": "very slow small-arc orbit around the subject"},
+    "punch": {
+        "label": "Удар камеры",
+        "prompt": "decisive punch-in then slight pull-back, motivated pan with the action, handheld drive",
+    },
 }
 
 MOTION: dict[str, dict[str, str]] = {
     "min": {"label": "Минимальное", "prompt": "minimal body movement"},
     "nat": {"label": "Естественное", "prompt": "subtle head turn, small natural gestures"},
     "dyn": {"label": "Динамичное", "prompt": "a bit more body movement, still gentle"},
+    "drive": {
+        "label": "С намерением",
+        "prompt": "subject steps, reaches, turns toward camera, expressive hands, same outfit and location",
+    },
 }
 
 # voice_idx — индекс в voices.VOICES, в UI не показываем id.

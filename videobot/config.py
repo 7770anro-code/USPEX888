@@ -72,6 +72,18 @@ VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
 
 XAI_MODEL = _clean("XAI_MODEL") or "grok-4.5"
 XAI_FALLBACK_MODEL = _clean("XAI_FALLBACK_MODEL") or "grok-4-1-fast-non-reasoning"
+# Идеи и сценарии — сильная модель. XAI_MODEL на проде может быть дешёвым fast; это её не подменяет.
+XAI_CREATIVE_MODEL = _clean("XAI_CREATIVE_MODEL") or "grok-4.5"
+
+
+def xai_creative_models() -> list[str]:
+    """grok-4.5 первым для идей/сценариев, даже если XAI_MODEL = fast."""
+    out: list[str] = []
+    for name in (XAI_CREATIVE_MODEL, "grok-4.5", XAI_MODEL, XAI_FALLBACK_MODEL):
+        clean = (name or "").strip()
+        if clean and clean not in out:
+            out.append(clean)
+    return out
 
 ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah
 ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"

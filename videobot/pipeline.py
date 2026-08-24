@@ -35,27 +35,60 @@ RUNWAY_DONE_FAIL = frozenset({"FAILED", "CANCELED", "CANCELLED"})
 # ElevenLabs: POST /v1/text-to-speech/{voice_id} → сырой audio/mpeg, не JSON.
 ELEVEN_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
-SCRIPT_SYSTEM = """Ты режиссёр вертикальных TikTok-роликов 30–60 секунд (кадр 9:16).
+SCRIPT_LOCK = (
+    "continuity — ОДИН locked English look на ВСЕ клипы: clothes, location, lighting, color grade, "
+    "visual style. No face, age, hair, eyes or likeness. No camera motion in continuity."
+)
+
+SCRIPT_SYSTEM_PHOTO = f"""Ты режиссёр вертикальных TikTok-роликов 30–60 секунд (кадр 9:16) по РЕАЛЬНОМУ фото человека.
 Верни ТОЛЬКО JSON без markdown:
 
-{
+{{
   "title": "короткий заголовок",
   "continuity": "ONE locked English description for EVERY shot: clothes, location, lighting, color grade, visual style. No face, age, hair, eyes or likeness. No camera motion here. Must stay identical across shots.",
   "scenes": [
-    {
+    {{
       "narration": "озвучка на языке пользователя",
       "visual_prompt": "English CAMERA AND ACTION ONLY, one short sentence. Soft only: subtle head turn, camera holds static, slow push-in, minimal body movement. Do NOT re-describe face, clothes, or location. No spin, dramatic, extreme close-up, energetic."
-    }
+    }}
   ]
-}
+}}
 
 Правила:
-- continuity пишется ОДИН раз — одежда, место, свет, стиль. Без деталей лица.
+- {SCRIPT_LOCK} Это фото человека: мягкая камера обязательна, иначе плывёт лицо.
 - visual_prompt сцены — только мягкое движение камеры и тела, без нового лица и локации.
-- Сцен от 4 до 6. Каждая ~10 секунд речи (примерно 18–28 слов). Итого 40–60 секунд.
+- Сцен от 4 до 6. Каждая narration 18–28 слов (конкретная ситуация, конфликт или вопрос зрителю). Итого 40–60 секунд.
 - Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
 - Без текста на экране, логотипов, знаменитостей, NSFW, watermark.
 """
+
+SCRIPT_SYSTEM_SYNTH = f"""Ты режиссёр вертикальных TikTok-роликов 30–60 секунд (кадр 9:16). Только синтетика: выдуманный персонаж, графика, абстракция. Не фото реального человека.
+Верни ТОЛЬКО JSON без markdown:
+
+{{
+  "title": "короткий заголовок",
+  "continuity": "ONE locked English description for EVERY shot: clothes, location, lighting, color grade, visual style. No face, age, hair, eyes or likeness. No camera motion here. Must stay identical across shots.",
+  "scenes": [
+    {{
+      "narration": "озвучка на языке пользователя, 18–28 слов",
+      "visual_prompt": "English CAMERA AND ACTION, 1–2 sentences. Energy allowed: punch-in, whip pan, crash zoom, decisive blocking. Keep the SAME character/clothes/location from continuity."
+    }}
+  ]
+}}
+
+Правила:
+- {SCRIPT_LOCK} Консистентность персонажа важнее трюка камеры. Новое лицо/локацию не вводить.
+- Камера и действие МОГУТ быть энергичными. Запрет soft-only / static / «только push-in» здесь НЕ действует (он только для режима с реальным фото).
+- Сцен от 4 до 6. Каждая narration СТРОГО 18–28 слов. Короче 18 — брак, перепиши.
+- Каждая сцена: конкретная ситуация, конфликт или прямой вопрос зрителю. Не голая метафора («лестница = прогресс») без действия.
+- Призыв к действию не только в последней сцене: минимум ещё в одной ранней (1–3).
+- Если в брифе есть ХУК — narration сцены 1 буквально начинается с этой фразы или её прямым усилением. Первая секунда = цепляющая фраза, не нейтральное описание кадра.
+- Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
+- Без текста на экране, логотипов, знаменитостей, NSFW, watermark.
+"""
+
+# По умолчанию — синтетика (автоконтур). Фото-режим берёт SCRIPT_SYSTEM_PHOTO.
+SCRIPT_SYSTEM = SCRIPT_SYSTEM_SYNTH
 
 STYLES = {
     "cinematic": "photoreal cinematic, shallow depth of field, natural motivated light, subtle film grain, 24fps motion",
@@ -243,6 +276,9 @@ CLIP_SPEECH_BUDGET_SEC = 18.0
 MAX_SCENES = 6
 SPEECH_WORDS_PER_SEC = 2.2
 SPEECH_CHARS_PER_SEC = 13.0
+SCENE_NARRATION_MIN_WORDS = 18
+SCENE_NARRATION_MAX_WORDS = 32
+SCRIPT_QUALITY_RETRIES = 2
 SCRIPT_TOO_LONG_MSG = (
     "Текст слишком длинный: озвучка не влезет в 6 клипов по 10 секунд "
     "даже с ускорением, последние слова обрежутся. "
@@ -254,6 +290,88 @@ def estimate_speech_sec(text: str) -> float:
     words = len(re.findall(r"\w+", text or "", flags=re.U))
     chars = len(re.sub(r"\s+", "", text or ""))
     return max(words / SPEECH_WORDS_PER_SEC, chars / SPEECH_CHARS_PER_SEC)
+
+
+def count_narration_words(text: str) -> int:
+    return len(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text or "", flags=re.U))
+
+
+def _norm_phrase(text: str) -> str:
+    blob = (text or "").lower().replace("ё", "е")
+    blob = re.sub(r"[^\w\s]", " ", blob, flags=re.U)
+    return re.sub(r"\s+", " ", blob).strip()
+
+
+def hook_opens_narration(hook: str, narration: str) -> bool:
+    """Первая реплика начинается с хука или содержит его в первых словах."""
+    h = _norm_phrase(hook)
+    n = _norm_phrase(narration)
+    if not h:
+        return True
+    if not n:
+        return False
+    if n.startswith(h):
+        return True
+    h_words = h.split()
+    n_words = n.split()
+    take = min(4, len(h_words))
+    if take >= 3 and n_words[:take] == h_words[:take]:
+        return True
+    head = " ".join(n_words[:12])
+    return bool(h) and h in head
+
+
+def script_system_for(*, photo_lock: bool) -> str:
+    return SCRIPT_SYSTEM_PHOTO if photo_lock else SCRIPT_SYSTEM_SYNTH
+
+
+_CTA_RE = re.compile(
+    r"(подпишись|сохрани(сь|те)?|попробуй(те)?|начни(те)?|"
+    r"поставь(те)?|напиши(те)?|включи(те)?|не листай|досмотри|"
+    r"повтори(те)?|возьми(те)?|открой(те)?|прямо сейчас|"
+    r"спроси себя|скажи себе|хватит листать|сделай(те)? (это|сейчас|шаг)|"
+    r"поставь(те)? (таймер|себе|пять))",
+    re.I,
+)
+
+
+def scene_has_cta(text: str) -> bool:
+    return bool(_CTA_RE.search(text or ""))
+
+
+def script_quality_issues(script: dict[str, Any], *, hook: str = "", n_scenes: int = 4) -> str:
+    """Пусто = ок. Иначе текст для переспроса Grok. Кастомный user_script сюда не пускаем."""
+    scenes = list(script.get("scenes") or [])
+    issues: list[str] = []
+    need = min(4, int(n_scenes or 4))
+    if len(scenes) < need:
+        issues.append(f"Мало сцен: {len(scenes)}, нужно минимум {need}.")
+    short: list[str] = []
+    for i, scene in enumerate(scenes, 1):
+        nar = str(scene.get("narration") or "")
+        n = count_narration_words(nar)
+        if n < SCENE_NARRATION_MIN_WORDS:
+            short.append(f"сцена {i}: {n} слов")
+    if short:
+        issues.append(
+            "Narration слишком короткая (минимум "
+            f"{SCENE_NARRATION_MIN_WORDS} слов в КАЖДОЙ сцене): " + "; ".join(short)
+        )
+    if hook and scenes:
+        first = str(scenes[0].get("narration") or "")
+        if not hook_opens_narration(hook, first):
+            issues.append(
+                f"Сцена 1 должна начинаться с хука «{hook.strip()[:120]}» "
+                "или его прямым усилением. Сейчас первая фраза нейтральная."
+            )
+    if len(scenes) >= 2:
+        early = scenes[:-1]
+        if not any(scene_has_cta(str(s.get("narration") or "")) for s in early):
+            issues.append(
+                "Призыв к действию не только в финале: минимум ещё в одной из сцен 1–3 "
+                "(глагол зрителю: поставь таймер, попробуй, начни, не листай, спроси себя…)."
+            )
+    return " ".join(issues)
 
 
 def max_speech_sec_for_clip(clip_sec: int = 10) -> float:
@@ -456,6 +574,90 @@ async def _read_error(resp: aiohttp.ClientResponse) -> str:
     return _clip(f"HTTP {resp.status}: {raw}", 350)
 
 
+async def _grok_once(
+    session: aiohttp.ClientSession,
+    messages: list[dict[str, str]],
+    model: str,
+) -> tuple[str, str]:
+    """Один проход chat, затем responses. Возвращает (текст, ошибка)."""
+    headers = {
+        "Authorization": f"Bearer {config.XAI_API_KEY_NEW}",
+        "Content-Type": "application/json",
+    }
+    tries = max(1, int(config.HTTP_RETRIES))
+    last_err = ""
+    payload = {"model": model, "messages": messages, "temperature": 0.55}
+    for attempt in range(tries):
+        try:
+            async with session.post(
+                XAI_CHAT_URL,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                if resp.status in RETRY_STATUSES and attempt < tries - 1:
+                    last_err = f"{model} chat HTTP {resp.status}"
+                    await sleep_backoff(attempt)
+                    continue
+                if resp.status < 400:
+                    data = await resp.json()
+                    content = (
+                        (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
+                        or ""
+                    )
+                    if str(content).strip():
+                        log.info("Grok chat ok model=%s", model)
+                        return str(content), ""
+                    last_err = f"{model}: пустой chat/completions"
+                else:
+                    last_err = f"{model} chat: {await _read_error(resp)}"
+        except Exception as exc:
+            last_err = f"{model} chat: {type(exc).__name__}: {exc}"
+            if attempt < tries - 1:
+                await sleep_backoff(attempt)
+                continue
+
+    payload_r = {"model": model, "input": messages}
+    for attempt in range(tries):
+        try:
+            async with session.post(
+                XAI_RESPONSES_URL,
+                headers=headers,
+                json=payload_r,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as resp:
+                raw = await resp.text()
+                if resp.status in RETRY_STATUSES and attempt < tries - 1:
+                    last_err = f"{model} responses HTTP {resp.status}"
+                    await sleep_backoff(attempt)
+                    continue
+                if resp.status >= 400:
+                    last_err = f"{model} responses: {_clip(f'HTTP {resp.status}: {raw}', 350)}"
+                    break
+                data = json.loads(raw)
+            chunks: list[str] = []
+            if isinstance(data.get("output_text"), str):
+                chunks.append(data["output_text"])
+            for item in data.get("output") or []:
+                if not isinstance(item, dict):
+                    continue
+                for part in item.get("content") or []:
+                    if isinstance(part, dict) and part.get("text"):
+                        chunks.append(str(part["text"]))
+            content = "\n".join(chunks).strip()
+            if content:
+                log.info("Grok responses ok model=%s", model)
+                return content, ""
+            last_err = f"{model}: пустой responses"
+            break
+        except Exception as exc:
+            last_err = f"{model} responses: {type(exc).__name__}: {exc}"
+            if attempt < tries - 1:
+                await sleep_backoff(attempt)
+                continue
+    return "", last_err
+
+
 async def grok_script(
     session: aiohttp.ClientSession,
     idea: str,
@@ -464,6 +666,8 @@ async def grok_script(
     n_scenes: int = 5,
     user_script: bool = False,
     extra_brief: str = "",
+    photo_lock: bool = False,
+    hook: str = "",
 ) -> dict[str, Any]:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
@@ -471,116 +675,81 @@ async def grok_script(
         raise PipelineError("Нет XAI_API_KEY_NEW — сценарий собрать не могу.")
     style_key = style if style in STYLES else "cinematic"
     n_scenes = max(4, min(MAX_SCENES, int(n_scenes or 5)))
-    if user_script:
-        user_content = (
-            f"Стиль: {style_key} — {STYLES[style_key]}\n"
-            f"Готовый текст ролика (нарежь на {n_scenes} сцен, речь почти дословно):\n"
-            f"{idea.strip()[:4000]}"
+    hook = (hook or "").strip()
+    quality_rules = (
+        f"Каждая narration СТРОГО {SCENE_NARRATION_MIN_WORDS}–{SCENE_NARRATION_MAX_WORDS} русских слов. "
+        "Каждая сцена — конкретная ситуация, конфликт или прямой вопрос зрителю, не голая метафора. "
+        "Призыв к действию не только в последней сцене: минимум ещё в одной из сцен 1–3."
+    )
+    hook_block = ""
+    if hook and not user_script:
+        hook_block = (
+            f"\nХУК ПЕРВОЙ СЕКУНДЫ — narration сцены 1 обязана буквально начинаться с этой фразы "
+            f"или её прямого усиления (те же слова + один удар), не с нейтрального описания кадра: «{hook}»."
         )
-    else:
-        user_content = (
-            f"Стиль: {style_key} — {STYLES[style_key]}\n"
-            f"Сделай {n_scenes} сцен. continuity — одежда/локация/стиль, без лица.\n"
-            f"Идея:\n{idea.strip()[:2000]}"
-        )
-    if extra_brief.strip():
-        user_content += "\n\nДоп. режиссура пресета:\n" + extra_brief.strip()[:1200]
-    messages = [
-        {"role": "system", "content": SCRIPT_SYSTEM},
-        {"role": "user", "content": user_content},
-    ]
-    headers = {
-        "Authorization": f"Bearer {config.XAI_API_KEY_NEW}",
-        "Content-Type": "application/json",
-    }
+
+    def build_user(quality_note: str = "") -> str:
+        if user_script:
+            body = (
+                f"Стиль: {style_key} — {STYLES[style_key]}\n"
+                f"Готовый текст ролика (нарежь на {n_scenes} сцен, речь почти дословно):\n"
+                f"{idea.strip()[:4000]}"
+            )
+        else:
+            body = (
+                f"Стиль: {style_key} — {STYLES[style_key]}\n"
+                f"Сделай {n_scenes} сцен. continuity — одежда/локация/стиль, без лица.\n"
+                f"{quality_rules}\n"
+                f"Идея:\n{idea.strip()[:2000]}"
+                f"{hook_block}"
+            )
+        if extra_brief.strip():
+            body += "\n\nДоп. режиссура пресета:\n" + extra_brief.strip()[:1200]
+        if quality_note.strip():
+            body += (
+                "\n\nПОВТОР. Предыдущий JSON отклонён. Исправь ровно эти ошибки, "
+                "верни полный JSON заново:\n" + quality_note.strip()[:1200]
+            )
+        return body
+
+    system = script_system_for(photo_lock=photo_lock)
     last_err = ""
-    tries = max(1, int(config.HTTP_RETRIES))
-    for model in (config.XAI_MODEL, config.XAI_FALLBACK_MODEL):
+    quality_retries = 0 if user_script else SCRIPT_QUALITY_RETRIES
+    for model in config.xai_creative_models():
         if not model:
             continue
-        payload = {"model": model, "messages": messages, "temperature": 0.55}
-        for attempt in range(tries):
-            try:
-                async with session.post(
-                    XAI_CHAT_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    if resp.status in RETRY_STATUSES and attempt < tries - 1:
-                        last_err = f"{model} chat HTTP {resp.status}"
-                        await sleep_backoff(attempt)
-                        continue
-                    if resp.status < 400:
-                        data = await resp.json()
-                        content = (
-                            (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
-                            or ""
-                        )
-                        if content.strip():
-                            log.info("Grok chat ok model=%s", model)
-                            try:
-                                return parse_script(content)
-                            except PipelineError:
-                                if user_script:
-                                    return fallback_split_script(idea, n_scenes)
-                                raise
-                        last_err = f"{model}: пустой chat/completions"
-                    else:
-                        last_err = f"{model} chat: {await _read_error(resp)}"
-            except PipelineError:
-                raise
-            except Exception as exc:
-                last_err = f"{model} chat: {type(exc).__name__}: {exc}"
-                if attempt < tries - 1:
-                    await sleep_backoff(attempt)
-                    continue
-
-        payload_r = {"model": model, "input": messages}
-        for attempt in range(tries):
-            try:
-                async with session.post(
-                    XAI_RESPONSES_URL,
-                    headers=headers,
-                    json=payload_r,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                ) as resp:
-                    raw = await resp.text()
-                    if resp.status in RETRY_STATUSES and attempt < tries - 1:
-                        last_err = f"{model} responses HTTP {resp.status}"
-                        await sleep_backoff(attempt)
-                        continue
-                    if resp.status >= 400:
-                        last_err = f"{model} responses: {_clip(f'HTTP {resp.status}: {raw}', 350)}"
-                        break
-                    data = json.loads(raw)
-                chunks: list[str] = []
-                if isinstance(data.get("output_text"), str):
-                    chunks.append(data["output_text"])
-                for item in data.get("output") or []:
-                    if not isinstance(item, dict):
-                        continue
-                    for part in item.get("content") or []:
-                        if isinstance(part, dict) and part.get("text"):
-                            chunks.append(str(part["text"]))
-                content = "\n".join(chunks).strip()
-                if content:
-                    log.info("Grok responses ok model=%s", model)
-                    try:
-                        return parse_script(content)
-                    except PipelineError:
-                        if user_script:
-                            return fallback_split_script(idea, n_scenes)
-                        raise
-                last_err = f"{model}: пустой responses"
+        quality_note = ""
+        for q_attempt in range(1 + quality_retries):
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": build_user(quality_note)},
+            ]
+            content, last_err = await _grok_once(session, messages, model)
+            if not content.strip():
                 break
-            except PipelineError:
-                raise
-            except Exception as exc:
-                last_err = f"{model} responses: {type(exc).__name__}: {exc}"
-                if attempt < tries - 1:
-                    await sleep_backoff(attempt)
+            try:
+                script = parse_script(content)
+            except PipelineError as exc:
+                if user_script:
+                    return fallback_split_script(idea, n_scenes)
+                quality_note = f"JSON не разобрался: {exc.user_message}. Верни ТОЛЬКО валидный JSON по схеме."
+                last_err = quality_note
+                log.warning("script parse attempt %s/%s model=%s: %s", q_attempt + 1, 1 + quality_retries, model, exc)
+                continue
+            if not user_script:
+                issues = script_quality_issues(script, hook=hook, n_scenes=n_scenes)
+                if issues:
+                    quality_note = issues
+                    last_err = issues
+                    log.warning(
+                        "script quality attempt %s/%s model=%s: %s",
+                        q_attempt + 1,
+                        1 + quality_retries,
+                        model,
+                        issues,
+                    )
                     continue
+            return script
     if user_script:
         log.warning("Grok failed, split script locally: %s", last_err)
         return fallback_split_script(idea, n_scenes)
@@ -1364,6 +1533,7 @@ async def build_video(
     motion: str = "",
     quality: str = "optimal",
     watermark: bool = False,
+    hook: str = "",
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
     import live_status as live
@@ -1391,6 +1561,11 @@ async def build_video(
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await report("Пишу сценарий…", stage=live.STAGE_SCRIPT)
+        photo_lock = (
+            isinstance(reference_image, Path) and reference_image.exists()
+        ) or (
+            isinstance(reference_image, str) and reference_image.startswith("data:")
+        )
         script = await grok_script(
             session,
             idea,
@@ -1398,6 +1573,8 @@ async def build_video(
             n_scenes=planned,
             user_script=user_script,
             extra_brief=extra_brief,
+            photo_lock=photo_lock,
+            hook=hook,
         )
         script = enforce_speech_budget(script, user_script=user_script)
         scenes = script["scenes"]

@@ -47,10 +47,15 @@ async def render_idea(
         raise CircuitOpen("runway" if not RUNWAY.allow() else "elevenlabs")
     await RUNWAY_GATE.wait()
     await ELEVEN_GATE.wait()
+    hook = str(idea.get("hook") or idea.get("title") or "").strip()
     brief = (
         "Только синтетические сцены, без реальных людей и узнаваемых лиц. "
-        f"Тип: {idea.get('kind')}. Хук: {idea.get('hook') or idea.get('title')}. "
-        f"{idea.get('plot') or ''}"
+        f"Тип: {idea.get('kind')}. "
+        f"Хук первой секунды (narration сцены 1 обязана начинаться с этой фразы "
+        f"или её прямого усиления, не с нейтрального описания): {hook}. "
+        f"Сюжет: {idea.get('plot') or ''}. "
+        "Каждая сцена — конкретная ситуация, конфликт или вопрос зрителю, не общая метафора. "
+        "Призыв к действию не только в финале."
     )
     pipeline_mod.CANCEL_ON_TIMEOUT = False
     try:
@@ -66,10 +71,11 @@ async def render_idea(
             n_scenes=n_scenes,
             extra_brief=brief,
             voice_settings=voice_settings_payload(account.delivery, account.speed),
-            camera=camera_prompt("push" if account.theme != "absurd" else "lock"),
-            motion=motion_prompt("nat" if account.theme != "absurd" else "dyn"),
+            camera=camera_prompt("punch" if account.theme != "absurd" else "orbit"),
+            motion=motion_prompt("drive"),
             quality=account.quality,
             watermark=False,
+            hook=hook,
         )
         RUNWAY.ok()
         ELEVEN.ok()

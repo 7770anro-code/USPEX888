@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS night_jobs (
     title TEXT NOT NULL DEFAULT '',
     plot TEXT NOT NULL DEFAULT '',
     caption TEXT NOT NULL DEFAULT '',
+    hook TEXT NOT NULL DEFAULT '',
     idea_hash TEXT NOT NULL DEFAULT '',
     tokens TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
@@ -63,6 +64,7 @@ CREATE TABLE IF NOT EXISTS night_ideas (
     title TEXT NOT NULL DEFAULT '',
     plot TEXT NOT NULL DEFAULT '',
     caption TEXT NOT NULL DEFAULT '',
+    hook TEXT NOT NULL DEFAULT '',
     idea_hash TEXT NOT NULL DEFAULT '',
     tokens TEXT NOT NULL DEFAULT '',
     used INTEGER NOT NULL DEFAULT 0,
@@ -136,11 +138,16 @@ def ensure() -> None:
             ("eleven_chars", "INTEGER NOT NULL DEFAULT 0"),
             ("tiktok_mode", "TEXT NOT NULL DEFAULT ''"),
             ("instagram_mode", "TEXT NOT NULL DEFAULT ''"),
+            ("hook", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
                 conn.execute(f"ALTER TABLE night_jobs ADD COLUMN {col} {spec}")
             except sqlite3.OperationalError:
                 pass
+        try:
+            conn.execute("ALTER TABLE night_ideas ADD COLUMN hook TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 
@@ -194,14 +201,15 @@ def insert_idea(item: dict[str, Any], run_date: str) -> int:
     ensure()
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO night_ideas (run_date, kind, title, plot, caption, idea_hash, tokens, used, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            "INSERT INTO night_ideas (run_date, kind, title, plot, caption, hook, idea_hash, tokens, used, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
             (
                 run_date,
                 item["kind"],
                 item.get("title") or "",
                 item.get("plot") or "",
                 item.get("caption") or "",
+                item.get("hook") or "",
                 item.get("idea_hash") or "",
                 " ".join(item.get("tokens") or []),
                 _now(),
@@ -275,10 +283,10 @@ def create_job(job: dict[str, Any]) -> int:
     now = _now()
     with _connect() as conn:
         cur = conn.execute(
-            "INSERT INTO night_jobs (run_date, account_id, kind, title, plot, caption, idea_hash, tokens, "
+            "INSERT INTO night_jobs (run_date, account_id, kind, title, plot, caption, hook, idea_hash, tokens, "
             "status, attempts, last_error, video_path, tiktok_url, instagram_url, tiktok_mode, instagram_mode, "
             "runway_credits, eleven_chars, locked_at, worker_id, updated_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', '', '', '', '', '', 0, 0, NULL, '', ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '', '', '', '', '', '', 0, 0, NULL, '', ?, ?)",
             (
                 job["run_date"],
                 job["account_id"],
@@ -286,6 +294,7 @@ def create_job(job: dict[str, Any]) -> int:
                 job.get("title") or "",
                 job.get("plot") or "",
                 job.get("caption") or "",
+                job.get("hook") or "",
                 job.get("idea_hash") or "",
                 " ".join(job.get("tokens") or []),
                 job.get("status") or PENDING,
@@ -317,7 +326,7 @@ def update_job(job_id: int, **fields: Any) -> None:
         "status", "last_error", "video_path", "tiktok_url", "instagram_url",
         "tiktok_mode", "instagram_mode", "tiktok_publish_id", "ig_container_id",
         "runway_credits", "eleven_chars",
-        "locked_at", "worker_id", "title", "plot", "caption",
+        "locked_at", "worker_id", "title", "plot", "caption", "hook",
     }}
     fields["updated_at"] = _now()
     cols = ", ".join(f"{k} = ?" for k in fields)

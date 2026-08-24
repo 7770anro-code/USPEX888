@@ -329,6 +329,7 @@ async def run_night(
                         "title": idea["title"],
                         "plot": idea["plot"],
                         "caption": idea["caption"],
+                        "hook": idea.get("hook") or "",
                         "idea_hash": idea["idea_hash"],
                         "tokens": idea["tokens"],
                         "status": IDEAS_READY,
