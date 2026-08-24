@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-24** (hotfix цикла правок после «ок»): код с защитой финала и extra_brief 4000 снова в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 153447 → 154786). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили.
+
 Выложено **2026-08-24** (повторно, после «ок» на качество сценария / короткую тему / цикл правок): код ветки `cursor/night-pipeline-00ae` снова скопирован в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 150351 → 153447). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. Бот `@VideobotAI777_bot` снова в polling, автоконтур стартовал (45 с → каждые 90 мин).
 
 Выложено **2026-08-24** на `/opt/videobot` после первого «ок» владельца. Рестарт только `videobot.service`. `uspex.service` / `vector.service` не трогали. `videobot-night.timer` не ставили.
