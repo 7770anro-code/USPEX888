@@ -559,6 +559,8 @@ def test_last_frame_chains_with_user_photo() -> None:
 
     src = inspect.getsource(build_video)
     assert "last_frame_data_uri" in src
+    assert "RUNWAY_SEEDANCE_MODELS" in src
+    assert "anchor_image" in src
     assert "not user_supplied_photo" not in src
     assert "No face, age, hair" in SCRIPT_SYSTEM or "без деталей лица" in SCRIPT_SYSTEM.lower() or "No face" in SCRIPT_SYSTEM
 
@@ -1450,11 +1452,14 @@ def test_look_and_runway_models() -> None:
         "seedance2_5", "a quiet kitchen", "720:1280", 5, seed=7, prompt_image="data:x"
     )
     assert sd["duration"] == 5
-    assert sd["audio"] is False
+    assert sd["audio"] is True
     assert "seed" not in sd
     assert "contentModeration" not in sd
     assert sd["promptImage"] == "data:x"
     assert isinstance(sd["promptImage"], str)
+    sd_t2v = runway_video_payload("seedance2_5", "a quiet kitchen", "720:1280", 5)
+    assert sd_t2v["audio"] is False
+    assert "promptImage" not in sd_t2v
     assert duration_for_model("seedance2_5", 3) == 4
     clip_upload = inspect.getsource(runway_clip)
     assert "runway_upload_data_uri" in clip_upload

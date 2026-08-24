@@ -1491,10 +1491,11 @@ def runway_video_payload(
 ) -> dict[str, Any]:
     """Поля строго по модели: Veo/Seedance не принимают seed/contentModeration; Veo duration 4/6/8.
 
-    Seedance I2V: promptImage — строка (first frame). Массив [{uri, position:first}]
-    документирован, но third-party отвечает INPUT_VALIDATION. First-frame и
-    unpositioned character-reference в одном запросе смешивать нельзя — поэтому
-    персонаж держится last-frame chaining + CHARACTER_LOCK в тексте.
+    Seedance I2V: promptImage — строка (first frame), audio=true — иначе
+    third-party INPUT_VALIDATION. Last-frame JPEG chaining тоже падает;
+    на сцены 2+ заново шлём исходный still. Photoreal-лицо: SAFETY.THIRD_PARTY.
+    Массив [{uri, position:first}] документирован, но часто INVALID.
+    First-frame и unpositioned reference смешивать нельзя.
     """
     payload: dict[str, Any] = {
         "model": model,
@@ -1503,7 +1504,8 @@ def runway_video_payload(
         "duration": duration_for_model(model, seconds),
     }
     if model in RUNWAY_VEO_MODELS or model in RUNWAY_SEEDANCE_MODELS:
-        payload["audio"] = False
+        # Seedance I2V first-frame проходит только с audio=true; Veo и T2V — false.
+        payload["audio"] = bool(model in RUNWAY_SEEDANCE_MODELS and prompt_image)
         if prompt_image:
             payload["promptImage"] = prompt_image
         return payload
@@ -2132,6 +2134,7 @@ async def build_video(
 
         muxed: list[Path] = []
         clip_models: list[str] = []
+        i2v_model, _t2v_model = video_models_for_quality(quality)
         for i, scene in enumerate(scenes):
             n = i + 1
             mixed_path = work_dir / f"m{i}.mp4"
@@ -2143,10 +2146,13 @@ async def build_video(
                 tracker.tts_done = max(tracker.tts_done, n)
                 tracker.video_done = n
                 if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
-                    try:
-                        prompt_image = await last_frame_data_uri(clip_path, work_dir / f"tail{i}.jpg")
-                    except PipelineError:
+                    if i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                         prompt_image = anchor_image
+                    else:
+                        try:
+                            prompt_image = await last_frame_data_uri(clip_path, work_dir / f"tail{i}.jpg")
+                        except PipelineError:
+                            prompt_image = anchor_image
                 await report(f"Клип {n} из {total} уже смонтирован", stage=live.STAGE_RUNWAY, scene=n)
                 clip_models.append(read_runway_model(clip_path) or "?")
                 continue
@@ -2198,13 +2204,18 @@ async def build_video(
                     )
                 except PipelineError:
                     raise
-            # Клип 1: якорь (фото или still). Клипы 2+: last frame, иначе снова якорь.
+            # Клип 1: якорь (фото или still). gen4.5/Veo: last-frame chaining.
+            # Seedance I2V last-frame JPEG → INPUT_VALIDATION; тот же still
+            # на каждую сцену лучше держит персонажа (и это единственный слот).
             if prompt_image and n < total:
-                try:
-                    prompt_image = await last_frame_data_uri(clip, work_dir / f"tail{i}.jpg")
-                except PipelineError as exc:
-                    log.warning("last-frame chain fallback to anchor: %s", exc.detail)
+                if i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                     prompt_image = anchor_image
+                else:
+                    try:
+                        prompt_image = await last_frame_data_uri(clip, work_dir / f"tail{i}.jpg")
+                    except PipelineError as exc:
+                        log.warning("last-frame chain fallback to anchor: %s", exc.detail)
+                        prompt_image = anchor_image
             mixed = await mux_scene(
                 clip,
                 audio,
