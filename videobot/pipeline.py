@@ -950,6 +950,59 @@ def _runway_headers() -> dict[str, str]:
     }
 
 
+async def runway_upload_file(session: aiohttp.ClientSession, path: Path) -> str:
+    """POST /v1/uploads → ephemeral runway:// URI. Кредиты не тратит."""
+    filename = path.name or "media.bin"
+    async with session.post(
+        f"{RUNWAY_HOST}/v1/uploads",
+        headers=_runway_headers(),
+        json={"filename": filename, "type": "ephemeral"},
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
+        raw = await resp.text()
+        if resp.status >= 400:
+            raise PipelineError("Не загрузился файл на Runway.", _clip(f"HTTP {resp.status}: {raw}", 350))
+        data = json.loads(raw)
+    upload_url = str(data.get("uploadUrl") or "")
+    fields = data.get("fields") if isinstance(data.get("fields"), dict) else {}
+    runway_uri = str(data.get("runwayUri") or "")
+    if not upload_url or not runway_uri:
+        raise PipelineError("Runway не дал ссылку для загрузки файла.", _clip(raw, 240))
+    form = aiohttp.FormData()
+    for key, value in fields.items():
+        form.add_field(str(key), str(value))
+    form.add_field("file", path.read_bytes(), filename=filename, content_type="application/octet-stream")
+    async with session.post(upload_url, data=form, timeout=aiohttp.ClientTimeout(total=180)) as up:
+        if up.status >= 400:
+            body = await up.text()
+            raise PipelineError("Не доехал файл до Runway.", _clip(f"HTTP {up.status}: {body}", 350))
+    return runway_uri
+
+
+async def runway_upload_data_uri(session: aiohttp.ClientSession, data_uri: str) -> str:
+    """data:image/...;base64 → runway://. Нужно Seedance I2V, если data URI режется."""
+    import base64
+    import tempfile
+
+    if not data_uri.startswith("data:"):
+        return data_uri
+    _header, sep, b64 = data_uri.partition(",")
+    if not sep or not b64:
+        return data_uri
+    raw = base64.b64decode(b64)
+    suffix = ".png" if "image/png" in _header.lower() else ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+        fh.write(raw)
+        tmp = Path(fh.name)
+    try:
+        return await runway_upload_file(session, tmp)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def runway_model_side(dest: Path) -> Path:
     return dest.with_suffix(dest.suffix + ".runway_model")
 
@@ -1298,7 +1351,7 @@ def still_ratio_for_model(model: str, ratio: str) -> str:
 
 
 def duration_for_model(model: str, seconds: int) -> int:
-    """Veo принимает только 4/6/8; gen4.5/turbo — 2–10, у нас 5 или 10."""
+    """Veo — 4/6/8; Seedance — 4–30 (у нас клип 4–10); gen4.5/turbo — 5 или 10."""
     try:
         raw = int(seconds)
     except (TypeError, ValueError):
@@ -1434,7 +1487,13 @@ def runway_video_payload(
     seed: int | None = None,
     prompt_image: str | None = None,
 ) -> dict[str, Any]:
-    """Поля строго по модели: Veo/Seedance не принимают seed/contentModeration; Veo duration 4/6/8."""
+    """Поля строго по модели: Veo/Seedance не принимают seed/contentModeration; Veo duration 4/6/8.
+
+    Seedance I2V: promptImage — строка (first frame). Массив [{uri, position:first}]
+    документирован, но third-party отвечает INPUT_VALIDATION. First-frame и
+    unpositioned character-reference в одном запросе смешивать нельзя — поэтому
+    персонаж держится last-frame chaining + CHARACTER_LOCK в тексте.
+    """
     payload: dict[str, Any] = {
         "model": model,
         "promptText": visual[:15000] if model in RUNWAY_SEEDANCE_MODELS else visual,
@@ -1444,11 +1503,7 @@ def runway_video_payload(
     if model in RUNWAY_VEO_MODELS or model in RUNWAY_SEEDANCE_MODELS:
         payload["audio"] = False
         if prompt_image:
-            if model in RUNWAY_SEEDANCE_MODELS:
-                # keyframe mode: first-frame. Reference images нельзя смешать с first/last.
-                payload["promptImage"] = [{"uri": prompt_image, "position": "first"}]
-            else:
-                payload["promptImage"] = prompt_image
+            payload["promptImage"] = prompt_image
         return payload
     payload["contentModeration"] = runway_content_moderation()
     if seed is not None:
@@ -1541,8 +1596,20 @@ async def runway_clip(
     label = f"клип {clip_index} из {clip_total}"
 
     async def _i2v(image: str, mdl: str) -> Path:
+        image_for = image
+        # Seedance 2.5 (third-party) часто режет data-URI promptImage
+        # INPUT_VALIDATION; hosted runway:// URI проходит.
+        if (
+            mdl in RUNWAY_SEEDANCE_MODELS
+            and isinstance(image, str)
+            and image.startswith("data:")
+        ):
+            try:
+                image_for = await runway_upload_data_uri(session, image)
+            except PipelineError as up_err:
+                log.warning("Seedance still upload failed, trying data URI: %s", up_err.detail)
         payload = runway_video_payload(
-            mdl, visual, ratio, requested, seed=seed, prompt_image=image
+            mdl, visual, ratio, requested, seed=seed, prompt_image=image_for
         )
         video_url = await _resume_or_submit(
             session, "/v1/image_to_video", payload, dest, used_image=True

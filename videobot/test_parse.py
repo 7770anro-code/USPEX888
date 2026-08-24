@@ -152,6 +152,8 @@ def test_compose_runway_prompt_lock() -> None:
     assert lock in a and lock in b
     assert "LOCKED LOOK" in a
     assert "clothes, location" in a
+    assert "same character as reference image" in a
+    assert "do not alter face" in a
     assert "same person" not in a
     assert len(a) <= RUNWAY_PROMPT_MAX
     assert "push-in" in a
@@ -1451,8 +1453,12 @@ def test_look_and_runway_models() -> None:
     assert sd["audio"] is False
     assert "seed" not in sd
     assert "contentModeration" not in sd
-    assert sd["promptImage"] == [{"uri": "data:x", "position": "first"}]
+    assert sd["promptImage"] == "data:x"
+    assert isinstance(sd["promptImage"], str)
     assert duration_for_model("seedance2_5", 3) == 4
+    clip_upload = inspect.getsource(runway_clip)
+    assert "runway_upload_data_uri" in clip_upload
+    assert "RUNWAY_SEEDANCE_MODELS" in clip_upload
     assert video_models_for_quality("fast") == ("gen4_turbo", "")
     assert video_models_for_quality("optimal")[0] == "gen4.5"
     assert still_model_for_quality("optimal") == "gen4_image"
