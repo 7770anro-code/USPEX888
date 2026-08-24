@@ -2,6 +2,8 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-24 (2):** после «ок» на хук/энергию/grok-4.5, короткую тему и цикл «Улучшить качество» код снова выложен в `/opt/videobot`. Рестарт только `videobot.service` (PID 150351 → 153447). `uspex.service` PID 91832 и `vector.service` PID 67680 без изменений. `.env` и SQLite/`data/` не трогали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling. `XAI_MODEL` в прод `.env` по-прежнему fast (27 символов); идеи и сценарии берутся через `XAI_CREATIVE_MODEL` default `grok-4.5`.
+
 **Деплой 2026-08-24:** код ветки `cursor/night-pipeline-00ae` скопирован в `/opt/videobot`, рестарт только `videobot.service` (PID сменился). `uspex.service` и `vector.service` остались active с теми же PID. `videobot-night.timer` не ставили. Существующий `/opt/videobot/.env` не перезаписывали — дописали только отсутствующие ключи автоконтура. SQLite с клонами голоса сохранили. Бот `@VideobotAI777_bot` в polling, автоконтур стартовал (интервал 90 мин, batch=1, лимит 3/день). `NIGHT_OWNER_CHAT_ID` в `.env` по-прежнему пуст — кнопки «да/нет» в Telegram не уйдут, пока владелец не пропишет свой chat id.
 
 Путь автоконтура тот же, что у фоновой задачи: `night_runner.run_night(smoke=True, notify=False)` — это та же функция, что вызывает `auto_pipeline_loop` внутри `videobot.service`.
