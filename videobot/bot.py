@@ -154,8 +154,9 @@ def photo_start_blocked(photo_file_id: str | None, consent_verified: bool) -> st
 
 HOW_IT_WORKS = (
     "Как это работает — совсем просто:\n\n"
-    "1) Тема (хватит 2–3 слов — хук и сценарий соберу сам), готовый текст или пресет.\n"
-    "2) Можно своё фото — лицо в ролике будет как на фото.\n"
+    "1) Тема (хватит 2–3 слов — хук и сценарий соберу сам; в «1 клик» фото и голос по желанию), "
+    "готовый текст или пресет.\n"
+    "2) Можно своё фото — лицо в ролике будет как на фото. Без кнопки согласия фото не беру.\n"
     "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
@@ -209,9 +210,22 @@ def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
     return load_user_voices(int(chat_id))
 
 
-def _voices_kb(message: Message | None, page: int = 0) -> InlineKeyboardMarkup:
+def _voices_kb(
+    message: Message | None,
+    page: int = 0,
+    *,
+    allow_skip: bool = False,
+) -> InlineKeyboardMarkup:
     chat_id = message.chat.id if message else None
-    return voice_kb(page, _extra_voices(chat_id))
+    kb = voice_kb(page, _extra_voices(chat_id))
+    if not allow_skip:
+        return kb
+    rows = [list(row) for row in kb.inline_keyboard]
+    rows.insert(
+        0,
+        [InlineKeyboardButton(text="Пропустить голос", callback_data="vskip:default")],
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -1313,7 +1327,8 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         await msg.answer(
             "⚡️ Напиши тему — хватит 2–3 слов.\n"
             "Например: «лестница микро» или «утренний кофе».\n"
-            "Заголовок, хук, сюжет, сцены и подпись придумаю сам."
+            "Заголовок, хук, сюжет, сцены и подпись придумаю сам.\n"
+            "Потом можно (необязательно) своё фото и голос."
         )
         return
     if data == "menu:preset":
@@ -1395,9 +1410,17 @@ async def on_quick_idea(message: Message, state: FSMContext) -> None:
     job["idea"] = idea
     job["n_scenes"] = target_scene_count(idea)
     job["user_script"] = False
+    job["photo_file_id"] = None
+    job["consent_verified"] = False
     await _save_job(state, job)
-    await state.set_state(Flow.tune)
-    await message.answer(tune_text(job), reply_markup=tune_kb(job))
+    await state.set_state(Flow.custom_photo)
+    await message.answer(
+        "Тема принята — хук, сюжет и камеру соберу сам.\n\n"
+        "Если хочешь своё лицо в ролике, пришли фото. Это необязательно.\n"
+        "Это будет первый кадр каждого клипа, чтобы лицо не прыгало.\n"
+        "Если фото не нужно — нажми «Пропустить».",
+        reply_markup=photo_skip_kb(),
+    )
 
 
 async def on_preset_topic(message: Message, state: FSMContext) -> None:
@@ -1444,6 +1467,33 @@ async def on_custom_script(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _go_voice_step(
+    message: Message | None,
+    state: FSMContext,
+    job: dict[str, Any],
+    *,
+    after_consent: bool,
+) -> None:
+    """После фото: custom обязан выбрать голос; 1-клик может пропустить (Сара)."""
+    await state.set_state(Flow.custom_voice)
+    if not message:
+        return
+    quick = job.get("mode") == "quick"
+    if quick:
+        text = (
+            "Спасибо. Теперь выбери голос или пропусти — будет Сара. "
+            "Хук и сценарий всё равно соберу сам."
+            if after_consent
+            else "Выбери голос или пропусти — будет Сара. Хук и сценарий всё равно соберу сам."
+        )
+        await message.answer(text, reply_markup=_voices_kb(message, 0, allow_skip=True))
+        return
+    if after_consent:
+        await message.answer("Спасибо. Теперь выбери голос:", reply_markup=_voices_kb(message, 0))
+        return
+    await message.answer("Выбери голос:", reply_markup=_voices_kb(message, 0))
+
+
 async def _maybe_start_consent(message: Message, state: FSMContext, file_id: str) -> None:
     job = await _job(state)
     job["photo_file_id"] = file_id
@@ -1485,9 +1535,7 @@ async def on_photo_skip(query: CallbackQuery, state: FSMContext) -> None:
     job["photo_file_id"] = None
     job["consent_verified"] = False
     await _save_job(state, job)
-    await state.set_state(Flow.custom_voice)
-    if query.message:
-        await query.message.answer("Выбери голос:", reply_markup=_voices_kb(query.message, 0))
+    await _go_voice_step(query.message if isinstance(query.message, Message) else None, state, job, after_consent=False)
 
 
 async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
@@ -1520,9 +1568,7 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
                 "по нему оживим фото."
             )
         return
-    await state.set_state(Flow.custom_voice)
-    if query.message:
-        await query.message.answer("Спасибо. Теперь выбери голос:", reply_markup=_voices_kb(query.message, 0))
+    await _go_voice_step(query.message if isinstance(query.message, Message) else None, state, job, after_consent=True)
 
 
 async def on_voice_page(query: CallbackQuery, state: FSMContext) -> None:
@@ -1537,11 +1583,47 @@ async def on_voice_page(query: CallbackQuery, state: FSMContext) -> None:
         page = int((query.data or "vpage:0").split(":")[1])
     except (IndexError, ValueError):
         page = 0
+    job = await _job(state)
+    allow_skip = st == Flow.custom_voice.state and job.get("mode") == "quick"
     if query.message:
         try:
-            await query.message.edit_reply_markup(reply_markup=_voices_kb(query.message, page))
+            await query.message.edit_reply_markup(
+                reply_markup=_voices_kb(query.message, page, allow_skip=allow_skip)
+            )
         except Exception:
-            await query.message.answer("Выбери голос:", reply_markup=_voices_kb(query.message, page))
+            await query.message.answer(
+                "Выбери голос:",
+                reply_markup=_voices_kb(query.message, page, allow_skip=allow_skip),
+            )
+
+
+async def on_voice_skip(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    if await state.get_state() != Flow.custom_voice.state:
+        if query.message:
+            await query.message.answer("Эта кнопка уже не действует. Нажми /start.", reply_markup=main_menu())
+        return
+    job = await _job(state)
+    if job.get("mode") != "quick":
+        if query.message:
+            await query.message.answer("В этом режиме голос нужно выбрать кнопкой.")
+        return
+    picked = voice_by_index(1)
+    job["voice_idx"] = 1
+    job["voice_id"] = picked["id"]
+    job["voice_name"] = picked["name"]
+    blocked = photo_start_blocked(job.get("photo_file_id"), bool(job.get("consent_verified")))
+    if blocked:
+        if query.message:
+            await query.message.answer(blocked, reply_markup=main_menu())
+        return
+    await _save_job(state, job)
+    await state.set_state(Flow.tune)
+    if query.message:
+        await query.message.answer(tune_text(job), reply_markup=tune_kb(job))
 
 
 async def on_voice_pick(query: CallbackQuery, state: FSMContext) -> None:
@@ -2657,6 +2739,7 @@ async def main() -> None:
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
     dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")
     dp.callback_query.register(on_consent, Flow.custom_consent, F.data.startswith("consent:"))
+    dp.callback_query.register(on_voice_skip, Flow.custom_voice, F.data == "vskip:default")
     dp.callback_query.register(on_voice_page, Flow.custom_voice, F.data.startswith("vpage:"))
     dp.callback_query.register(on_voice_pick, Flow.custom_voice, F.data.startswith("voice:"))
     dp.callback_query.register(on_voice_page, Flow.w2_sts_voice, F.data.startswith("vpage:"))

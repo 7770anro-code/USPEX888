@@ -2040,7 +2040,6 @@ async def build_video(
         else:
             if (
                 not user_script
-                and not photo_lock
                 and not (hook or "").strip()
                 and is_short_topic(idea)
                 and not script_system

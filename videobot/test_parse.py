@@ -520,7 +520,10 @@ def test_manual_short_topic_expands() -> None:
     assert "expand_topic_to_idea" in src
     assert "is_short_topic" in src
     assert "not user_script" in src
-    assert "not photo_lock" in src
+    expand_window = src[src.index("expand_topic_to_idea") - 350 : src.index("expand_topic_to_idea")]
+    assert "not user_script" in expand_window
+    assert "is_short_topic" in expand_window
+    assert "not photo_lock" not in expand_window
 
     user = topic_expand_user("лестница микро")
     assert "лестница микро" in user
@@ -543,6 +546,82 @@ def test_manual_short_topic_expands() -> None:
     assert custom["camera"] == "push"
     assert custom["motion"] == "nat"
     assert custom["user_script"] is True
+
+
+def test_quick_optional_photo_voice() -> None:
+    """1-клик: короткая тема → опционально фото/голос, без поломки custom."""
+    import inspect
+
+    from bot import (
+        PHOTO_CONSENT_PROMPT,
+        _go_voice_step,
+        _voices_kb,
+        consent_kb,
+        on_consent,
+        on_custom_script,
+        on_photo_skip,
+        on_quick_idea,
+        on_voice_skip,
+        photo_skip_kb,
+        voice_kb,
+    )
+    from voices import voice_by_index
+
+    q = inspect.getsource(on_quick_idea)
+    assert "len(idea) < 3" in q
+    assert 'job["user_script"] = False' in q
+    assert "Flow.custom_photo" in q
+    assert "photo_skip_kb" in q
+    assert "Flow.tune" not in q
+    assert "хук" in q.lower() or "Хук" in q
+
+    custom = inspect.getsource(on_custom_script)
+    from bot import main, on_menu
+
+    menu_src = inspect.getsource(on_menu)
+    assert "Пришли готовый текст ролика" in menu_src
+    assert "menu:custom" in menu_src
+    assert 'job["user_script"] = True' in custom
+    assert "Flow.custom_photo" in custom
+    assert "script_too_long_for_custom" in custom
+    assert "len(text) < 20" in custom
+
+    skip_src = inspect.getsource(on_photo_skip)
+    assert "_go_voice_step" in skip_src
+    voice_step = inspect.getsource(_go_voice_step)
+    assert '"Спасибо. Теперь выбери голос:"' in voice_step
+    assert '"Выбери голос:"' in voice_step
+    assert 'job.get("mode") == "quick"' in voice_step
+    assert "allow_skip=True" in voice_step
+    assert "Сара" in voice_step
+
+    consent_src = inspect.getsource(on_consent)
+    assert 'job.get("mode") == "act_two"' in consent_src
+    assert "_go_voice_step" in consent_src
+    assert "PHOTO_CONSENT_PROMPT" in inspect.getsource(
+        __import__("bot", fromlist=["_maybe_start_consent"])._maybe_start_consent
+    )
+    assert "моё фото" in PHOTO_CONSENT_PROMPT.lower()
+    photo_btns = [b.callback_data for row in consent_kb().inline_keyboard for b in row]
+    assert photo_btns[0] == "consent:yes"
+    skip_btns = [b.callback_data for row in photo_skip_kb().inline_keyboard for b in row]
+    assert "photo:skip" in skip_btns
+
+    skip_voice = inspect.getsource(on_voice_skip)
+    assert 'job.get("mode") != "quick"' in skip_voice
+    assert "voice_by_index(1)" in skip_voice
+    assert "Flow.tune" in skip_voice
+    sara = voice_by_index(1)
+    assert sara["name"] == "Сара"
+
+    plain = voice_kb(0)
+    plain_data = [b.callback_data for row in plain.inline_keyboard for b in row]
+    assert "vskip:default" not in plain_data
+    with_skip = _voices_kb(None, 0, allow_skip=True)
+    skip_data = [b.callback_data for row in with_skip.inline_keyboard for b in row]
+    assert skip_data[0] == "vskip:default"
+    assert "Пропустить голос" in with_skip.inline_keyboard[0][0].text
+    assert 'F.data == "vskip:default"' in inspect.getsource(main)
 
 
 def test_tiktok_upload_filename() -> None:
@@ -1734,6 +1813,7 @@ if __name__ == "__main__":
     test_tiktok_upload_filename()
     test_night_script_quality_and_hook()
     test_manual_short_topic_expands()
+    test_quick_optional_photo_voice()
     test_last_frame_chains_with_user_photo()
     test_wave2_thin_api()
     test_store_sqlite_voices_and_prefs()
