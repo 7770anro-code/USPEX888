@@ -41,6 +41,7 @@ async def render_idea(
     dest_mp4: Path,
     *,
     n_scenes: int = 4,
+    progress: Any = None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     if not RUNWAY.allow() or not ELEVEN.allow():
         raise CircuitOpen("runway" if not RUNWAY.allow() else "elevenlabs")
@@ -56,7 +57,7 @@ async def render_idea(
         video, script = await build_video(
             str(idea.get("plot") or idea.get("title") or ""),
             work_dir,
-            None,
+            progress,
             ratio="720:1280",
             style=account.style,
             voice_id=account.voice_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -75,11 +76,21 @@ def confirm_markup(job_ids: list[int]) -> dict[str, Any] | None:
 
 
 async def send_telegram(text: str, *, reply_markup: dict[str, Any] | None = None) -> bool:
+    mid = await send_telegram_message(text, reply_markup=reply_markup)
+    return mid is not None
+
+
+async def send_telegram_message(
+    text: str,
+    *,
+    chat_id: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
+) -> int | None:
     token = config.VIDEOBOT_TELEGRAM_TOKEN
-    chat = int(config.NIGHT_OWNER_CHAT_ID or 0)
+    chat = int(chat_id or config.NIGHT_OWNER_CHAT_ID or 0)
     if not token or chat <= 0:
         log.info("telegram report skipped (need VIDEOBOT_TELEGRAM_TOKEN and NIGHT_OWNER_CHAT_ID)")
-        return False
+        return None
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     body: dict[str, Any] = {"chat_id": chat, "text": text[:3900], "disable_web_page_preview": True}
     if reply_markup:
@@ -88,12 +99,46 @@ async def send_telegram(text: str, *, reply_markup: dict[str, Any] | None = None
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=body) as resp:
+                raw = await resp.text()
                 if resp.status >= 400:
                     log.warning("telegram report HTTP %s", resp.status)
+                    return None
+                data = json.loads(raw)
+                return int(((data.get("result") or {}).get("message_id") or 0) or 0) or None
+    except Exception as exc:
+        log.warning("telegram report failed: %s", type(exc).__name__)
+        return None
+
+
+async def edit_telegram_message(
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
+    token = config.VIDEOBOT_TELEGRAM_TOKEN
+    if not token or chat_id <= 0 or message_id <= 0:
+        return False
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    body: dict[str, Any] = {
+        "chat_id": int(chat_id),
+        "message_id": int(message_id),
+        "text": text[:3900],
+        "disable_web_page_preview": True,
+    }
+    if reply_markup is not None:
+        body["reply_markup"] = reply_markup
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=body) as resp:
+                if resp.status >= 400:
+                    log.warning("telegram edit HTTP %s", resp.status)
                     return False
                 return True
     except Exception as exc:
-        log.warning("telegram report failed: %s", type(exc).__name__)
+        log.warning("telegram edit failed: %s", type(exc).__name__)
         return False
 
 

@@ -662,6 +662,12 @@ def test_night_policy_defaults() -> None:
     assert "NIGHT_INTERVAL_MINUTES" in inspect.getsource(auto_pipeline_loop)
     assert "busy" in inspect.getsource(run_night)
     assert "{job['id']}.mp4" in inspect.getsource(_render_job)
+    assert "job_scope" in inspect.getsource(_render_job)
+    assert "live_markup_dict" in inspect.getsource(_render_job)
+    from bot import on_live_refresh, main as bot_main
+
+    assert "live:" in inspect.getsource(bot_main)
+    assert "fetch_runway_task" in inspect.getsource(on_live_refresh) or "compose_live_text" in inspect.getsource(on_live_refresh)
     assert 15 <= config.NIGHT_INTERVAL_MINUTES <= 24 * 60
     assert config.NIGHT_BATCH_PER_TICK >= 1
     assert 1 <= config.VIDEOS_PER_NIGHT <= 48
@@ -751,6 +757,54 @@ def test_legacy_night_schema_migrates() -> None:
         config.DATA_DIR = old
         store.reset_for_tests()
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_live_status_runway_fields() -> None:
+    import inspect
+
+    import live_status as live
+    from pipeline import fetch_runway_task
+
+    live.reset_for_tests()
+    assert live.parse_runway_progress(0.2) == 0.2
+    assert live.parse_runway_progress(0) == 0.0
+    assert live.parse_runway_progress(1) == 1.0
+    assert live.parse_runway_progress(20) is None
+    assert live.parse_runway_progress("nope") is None
+    assert live.parse_runway_progress(None) is None
+    assert live.parse_runway_frame({"status": "RUNNING", "progress": 0.2}) is None
+    assert live.parse_runway_frame({"currentFrame": 17}) == 17
+
+    live.start_job("m42", chat_id=42, title="Тест", scene_total=4)
+    live.update_job(
+        "m42",
+        stage=live.STAGE_RUNWAY,
+        scene_n=2,
+        scene_total=4,
+        label="Сцена 2 из 4 рендерится в Runway",
+        runway_task_id="11111111-1111-4111-8111-111111111111",
+        runway_status="RUNNING",
+        runway_progress=0.2,
+    )
+    text = live.format_status(live.get_job("m42"))
+    assert "сцена 2 из 4" in text
+    assert "20%" in text
+    assert "кадр 17" not in text
+    assert "GET /v1/tasks" in text
+    no_pct = dict(live.get_job("m42") or {})
+    no_pct["runway_progress"] = None
+    quiet = live.format_status(no_pct)
+    assert "20%" not in quiet
+    assert live.parse_callback_key("live:m42") == "m42"
+    assert live.parse_callback_key("live:n7") == "n7"
+    assert live.parse_callback_key("live:../x") is None
+    src = inspect.getsource(fetch_runway_task)
+    assert "session.get" in src
+    assert "/v1/tasks/" in src
+    assert "session.post" not in src
+    poll_src = inspect.getsource(__import__("pipeline", fromlist=["_runway_poll"])._runway_poll)
+    assert "session.get" in poll_src
+    live.reset_for_tests()
 
 
 def test_edit_timecodes_and_limits() -> None:
@@ -908,6 +962,7 @@ if __name__ == "__main__":
     test_clone_posts_voices_add()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
+    test_live_status_runway_fields()
     test_edit_timecodes_and_limits()
     test_upscale_result_uses_video_upscale()
     print("ok")

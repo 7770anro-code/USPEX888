@@ -32,6 +32,7 @@ from pipeline import (
     PipelineError,
     build_video,
     ensure_ffmpeg,
+    fetch_runway_task,
     file_to_data_uri,
     format_script,
     script_too_long_for_custom,
@@ -52,6 +53,18 @@ from presets import (
     voice_settings_payload,
 )
 from joblock import JobLock
+from live_status import (
+    allow_runway_get,
+    finish_job,
+    format_status,
+    get_job,
+    job_key_manual,
+    job_scope,
+    live_kb,
+    parse_callback_key,
+    set_message,
+    start_job,
+)
 from edit import (
     MAX_CLIPS,
     MAX_INPUT_SEC,
@@ -251,6 +264,62 @@ def result_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎬 Новый ролик", callback_data="menu:home")],
         ]
     )
+
+
+async def compose_live_text(job_key: str) -> tuple[str, bool]:
+    """Текст статуса. GET Runway только по сохранённому task_id, с паузой ≥5 с."""
+    snap = get_job(job_key)
+    stale = False
+    tid = str((snap or {}).get("runway_task_id") or "").strip()
+    if snap and tid and not snap.get("done"):
+        if allow_runway_get(tid):
+            try:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    await fetch_runway_task(session, tid)
+            except Exception:
+                log.warning("live status Runway GET failed job=%s", job_key)
+            snap = get_job(job_key)
+        else:
+            stale = True
+    alive = bool(snap and not snap.get("done"))
+    return format_status(snap, stale_runway=stale), alive
+
+
+async def edit_live_message(status: Message, job_key: str, text: str, *, alive: bool) -> None:
+    markup = live_kb(job_key) if alive else None
+    try:
+        await status.edit_text(text[:3900], reply_markup=markup)
+    except Exception:
+        try:
+            await status.answer(text[:3900], reply_markup=markup)
+        except Exception:
+            log.warning("status: %s", text[:120])
+
+
+async def on_live_refresh(query: CallbackQuery) -> None:
+    key = parse_callback_key(query.data or "")
+    if not key:
+        try:
+            await query.answer("Не понял кнопку статуса.")
+        except Exception:
+            pass
+        return
+    snap = get_job(key)
+    if snap and int(snap.get("chat_id") or 0) and query.message:
+        if int(query.message.chat.id) != int(snap["chat_id"]):
+            try:
+                await query.answer("Это статус другой съёмки.")
+            except Exception:
+                pass
+            return
+    text, alive = await compose_live_text(key)
+    if query.message:
+        await edit_live_message(query.message, key, text, alive=alive)
+    try:
+        await query.answer("Обновил" if get_job(key) else "Съёмки нет")
+    except Exception:
+        pass
 
 
 def presets_kb() -> InlineKeyboardMarkup:
@@ -1359,17 +1428,19 @@ async def _run_job(
         return
     ok = False
     work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
+    job_key = job_key_manual(message.chat.id)
     try:
-        status = await message.answer("▓░░░░░░░░░ 0%\nПоехали")
+        start_job(job_key, chat_id=message.chat.id, title="", scene_total=n_scenes)
+        status = await message.answer(
+            format_status(get_job(job_key)),
+            reply_markup=live_kb(job_key),
+        )
+        set_message(job_key, status.message_id)
 
         async def progress(text: str) -> None:
-            try:
-                await status.edit_text(text)
-            except Exception:
-                try:
-                    await message.answer(text)
-                except Exception:
-                    log.warning("status: %s", text)
+            snap = get_job(job_key)
+            alive = bool(snap and not snap.get("done"))
+            await edit_live_message(status, job_key, text, alive=alive)
 
         try:
             photo_path = None
@@ -1377,23 +1448,24 @@ async def _run_job(
                 photo_path = work / "user_photo.jpg"
                 work.mkdir(parents=True, exist_ok=True)
                 await _download_photo(bot, photo_file_id, photo_path)
-            video_path, script = await build_video(
-                idea,
-                work,
-                progress,
-                ratio=TIKTOK_RATIO,
-                style=style,
-                voice_id=voice_id,
-                reference_image=photo_path,
-                user_script=user_script,
-                n_scenes=n_scenes,
-                extra_brief=extra_brief,
-                voice_settings=voice_settings,
-                camera=camera,
-                motion=motion,
-                quality=quality,
-                watermark=watermark,
-            )
+            with job_scope(job_key):
+                video_path, script = await build_video(
+                    idea,
+                    work,
+                    progress,
+                    ratio=TIKTOK_RATIO,
+                    style=style,
+                    voice_id=voice_id,
+                    reference_image=photo_path,
+                    user_script=user_script,
+                    n_scenes=n_scenes,
+                    extra_brief=extra_brief,
+                    voice_settings=voice_settings,
+                    camera=camera,
+                    motion=motion,
+                    quality=quality,
+                    watermark=watermark,
+                )
             preview = format_script(script)
             try:
                 await message.answer(preview[:3500])
@@ -1409,6 +1481,7 @@ async def _run_job(
                 caption,
                 filename=tiktok_upload_filename(title),
             )
+            finish_job(job_key, label="Готово — видео выше.")
             try:
                 await status.edit_text("✅ Готово — видео выше.")
             except Exception:
@@ -1420,9 +1493,11 @@ async def _run_job(
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
+            finish_job(job_key, failed=True, label=exc.user_message)
             await message.answer(exc.user_message, reply_markup=main_menu())
         except Exception:
             log.exception("unhandled")
+            finish_job(job_key, failed=True, label="Сломалось на моей стороне")
             await message.answer(
                 "Упс, что-то сломалось на моей стороне. Нажми /start и попробуй ещё раз.",
                 reply_markup=main_menu(),
@@ -2011,6 +2086,7 @@ async def main() -> None:
     dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.document)
     dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
+    dp.callback_query.register(on_live_refresh, F.data.startswith("live:"))
     dp.callback_query.register(on_stale_callback)
     from night_loop import start_auto_pipeline
 

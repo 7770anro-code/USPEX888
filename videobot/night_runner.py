@@ -93,15 +93,53 @@ def _blockers_from_accounts(accounts) -> list[str]:
 
 
 async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
+    from live_status import (
+        finish_job,
+        format_status,
+        get_job,
+        job_key_night,
+        job_scope,
+        live_markup_dict,
+        set_message,
+        start_job,
+    )
+    from night_report import edit_telegram_message, send_telegram_message
+
     wid = worker_id()
     lock_job(int(job["id"]), GENERATING, wid)
     day = str(job["run_date"])
     dest = _outbox(day, account.id) / f"{job['id']}.mp4"
     work = Path(config.WORK_DIR) / f"night_{day}_{account.id}_{job['id']}"
-    try:
-        video, script, cost = await render_idea(
-            idea, account, work, dest, n_scenes=n_scenes
+    job_key = job_key_night(int(job["id"]))
+    owner = int(config.NIGHT_OWNER_CHAT_ID or 0)
+    start_job(
+        job_key,
+        chat_id=owner,
+        title=str(idea.get("title") or ""),
+        scene_total=n_scenes,
+    )
+    msg_id = 0
+    if owner > 0:
+        sent = await send_telegram_message(
+            format_status(get_job(job_key)),
+            chat_id=owner,
+            reply_markup=live_markup_dict(job_key),
         )
+        msg_id = int(sent or 0)
+        if msg_id:
+            set_message(job_key, msg_id)
+
+    async def progress(text: str) -> None:
+        if owner > 0 and msg_id:
+            snap = get_job(job_key)
+            markup = live_markup_dict(job_key) if snap and not snap.get("done") else None
+            await edit_telegram_message(owner, msg_id, text, reply_markup=markup)
+
+    try:
+        with job_scope(job_key):
+            video, script, cost = await render_idea(
+                idea, account, work, dest, n_scenes=n_scenes, progress=progress
+            )
         (dest.parent / "script.json").write_text(
             json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -115,11 +153,21 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
         )
         if require_confirm():
             update_job(int(job["id"]), status=WAIT_CONFIRM)
+        finish_job(job_key, label="Готово, ждёт да/нет в /night" if require_confirm() else "Готово")
+        if owner > 0 and msg_id:
+            await edit_telegram_message(
+                owner,
+                msg_id,
+                format_status(get_job(job_key)),
+                reply_markup=None,
+            )
         log.info("job %s video_ready %s", job["id"], video)
     except CircuitOpen as exc:
+        finish_job(job_key, failed=True, label=str(exc))
         update_job(int(job["id"]), status=PENDING, last_error=str(exc), locked_at=None, worker_id="")
         raise
     except PipelineError as exc:
+        finish_job(job_key, failed=True, label=exc.user_message)
         update_job(
             int(job["id"]),
             status=FAILED,
@@ -129,6 +177,7 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
         )
         raise
     except Exception as exc:
+        finish_job(job_key, failed=True, label=type(exc).__name__)
         update_job(
             int(job["id"]),
             status=FAILED,

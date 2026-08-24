@@ -706,6 +706,12 @@ async def _runway_poll(
             continue
         last_status = str(data.get("status") or "")
         status_u = last_status.upper()
+        try:
+            from live_status import note_runway_poll
+
+            note_runway_poll(task_id, data)
+        except Exception:
+            pass
         if status_u == "SUCCEEDED":
             output = data.get("output") or []
             if isinstance(output, list) and output:
@@ -864,13 +870,57 @@ async def _resume_or_submit(
         tid = side.read_text(encoding="utf-8").strip()
         if tid:
             log.info("Runway resume poll task_id=%s file=%s", tid, dest.name)
+            _remember_runway_task(tid, path)
             return await _runway_poll(session, tid, used_image=used_image)
     tid = await _runway_submit(session, path, payload, used_image=used_image)
     try:
         side.write_text(tid, encoding="utf-8")
     except OSError:
         log.warning("не записал Runway task id рядом с %s", dest.name)
+    _remember_runway_task(tid, path)
     return await _runway_poll(session, tid, used_image=used_image)
+
+
+def _remember_runway_task(task_id: str, path: str) -> None:
+    kind = "image_to_video"
+    if "text_to_image" in path:
+        kind = "text_to_image"
+    elif "text_to_video" in path:
+        kind = "text_to_video"
+    try:
+        from live_status import note_runway_task
+
+        note_runway_task(task_id, kind=kind)
+    except Exception:
+        pass
+
+
+async def fetch_runway_task(session: aiohttp.ClientSession, task_id: str) -> dict[str, Any]:
+    """Только GET /v1/tasks/{id}. Не submit, кредиты не тратит."""
+    tid = (task_id or "").strip()
+    if not tid:
+        raise PipelineError("Нет сохранённого Runway task_id — опрашивать нечего.")
+    async with session.get(
+        f"{RUNWAY_HOST}/v1/tasks/{tid}",
+        headers=_runway_headers(),
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
+        raw = await resp.text()
+        if resp.status >= 400:
+            raise PipelineError(
+                "Runway не отдал статус сохранённой задачи.",
+                _clip(f"HTTP {resp.status}: {raw}", 240),
+            )
+        data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise PipelineError("Runway вернул не JSON-объект статуса.")
+    try:
+        from live_status import note_runway_poll
+
+        note_runway_poll(tid, data)
+    except Exception:
+        pass
+    return data
 
 
 async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Path:
@@ -1316,6 +1366,7 @@ async def build_video(
     watermark: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
+    import live_status as live
 
     ensure_ffmpeg()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1325,12 +1376,21 @@ async def build_video(
     planned = int(n_scenes or target_scene_count(idea))
     tracker = StageProgress(planned)
 
-    async def report(label: str) -> None:
-        await _notify(progress, tracker.render(label))
+    async def report(label: str, *, stage: str, scene: int = 0) -> None:
+        live.update_job(
+            stage=stage,
+            label=label,
+            scene_n=int(scene or 0),
+            scene_total=int(tracker.n or 0),
+        )
+        key = live.current_key()
+        snap = live.get_job(key) if key else None
+        text = live.format_status(snap) if snap else tracker.render(label)
+        await _notify(progress, text)
 
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        await report("✍️ Пишу сценарий…")
+        await report("Пишу сценарий…", stage=live.STAGE_SCRIPT)
         script = await grok_script(
             session,
             idea,
@@ -1346,18 +1406,19 @@ async def build_video(
         script["style"] = style
         total = len(scenes)
         tracker.n = max(1, total)
+        live.update_job(scene_total=total)
         tracker.script_done = True
-        await report("Сценарий готов")
+        await report("Сценарий готов", stage=live.STAGE_SCRIPT)
 
         job_seed = random.randint(0, 2_147_483_647)
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
-            await report("🖼️ Готовлю фото как первый кадр…")
+            await report("Готовлю фото как первый кадр…", stage=live.STAGE_STILL)
             anchor_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
         elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
             anchor_image = reference_image
         else:
-            await report("🖼️ Общий первый кадр…")
+            await report("Общий первый кадр в Runway…", stage=live.STAGE_STILL)
             try:
                 still_url = await _text_to_image_url(
                     session,
@@ -1382,12 +1443,12 @@ async def build_video(
                 anchor_image = None
         prompt_image = anchor_image
         tracker.still_done = True
-        await report("Кадр готов")
+        await report("Первый кадр готов", stage=live.STAGE_STILL)
 
         muxed: list[Path] = []
         for i, scene in enumerate(scenes):
             n = i + 1
-            await report(f"Озвучка {n} из {total}")
+            await report(f"Озвучка ElevenLabs · сцена {n} из {total}", stage=live.STAGE_TTS, scene=n)
             audio = await eleven_tts(
                 session,
                 scene["narration"],
@@ -1396,13 +1457,21 @@ async def build_video(
                 voice_settings=voice_settings,
             )
             tracker.tts_done = n
-            await report(f"Озвучка готова ({n} из {total})")
+            await report(
+                f"Озвучка готова ({n} из {total})",
+                stage=live.STAGE_TTS,
+                scene=n,
+            )
             prompt = compose_runway_prompt(
                 continuity, scene["visual_prompt"], camera, motion
             )
             audio_sec = await media_duration(audio)
             clip_sec = pick_clip_duration(audio_sec or 10.0)
-            await report(f"Видео {n} из {total}")
+            await report(
+                f"Сцена {n} из {total} рендерится в Runway",
+                stage=live.STAGE_RUNWAY,
+                scene=n,
+            )
             try:
                 clip = await runway_clip(
                     session,
@@ -1435,12 +1504,12 @@ async def build_video(
             )
             muxed.append(mixed)
             tracker.video_done = n
-            await report(f"Видео {n} из {total}")
-        await report("Монтаж")
+            await report(f"Клип {n} из {total} смонтирован", stage=live.STAGE_RUNWAY, scene=n)
+        await report("Сборка финального файла ffmpeg…", stage=live.STAGE_MUX)
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)
         if watermark:
-            await report("Водяной знак")
+            await report("Водяной знак", stage=live.STAGE_MUX)
             out = await apply_watermark(out, work_dir / "final_wm.mp4")
         tracker.mux_done = True
-        await report("✅ Готово")
+        await report("Файл собран", stage=live.STAGE_MUX)
         return out, script
