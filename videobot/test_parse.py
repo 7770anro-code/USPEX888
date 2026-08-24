@@ -1145,10 +1145,13 @@ def test_upscale_result_uses_video_upscale() -> None:
     ask = inspect.getsource(on_upscale_last)
     assert "REVISE_ASK" in ask
     assert "revise_notes" in ask
+    assert "_job_is_final" in ask
     assert "/v1/video_upscale" not in ask
     notes = inspect.getsource(on_revise_notes)
     assert "_revision_extra_brief" in notes
     assert "revisions" in notes
+    assert "_job_is_final" in notes
+    assert "BUSY.locked()" in notes
     pix = inspect.getsource(_pixel_upscale_last)
     assert "/v1/video_upscale" in pix
     assert "video_upscale_payload" in pix
@@ -1175,6 +1178,11 @@ def test_upscale_result_uses_video_upscale() -> None:
     assert "Не прыгай выше головы" in blob
     assert "вторая сцена скучная" in blob
     assert "хук слабый" in blob
+    assert blob.find("Правки зрителя") < blob.find("Сюжет:")
+    from pipeline import grok_script
+
+    gsrc = inspect.getsource(grok_script)
+    assert "extra_brief.strip()[:4000]" in gsrc
 
 
 if __name__ == "__main__":

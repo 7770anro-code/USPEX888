@@ -720,7 +720,7 @@ async def grok_script(
                 f"{hook_block}"
             )
         if extra_brief.strip():
-            body += "\n\nДоп. режиссура пресета:\n" + extra_brief.strip()[:1200]
+            body += "\n\nДоп. режиссура пресета:\n" + extra_brief.strip()[:4000]
         if quality_note.strip():
             body += (
                 "\n\nПОВТОР. Предыдущий JSON отклонён. Исправь ровно эти ошибки, "

@@ -1968,26 +1968,33 @@ async def on_w2_extend_prompt(message: Message, state: FSMContext) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _job_is_final(job: dict[str, Any] | None) -> bool:
+    return bool(job) and str(job.get("status") or "") == "final"
+
+
 def _revision_extra_brief(job: dict[str, Any]) -> str:
     from night_ideas import script_brief_from_idea
 
-    base = script_brief_from_idea(
-        {
-            "kind": job.get("kind") or "motivational",
-            "hook": job.get("hook") or "",
-            "plot": job.get("idea") or "",
-            "title": job.get("title") or "",
-        },
-        extra=str(job.get("preset_brief") or ""),
-    )
     notes = [str(n).strip() for n in (job.get("revisions") or []) if str(n).strip()]
+    parts: list[str] = []
     if notes:
         numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(notes, 1))
-        base += (
-            "\n\nПравки зрителя к предыдущей версии (учесть обязательно, не игнорировать):\n"
+        parts.append(
+            "Правки зрителя к предыдущей версии (учесть обязательно, не игнорировать):\n"
             + numbered
         )
-    return base
+    parts.append(
+        script_brief_from_idea(
+            {
+                "kind": job.get("kind") or "motivational",
+                "hook": job.get("hook") or "",
+                "plot": job.get("idea") or "",
+                "title": job.get("title") or "",
+            },
+            extra=str(job.get("preset_brief") or ""),
+        )
+    )
+    return "\n\n".join(parts)
 
 
 async def _pixel_upscale_last(msg: Message) -> None:
@@ -2043,7 +2050,17 @@ async def on_upscale_last(query: CallbackQuery, state: FSMContext) -> None:
         await msg.answer("⏳ Я уже снимаю другой ролик. Напиши, когда пришлю результат.")
         return
     job = get_last_job(msg.chat.id)
+    if _job_is_final(job):
+        await msg.answer(
+            "Этот ролик уже финал, правки к нему закрыты. Сними новый, если нужно иначе.",
+            reply_markup=main_menu(),
+        )
+        return
     if job and str(job.get("idea") or "").strip():
+        current = await state.get_state()
+        if current == Flow.revise_notes.state:
+            await msg.answer("Уже жду правки текстом. Напиши, что поменять — или нажми «Готово, это финал».")
+            return
         await state.set_state(Flow.revise_notes)
         await msg.answer(REVISE_ASK, reply_markup=result_kb(can_finalize=True))
         return
@@ -2063,7 +2080,17 @@ async def on_revise_notes(message: Message, state: FSMContext) -> None:
     if len(text) < 3:
         await message.answer("Напиши чуть конкретнее, что поменять.")
         return
+    if BUSY.locked():
+        await message.answer("⏳ Уже идёт съёмка. Напиши правки, когда пришлю черновик.")
+        return
     job = get_last_job(message.chat.id)
+    if _job_is_final(job):
+        await state.clear()
+        await message.answer(
+            "Этот ролик уже финал, новые правки к нему не беру. Сними новый ролик.",
+            reply_markup=main_menu(),
+        )
+        return
     if not job or not str(job.get("idea") or "").strip():
         await state.clear()
         await message.answer(
@@ -2113,10 +2140,18 @@ async def on_revise_final(query: CallbackQuery, state: FSMContext) -> None:
     if not isinstance(msg, Message):
         return
     await state.clear()
+    existing = get_last_job(msg.chat.id)
+    if _job_is_final(existing):
+        await msg.answer("Этот ролик уже был финалом.", reply_markup=main_menu())
+        return
     job = mark_last_job_final(msg.chat.id)
     if not job:
         await msg.answer("Нечего подтверждать — сначала сними ролик.", reply_markup=main_menu())
         return
+    try:
+        await msg.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
     title = str(job.get("title") or get_last_title(msg.chat.id) or "ролик")
     await msg.answer(
         f"Финал зафиксирован: «{title}». Этот ролик больше не черновик.\n"
