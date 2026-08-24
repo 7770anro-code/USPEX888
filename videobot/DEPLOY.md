@@ -22,6 +22,10 @@ VIDEOBOT_TELEGRAM_TOKEN=...
 
 `XAI_API_KEY_NEW` в Cursor Secrets может быть обёрткой `XAI_API_KEY=xai-...` (96 символов). Бот сам снимает префикс `XAI_API_KEY=` и проверяет, что внутри ключ длиной 84 с префиксом `xai-`. Чистить секрет вручную не нужно.
 
+Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. По умолчанию прямой `gen4.5` / `gen4_turbo`.
+
+Клон голоса: `POST /v1/voices/add` требует план ElevenLabs с Instant Voice Clone. На тарифе без IVC API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning` — это не баг ключа TTS.
+
 ## Команды по SSH (один раз, после «ок»)
 
 С ноутбука, из корня репозитория (ветка с папкой `videobot/`):

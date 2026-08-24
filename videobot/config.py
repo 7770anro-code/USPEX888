@@ -94,6 +94,16 @@ RUNWAY_RATIO = _clean("RUNWAY_RATIO") or "720:1280"
 RUNWAY_VERSION = _clean("RUNWAY_VERSION") or "2024-11-06"
 RUNWAY_POLL_SEC = float(_clean("RUNWAY_POLL_SEC") or "5")
 RUNWAY_TIMEOUT_SEC = float(_clean("RUNWAY_TIMEOUT_SEC") or "720")
+# Опционально: POST /v1/generate/video с configId вместо захардкоженной модели.
+# По умолчанию выкл — прямой gen4.5 / gen4_turbo. Конфиг создаёт владелец на
+# https://dev.runwayml.com/model-routers (slug в RUNWAY_ROUTER_CONFIG_ID).
+RUNWAY_USE_MODEL_ROUTER = (_clean("RUNWAY_USE_MODEL_ROUTER") or "0").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+RUNWAY_ROUTER_CONFIG_ID = _clean("RUNWAY_ROUTER_CONFIG_ID")
 HTTP_RETRIES = int(_clean("HTTP_RETRIES") or "4")
 KEEP_FAILED_DIR = (_clean("KEEP_FAILED_DIR") or "1").lower() in ("1", "true", "yes", "on")
 BURN_SUBTITLES = (_clean("BURN_SUBTITLES") or "1").lower() in ("1", "true", "yes", "on")
@@ -150,6 +160,11 @@ def require_all() -> None:
     missing = missing_secrets()
     if missing:
         raise RuntimeError("Нет секретов: " + ", ".join(missing))
+
+
+def runway_model_router_enabled() -> bool:
+    """Роутер только если флаг и slug конфига оба заданы. Иначе прямой вызов модели."""
+    return bool(RUNWAY_USE_MODEL_ROUTER and RUNWAY_ROUTER_CONFIG_ID)
 
 
 def missing_render_secrets() -> list[str]:

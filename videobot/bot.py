@@ -1776,6 +1776,7 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
             reply_markup=clone_done_kb(),
         )
     except PipelineError as exc:
+        log.warning("w2 clone: %s | %s", exc.user_message, exc.detail)
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
         log.exception("w2 clone")

@@ -12,6 +12,7 @@
    - Вертикаль `720:1280`. Клип 5 или 10 сек.
    - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`).
    - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
+   - Опционально Model Router: `RUNWAY_USE_MODEL_ROUTER=1` + `RUNWAY_ROUTER_CONFIG_ID` (slug с [dev.runwayml.com/model-routers](https://dev.runwayml.com/model-routers)). Тогда `POST /v1/generate/video` с `configId` вместо модели; polling тот же `GET /v1/tasks/{id}` + sidecar `.runway_id`. По умолчанию флаг выкл.
 4. **ffmpeg** — `atempo`, склейка 9:16, субтитры, опциональный водяной знак (текст/лого, вкл/выкл).
 5. Перед запуском — оценка кредитов Runway + символы ElevenLabs, кнопки **Создать / Отмена** (и «Изменить»).
 6. Готовый ролик уходит двумя файлами: `answer_video` + `answer_document`. На экране результата — **«Улучшить качество»** (`POST /v1/video_upscale` на `final.mp4`).
@@ -33,7 +34,7 @@
 
 SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной знак, путь к последнему ролику.
 
-- Instant Voice Clone — согласие отдельно от фото, хранение `voice_id` по `user_id`
+- Instant Voice Clone — согласие отдельно от фото, хранение `voice_id` по `user_id`. Нужен платный план ElevenLabs с IVC (на Free API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning`).
 - Act Two с /start, то же согласие что custom-фото
 - Magnific video upscale готового `final.mp4` с экрана результата
 - Пресеты задают стиль/темп/голос в бриф Grok

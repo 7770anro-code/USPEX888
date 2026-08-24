@@ -718,11 +718,90 @@ def test_watermark_ffmpeg_overlay() -> None:
 def test_clone_posts_voices_add() -> None:
     import inspect
 
-    from wave2 import ELEVEN_IVC_URL, clone_voice
+    from wave2 import (
+        CLONE_PLAN_MSG,
+        ELEVEN_IVC_URL,
+        clone_fail_user_message,
+        clone_voice,
+        parse_elevenlabs_error,
+        prepare_clone_audio,
+    )
 
     assert ELEVEN_IVC_URL.endswith("/v1/voices/add")
     src = inspect.getsource(clone_voice)
     assert "ELEVEN_IVC_URL" in src
+    assert "prepare_clone_audio" in src
+    assert "clone_fail_user_message" in src
+    assert "audio/wav" in inspect.getsource(prepare_clone_audio) or "_ivc.wav" in inspect.getsource(
+        prepare_clone_audio
+    )
+    prod = (
+        '{"detail":{"type":"payment_required","code":"paid_plan_required",'
+        '"message":"Your subscription does not include instant voice cloning. '
+        'Please upgrade your plan.","status":"can_not_use_instant_voice_cloning"}}'
+    )
+    parsed = parse_elevenlabs_error(prod)
+    assert parsed["code"] == "paid_plan_required"
+    assert parsed["status"] == "can_not_use_instant_voice_cloning"
+    assert clone_fail_user_message(400, prod) == CLONE_PLAN_MSG
+    assert "Starter" in clone_fail_user_message(400, prod)
+    short = '{"detail":{"message":"Audio is too short for cloning"}}'
+    from wave2 import CLONE_SHORT_MSG
+
+    assert clone_fail_user_message(422, short) == CLONE_SHORT_MSG
+    perm = (
+        '{"detail":{"type":"authentication_error","code":"unauthorized",'
+        '"message":"The API key you used is missing the permission voices_write",'
+        '"status":"missing_permissions"}}'
+    )
+    from wave2 import CLONE_KEY_PERM_MSG
+
+    assert clone_fail_user_message(401, perm) == CLONE_KEY_PERM_MSG
+
+
+def test_runway_model_router_optional() -> None:
+    import inspect
+
+    import config
+    from pipeline import (
+        RATIO_TO_ASPECT,
+        _resume_or_submit,
+        _runway_submit,
+        runway_clip,
+        runway_router_video_payload,
+    )
+
+    assert RATIO_TO_ASPECT["720:1280"] == "9:16"
+    assert RATIO_TO_ASPECT["1280:720"] == "16:9"
+    assert config.RUNWAY_USE_MODEL_ROUTER is False
+    assert config.runway_model_router_enabled() is False
+    payload = runway_router_video_payload(
+        "a quiet kitchen, no faces",
+        "720:1280",
+        10,
+        prompt_image="runway://img",
+        seed=7,
+        config_id="quality-vertical",
+    )
+    assert payload["configId"] == "quality-vertical"
+    assert "model" not in payload
+    assert payload["input"]["promptText"].startswith("a quiet kitchen")
+    assert payload["input"]["aspectRatio"] == "9:16"
+    assert payload["input"]["duration"] == 10
+    assert payload["input"]["audio"] is False
+    assert payload["input"]["referenceImages"] == [{"uri": "runway://img", "role": "first"}]
+    assert payload["input"]["seed"] == 7
+    t2v = runway_router_video_payload("fog over a city, no faces", "720:1280", 5, config_id="x")
+    assert "referenceImages" not in t2v["input"]
+    clip_src = inspect.getsource(runway_clip)
+    submit_src = inspect.getsource(_runway_submit)
+    assert "runway_model_router_enabled" in clip_src
+    assert "/v1/generate/video" in clip_src
+    assert 'path.startswith("/v1/generate/")' in submit_src
+    resume_src = inspect.getsource(_resume_or_submit)
+    assert ".runway_id" in resume_src
+    assert "_runway_poll" in resume_src
+    assert "_runway_submit" in resume_src
 
 
 def test_night_policy_defaults() -> None:
@@ -1220,6 +1299,7 @@ if __name__ == "__main__":
     test_preset_topic_goes_to_cost()
     test_watermark_ffmpeg_overlay()
     test_clone_posts_voices_add()
+    test_runway_model_router_optional()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()

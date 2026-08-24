@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +35,35 @@ CLONE_CONSENT_MSG = (
     "Я запишу образец и создам голосовой профиль через ElevenLabs Instant Voice Clone. "
     "Профиль привязан только к вашему Telegram-аккаунту. "
     "Удалить его можно кнопкой «Удалить мой голос».\n\n"
+    "Пришлите чистую речь без музыки, лучше 1–2 минуты (минимум около 30 секунд).\n\n"
     "Нажимая «Разрешаю клонировать голос», вы подтверждаете, что это ваш голос "
     "(или есть согласие человека) и даёте разрешение на обработку голосовых данных.\n\n"
     "Это согласие отдельно от согласия на фото."
+)
+
+CLONE_PLAN_MSG = (
+    "На тарифе ElevenLabs нет Instant Voice Clone. "
+    "Нужен платный план с IVC (обычно Starter и выше) в кабинете elevenlabs.io → Subscription. "
+    "Ключ ELEVENLABS_API_KEY тот же; после апгрейда подождите пару минут и пришлите голосовое ещё раз."
+)
+CLONE_KEY_PERM_MSG = (
+    "Ключ ELEVENLABS_API_KEY без права создавать голоса. "
+    "В кабинете ElevenLabs откройте API Key и включите Voices / Instant Voice Cloning."
+)
+CLONE_KEY_BAD_MSG = (
+    "ElevenLabs не принял ключ ELEVENLABS_API_KEY (невалидный или отозван). Проверьте ключ в .env."
+)
+CLONE_SHORT_MSG = (
+    "Аудио слишком короткое для клона. Нужна чистая речь примерно 1–2 минуты "
+    "(минимум около 30 секунд), без музыки на фоне."
+)
+CLONE_FORMAT_MSG = (
+    "ElevenLabs не прочитал аудиофайл. Пришлите голосовое ещё раз или mp3/wav без музыки."
+)
+CLONE_RATE_MSG = "ElevenLabs просит подождать (лимит запросов). Повторите клон через минуту."
+CLONE_LIMIT_MSG = (
+    "На аккаунте ElevenLabs закончился лимит слотов голоса. "
+    "Удалите старый клон в боте или в кабинете, либо расширьте план."
 )
 
 ELEVEN_DESIGN_URL = "https://api.elevenlabs.io/v1/text-to-voice/design"
@@ -43,6 +71,129 @@ ELEVEN_CREATE_VOICE_URL = "https://api.elevenlabs.io/v1/text-to-voice"
 ELEVEN_IVC_URL = "https://api.elevenlabs.io/v1/voices/add"
 ELEVEN_STS_URL = "https://api.elevenlabs.io/v1/speech-to-speech/{voice_id}"
 ELEVEN_DELETE_VOICE_URL = "https://api.elevenlabs.io/v1/voices/{voice_id}"
+
+
+def parse_elevenlabs_error(raw: str) -> dict[str, str]:
+    """Достать code/status/message из JSON ElevenLabs. Ключи и токены не возвращаем."""
+    out = {"code": "", "status": "", "type": "", "message": ""}
+    try:
+        data = json.loads(raw or "")
+    except json.JSONDecodeError:
+        return out
+    detail = data.get("detail") if isinstance(data, dict) else None
+    if isinstance(detail, dict):
+        out["code"] = str(detail.get("code") or "")
+        out["status"] = str(detail.get("status") or "")
+        out["type"] = str(detail.get("type") or "")
+        out["message"] = str(detail.get("message") or "")[:300]
+        return out
+    if isinstance(detail, str):
+        out["message"] = detail[:300]
+        return out
+    if isinstance(data, dict):
+        out["message"] = str(data.get("message") or data.get("error") or "")[:300]
+    return out
+
+
+def clone_fail_user_message(http_status: int, raw: str) -> str:
+    """Понятный текст в чат по коду ElevenLabs. Тариф не чиним кодом — только объясняем."""
+    parsed = parse_elevenlabs_error(raw)
+    blob = " ".join(
+        [
+            parsed["code"],
+            parsed["status"],
+            parsed["type"],
+            parsed["message"],
+            raw or "",
+        ]
+    ).lower()
+    if (
+        "can_not_use_instant_voice_cloning" in blob
+        or "paid_plan_required" in blob
+        or "does not include instant voice cloning" in blob
+    ):
+        return CLONE_PLAN_MSG
+    if "missing_permissions" in blob or "missing the permission" in blob:
+        return CLONE_KEY_PERM_MSG
+    if http_status in (401, 403) and (
+        "unauthorized" in blob or "invalid" in blob or "api key" in blob
+    ):
+        return CLONE_KEY_BAD_MSG
+    if http_status == 429 or "rate_limit" in blob or "too_many_requests" in blob:
+        return CLONE_RATE_MSG
+    if "voice_limit" in blob or "voice slots" in blob or "max_voices" in blob:
+        return CLONE_LIMIT_MSG
+    if any(
+        token in blob
+        for token in (
+            "too short",
+            "audio_too_short",
+            "minimum duration",
+            "at least 1 minute",
+            "at least 30",
+        )
+    ):
+        return CLONE_SHORT_MSG
+    if any(
+        token in blob
+        for token in (
+            "invalid_audio",
+            "could not decode",
+            "unsupported format",
+            "invalid file",
+            "failed to read",
+            "corrupt",
+        )
+    ):
+        return CLONE_FORMAT_MSG
+    if http_status in (401, 403):
+        return CLONE_KEY_BAD_MSG
+    return "Не получилось клонировать голос."
+
+
+def _clone_content_type(path: Path) -> str:
+    suf = path.suffix.lower()
+    return {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+    }.get(suf, "application/octet-stream")
+
+
+async def prepare_clone_audio(audio_path: Path) -> Path:
+    """Telegram voice — OGG/Opus; ElevenLabs IVC лучше ест wav/mp3."""
+    src = Path(audio_path)
+    if not src.is_file():
+        raise PipelineError("Не нашёл запись голоса. Пришлите голосовое ещё раз.")
+    if shutil.which("ffmpeg") is None:
+        return src
+    dest = src.with_name(src.stem + "_ivc.wav")
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-ac",
+        "1",
+        "-ar",
+        "44100",
+        "-sample_fmt",
+        "s16",
+        str(dest),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _out, err = await proc.communicate()
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size < 1000:
+        log.warning(
+            "clone ffmpeg wav failed rc=%s err=%s",
+            proc.returncode,
+            _clip(err.decode("utf-8", "replace"), 200),
+        )
+        return src
+    return dest
 
 
 def voice_design_payload(description: str) -> dict[str, Any]:
@@ -175,14 +326,15 @@ async def clone_voice(
 ) -> str:
     if not config.ELEVENLABS_API_KEY:
         raise PipelineError("Голос сейчас недоступен. Попробуй ещё раз чуть позже.")
+    upload = await prepare_clone_audio(audio_path)
     form = aiohttp.FormData()
     form.add_field("name", (name or "Клон")[:64])
     form.add_field("description", "VideoBot user clone")
     form.add_field(
         "files",
-        audio_path.read_bytes(),
-        filename=audio_path.name or "sample.ogg",
-        content_type="application/octet-stream",
+        upload.read_bytes(),
+        filename=upload.name or "sample.wav",
+        content_type=_clone_content_type(upload),
     )
     async with session.post(
         ELEVEN_IVC_URL,
@@ -192,7 +344,21 @@ async def clone_voice(
     ) as resp:
         raw = await resp.text()
         if resp.status >= 400:
-            raise PipelineError("Не получилось клонировать голос.", _clip(f"HTTP {resp.status}: {raw}", 350))
+            parsed = parse_elevenlabs_error(raw)
+            log.warning(
+                "clone_voice http=%s elevenlabs_code=%s elevenlabs_status=%s elevenlabs_type=%s msg=%s",
+                resp.status,
+                parsed["code"] or "-",
+                parsed["status"] or "-",
+                parsed["type"] or "-",
+                parsed["message"] or _clip(raw, 180),
+            )
+            err = PipelineError(
+                clone_fail_user_message(resp.status, raw),
+                _clip(f"HTTP {resp.status}: {raw}", 350),
+            )
+            err.status = resp.status
+            raise err
         data = json.loads(raw)
     voice_id = str((data or {}).get("voice_id") or "")
     if not voice_id:

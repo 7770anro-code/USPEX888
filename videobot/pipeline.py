@@ -101,6 +101,7 @@ RATIO_PRESETS = {
     "16:9": "1280:720",
     "1:1": "960:960",
 }
+RATIO_TO_ASPECT = {value: key for key, value in RATIO_PRESETS.items()}
 
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
 CANCEL_ON_TIMEOUT = True
@@ -1021,6 +1022,12 @@ async def _runway_submit(
                     mapped = runway_fail_error(failure_code, detail, used_image=used_image)
                     if is_runway_user_facing(mapped):
                         err = mapped
+                    elif resp.status == 404 and path.startswith("/v1/generate/"):
+                        err = PipelineError(
+                            "Model Router: нет такого конфига RUNWAY_ROUTER_CONFIG_ID. "
+                            "Проверьте slug на dev.runwayml.com/model-routers или выключите флаг.",
+                            detail,
+                        )
                     else:
                         err = PipelineError("Runway отклонил запрос на видео.", detail)
                     err.status = resp.status
@@ -1029,7 +1036,15 @@ async def _runway_submit(
                 task_id = data.get("id")
                 if not task_id:
                     raise PipelineError("Runway не вернул id задачи.", _clip(raw, 240))
-                log.info("Runway submitted %s id=%s cost=%s", path, task_id, data.get("estimatedCost"))
+                routing = data.get("routing") if isinstance(data.get("routing"), dict) else {}
+                log.info(
+                    "Runway submitted %s id=%s cost=%s router_model=%s router_provider=%s",
+                    path,
+                    task_id,
+                    data.get("estimatedCost"),
+                    routing.get("model") or "-",
+                    routing.get("provider") or "-",
+                )
                 return str(task_id)
         except PipelineError:
             raise
@@ -1055,21 +1070,23 @@ async def _resume_or_submit(
         tid = side.read_text(encoding="utf-8").strip()
         if tid:
             log.info("Runway resume poll task_id=%s file=%s", tid, dest.name)
-            _remember_runway_task(tid, path)
+            _remember_runway_task(tid, path, used_image=used_image)
             return await _runway_poll(session, tid, used_image=used_image)
     tid = await _runway_submit(session, path, payload, used_image=used_image)
     try:
         side.write_text(tid, encoding="utf-8")
     except OSError:
         log.warning("не записал Runway task id рядом с %s", dest.name)
-    _remember_runway_task(tid, path)
+    _remember_runway_task(tid, path, used_image=used_image)
     return await _runway_poll(session, tid, used_image=used_image)
 
 
-def _remember_runway_task(task_id: str, path: str) -> None:
+def _remember_runway_task(task_id: str, path: str, *, used_image: bool = False) -> None:
     kind = "image_to_video"
     if "text_to_image" in path:
         kind = "text_to_image"
+    elif "generate/video" in path:
+        kind = "image_to_video" if used_image else "text_to_video"
     elif "text_to_video" in path:
         kind = "text_to_video"
     try:
@@ -1176,6 +1193,36 @@ def _clip_payload_base(model: str, visual: str, ratio: str, seconds: int, seed: 
     return payload
 
 
+def runway_router_video_payload(
+    visual: str,
+    ratio: str,
+    seconds: int,
+    *,
+    prompt_image: str | None = None,
+    seed: int | None = None,
+    config_id: str | None = None,
+) -> dict[str, Any]:
+    """POST /v1/generate/video: configId + model-agnostic input, без поля model.
+
+    Асинхронно: ответ 200 содержит task id — тот же GET /v1/tasks/{id}, что и прямой вызов.
+    audio=false: TTS клеим сами, нативный звук модели не нужен.
+    """
+    slug = (config_id or config.RUNWAY_ROUTER_CONFIG_ID or "").strip()
+    aspect = RATIO_TO_ASPECT.get(ratio) or "9:16"
+    inp: dict[str, Any] = {
+        "promptText": visual,
+        "aspectRatio": aspect,
+        "duration": int(seconds),
+        "audio": False,
+        "contentModeration": runway_content_moderation(),
+    }
+    if prompt_image:
+        inp["referenceImages"] = [{"uri": prompt_image, "role": "first"}]
+    if seed is not None:
+        inp["seed"] = int(seed) & 0xFFFFFFFF
+    return {"configId": slug, "input": inp}
+
+
 async def runway_clip(
     session: aiohttp.ClientSession,
     prompt: str,
@@ -1196,6 +1243,26 @@ async def runway_clip(
     ratio = ratio or "720:1280"
     if ratio not in RATIO_PRESETS.values():
         ratio = "720:1280"
+    if config.RUNWAY_USE_MODEL_ROUTER and not config.RUNWAY_ROUTER_CONFIG_ID:
+        log.warning(
+            "RUNWAY_USE_MODEL_ROUTER=1, но RUNWAY_ROUTER_CONFIG_ID пуст — прямой вызов модели"
+        )
+    if config.runway_model_router_enabled():
+        payload = runway_router_video_payload(
+            visual,
+            ratio,
+            seconds,
+            prompt_image=prompt_image,
+            seed=seed,
+        )
+        video_url = await _resume_or_submit(
+            session,
+            "/v1/generate/video",
+            payload,
+            dest,
+            used_image=bool(prompt_image),
+        )
+        return await _download(session, video_url, dest)
     model = config.RUNWAY_MODEL or "gen4.5"
     if quality == "fast":
         model = "gen4_turbo"
