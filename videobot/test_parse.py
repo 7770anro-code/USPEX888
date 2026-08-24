@@ -360,6 +360,8 @@ def test_night_script_quality_and_hook() -> None:
     from night_ideas import IDEA_SYSTEM, parse_ideas
     from night_store import create_job, get_job, insert_idea
     from pipeline import (
+        SCENE_NARRATION_MAX_WORDS,
+        SCENE_NARRATION_MIN_WORDS,
         SCRIPT_SYSTEM_PHOTO,
         SCRIPT_SYSTEM_SYNTH,
         grok_script,
@@ -367,8 +369,12 @@ def test_night_script_quality_and_hook() -> None:
         scene_has_cta,
         script_quality_issues,
         script_system_for,
+        visual_fallback_prompt,
+        visual_is_soft_only,
     )
 
+    assert SCENE_NARRATION_MIN_WORDS == 18
+    assert SCENE_NARRATION_MAX_WORDS == 28
     assert "Soft only" in SCRIPT_SYSTEM_PHOTO
     assert "No spin, dramatic, extreme close-up, energetic." in SCRIPT_SYSTEM_PHOTO
     assert "Soft only" not in SCRIPT_SYSTEM_SYNTH
@@ -383,6 +389,9 @@ def test_night_script_quality_and_hook() -> None:
     assert "xai_creative_models" in src
     assert "script_quality_issues" in src
     assert "photo_lock" in src
+    assert "temperature=temp" in src
+    assert "0.7" in src
+    assert "SCENE_NARRATION_MAX_WORDS" in src
     from night_ideas import _grok_raw
 
     assert "xai_creative_models" in inspect.getsource(_grok_raw)
@@ -428,7 +437,7 @@ def test_night_script_quality_and_hook() -> None:
         "повтори тот же таймер — одна ступень, не марафон. Подпишись, если шагаешь с нами."
     )
     for blob in (long1, long2, long3, long4):
-        assert 18 <= len(blob.split()) <= 32
+        assert 18 <= len(blob.split()) <= 28
     good = {
         "title": "Лестница Микро",
         "scenes": [
@@ -440,13 +449,43 @@ def test_night_script_quality_and_hook() -> None:
     }
     assert script_quality_issues(good, hook=hook, n_scenes=4) == ""
 
+    too_long = dict(good)
+    too_long["scenes"] = [
+        {
+            "narration": long1 + " ещё слова чтобы перевалить лимит двадцать восемь слов здесь точно",
+            "visual_prompt": "punch-in",
+        },
+        *good["scenes"][1:],
+    ]
+    long_issues = script_quality_issues(too_long, hook=hook, n_scenes=4)
+    assert "длинн" in long_issues.lower()
+
+    soft_script = {
+        "title": "Лестница Микро",
+        "scenes": [
+            {"narration": long1, "visual_prompt": "camera holds static, slow subtle push-in, minimal body movement"},
+            {"narration": long2, "visual_prompt": "punch-in"},
+            {"narration": long3, "visual_prompt": "reach"},
+            {"narration": long4, "visual_prompt": "cta"},
+        ],
+    }
+    soft_issues = script_quality_issues(soft_script, hook=hook, n_scenes=4, photo_lock=False)
+    assert "мягк" in soft_issues.lower() or "punch-in" in soft_issues
+    assert script_quality_issues(soft_script, hook=hook, n_scenes=4, photo_lock=True) == ""
+    assert visual_is_soft_only("camera holds static, slow subtle push-in")
+    assert not visual_is_soft_only("decisive punch-in then handheld drive")
+    assert visual_fallback_prompt(photo_lock=True) == "slow subtle push-in, minimal body movement"
+    assert "punch-in" in visual_fallback_prompt(photo_lock=False)
+
     from night_video import render_idea
 
     nv = inspect.getsource(render_idea)
     assert 'camera_prompt("punch"' in nv
     assert 'motion_prompt("drive")' in nv
     assert "hook=hook" in nv
-    assert "цепляющая фраза" in IDEA_SYSTEM or "0:00" in IDEA_SYSTEM
+    assert "цепляющая" in IDEA_SYSTEM or "0:00" in IDEA_SYSTEM
+    assert "8–14" in IDEA_SYSTEM
+    assert "Не прыгай выше головы" in IDEA_SYSTEM
 
     parsed = parse_ideas(
         '{"ideas":[{"kind":"motivational","title":"Лестница Микро",'

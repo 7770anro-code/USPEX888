@@ -93,11 +93,11 @@ SCRIPT_SYSTEM_SYNTH = f"""Ты режиссёр вертикальных TikTok-
 Правила:
 - {SCRIPT_LOCK} Консистентность персонажа важнее трюка камеры. Новое лицо/локацию не вводить.
 - Если стиль photoreal/cinematic/ad — это live-action пластина «снято камерой», не AI-smooth. Если cartoon/abstract — 3D/графика, без «shot on iPhone/ARRI».
-- Камера и действие МОГУТ быть энергичными. Запрет soft-only / static / «только push-in» здесь НЕ действует (он только для режима с реальным фото).
-- Сцен от 4 до 6. Каждая narration СТРОГО 18–28 слов. Короче 18 — брак, перепиши.
-- Каждая сцена: конкретная ситуация, конфликт или прямой вопрос зрителю. Не голая метафора («лестница = прогресс») без действия.
+- Камера и действие ОБЯЗАНЫ быть энергичными: punch-in, whip pan, crash zoom, handheld drive. «holds static / slow subtle push-in / minimal body movement» — брак (это только для режима с реальным фото).
+- Сцен от 4 до 6. Каждая narration СТРОГО 18–28 слов. Короче 18 или длиннее 28 — брак, перепиши.
+- Каждая сцена: конкретная ситуация, конфликт или прямой вопрос зрителю. Не голая метафора («лестница = прогресс») без действия. Не корпоративный шаблон («ты достоин», «просто начни») без предмета и времени.
 - Призыв к действию не только в последней сцене: минимум ещё в одной ранней (1–3).
-- Если в брифе есть ХУК — narration сцены 1 буквально начинается с этой фразы или её прямым усилением. Первая секунда = цепляющая фраза, не нейтральное описание кадра.
+- Если в брифе есть ХУК — narration сцены 1 буквально начинается с этой фразы (те же первые слова), не с нейтрального описания кадра.
 - Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
 - Без текста на экране, логотипов, знаменитостей, NSFW, watermark.
 """
@@ -325,8 +325,20 @@ MAX_SCENES = 6
 SPEECH_WORDS_PER_SEC = 2.2
 SPEECH_CHARS_PER_SEC = 13.0
 SCENE_NARRATION_MIN_WORDS = 18
-SCENE_NARRATION_MAX_WORDS = 32
+SCENE_NARRATION_MAX_WORDS = 28
 SCRIPT_QUALITY_RETRIES = 2
+VISUAL_FALLBACK_PHOTO = "slow subtle push-in, minimal body movement"
+VISUAL_FALLBACK_SYNTH = (
+    "decisive punch-in, motivated handheld pan, subject steps toward camera"
+)
+_SOFT_CAM_RE = re.compile(
+    r"holds static|slow subtle|minimal body|soft only|subtle head turn|gentle pan|camera holds",
+    re.I,
+)
+_ENERGY_CAM_RE = re.compile(
+    r"punch|whip|crash zoom|handheld|decisive|drive|snap|orbit|reach|steps toward",
+    re.I,
+)
 TOPIC_EXPAND_MAX_WORDS = 16
 SCRIPT_TOO_LONG_MSG = (
     "Текст слишком длинный: озвучка не влезет в 6 клипов по 10 секунд "
@@ -396,7 +408,27 @@ def scene_has_cta(text: str) -> bool:
     return bool(_CTA_RE.search(text or ""))
 
 
-def script_quality_issues(script: dict[str, Any], *, hook: str = "", n_scenes: int = 4) -> str:
+def visual_fallback_prompt(*, photo_lock: bool) -> str:
+    return VISUAL_FALLBACK_PHOTO if photo_lock else VISUAL_FALLBACK_SYNTH
+
+
+def visual_is_soft_only(text: str) -> bool:
+    """True, если Grok выдал только мягкую камеру без энергичного хода."""
+    blob = (text or "").strip()
+    if not blob:
+        return False
+    if _ENERGY_CAM_RE.search(blob):
+        return False
+    return bool(_SOFT_CAM_RE.search(blob))
+
+
+def script_quality_issues(
+    script: dict[str, Any],
+    *,
+    hook: str = "",
+    n_scenes: int = 4,
+    photo_lock: bool = False,
+) -> str:
     """Пусто = ок. Иначе текст для переспроса Grok. Кастомный user_script сюда не пускаем."""
     scenes = list(script.get("scenes") or [])
     issues: list[str] = []
@@ -404,15 +436,26 @@ def script_quality_issues(script: dict[str, Any], *, hook: str = "", n_scenes: i
     if len(scenes) < need:
         issues.append(f"Мало сцен: {len(scenes)}, нужно минимум {need}.")
     short: list[str] = []
+    long: list[str] = []
+    soft: list[str] = []
     for i, scene in enumerate(scenes, 1):
         nar = str(scene.get("narration") or "")
         n = count_narration_words(nar)
         if n < SCENE_NARRATION_MIN_WORDS:
             short.append(f"сцена {i}: {n} слов")
+        elif n > SCENE_NARRATION_MAX_WORDS:
+            long.append(f"сцена {i}: {n} слов")
+        if not photo_lock and visual_is_soft_only(str(scene.get("visual_prompt") or "")):
+            soft.append(f"сцена {i}")
     if short:
         issues.append(
             "Narration слишком короткая (минимум "
             f"{SCENE_NARRATION_MIN_WORDS} слов в КАЖДОЙ сцене): " + "; ".join(short)
+        )
+    if long:
+        issues.append(
+            "Narration слишком длинная (максимум "
+            f"{SCENE_NARRATION_MAX_WORDS} слов в КАЖДОЙ сцене): " + "; ".join(long)
         )
     if hook and scenes:
         first = str(scenes[0].get("narration") or "")
@@ -428,6 +471,12 @@ def script_quality_issues(script: dict[str, Any], *, hook: str = "", n_scenes: i
                 "Призыв к действию не только в финале: минимум ещё в одной из сцен 1–3 "
                 "(глагол зрителю: поставь таймер, попробуй, начни, не листай, спроси себя…)."
             )
+    if soft:
+        issues.append(
+            "Синтетика: visual_prompt слишком мягкий (static / slow subtle / minimal body). "
+            "Нужен энергичный ход: punch-in, whip pan, crash zoom, handheld drive. "
+            + ", ".join(soft)
+        )
     return " ".join(issues)
 
 
@@ -457,10 +506,15 @@ def split_text_to_speech_budget(text: str, budget_sec: float) -> list[str]:
     return chunks
 
 
-def enforce_speech_budget(script: dict[str, Any], *, user_script: bool) -> dict[str, Any]:
+def enforce_speech_budget(
+    script: dict[str, Any],
+    *,
+    user_script: bool,
+    photo_lock: bool = False,
+) -> dict[str, Any]:
     """Режет длинные сцены на доп. клипы; в кастомном режиме не молча обрезает речь."""
     budget = max_speech_sec_for_clip(10)
-    visual_fallback = "slow subtle push-in, minimal body movement"
+    visual_fallback = visual_fallback_prompt(photo_lock=photo_lock or user_script)
     out: list[dict[str, str]] = []
     for scene in script.get("scenes") or []:
         nar = str(scene.get("narration") or "").strip()
@@ -695,6 +749,8 @@ async def _grok_once(
     session: aiohttp.ClientSession,
     messages: list[dict[str, str]],
     model: str,
+    *,
+    temperature: float = 0.55,
 ) -> tuple[str, str]:
     """Один проход chat, затем responses. Возвращает (текст, ошибка)."""
     headers = {
@@ -703,7 +759,7 @@ async def _grok_once(
     }
     tries = max(1, int(config.HTTP_RETRIES))
     last_err = ""
-    payload = {"model": model, "messages": messages, "temperature": 0.55}
+    payload = {"model": model, "messages": messages, "temperature": float(temperature)}
     for attempt in range(tries):
         try:
             async with session.post(
@@ -799,6 +855,11 @@ async def grok_script(
         "Каждая сцена — конкретная ситуация, конфликт или прямой вопрос зрителю, не голая метафора. "
         "Призыв к действию не только в последней сцене: минимум ещё в одной из сцен 1–3."
     )
+    if not photo_lock:
+        quality_rules += (
+            " Камера энергичная: punch-in / whip pan / crash zoom / handheld drive. "
+            "Запрещены holds static, slow subtle push-in, minimal body movement."
+        )
     hook_block = ""
     if hook and not user_script:
         hook_block = (
@@ -833,6 +894,7 @@ async def grok_script(
     system = script_system or script_system_for(photo_lock=photo_lock)
     last_err = ""
     quality_retries = 0 if user_script else SCRIPT_QUALITY_RETRIES
+    temp = 0.55 if user_script or photo_lock else 0.7
     for model in config.xai_creative_models():
         if not model:
             continue
@@ -842,7 +904,9 @@ async def grok_script(
                 {"role": "system", "content": system},
                 {"role": "user", "content": build_user(quality_note)},
             ]
-            content, last_err = await _grok_once(session, messages, model)
+            content, last_err = await _grok_once(
+                session, messages, model, temperature=temp
+            )
             if not content.strip():
                 break
             try:
@@ -855,7 +919,9 @@ async def grok_script(
                 log.warning("script parse attempt %s/%s model=%s: %s", q_attempt + 1, 1 + quality_retries, model, exc)
                 continue
             if not user_script:
-                issues = script_quality_issues(script, hook=hook, n_scenes=n_scenes)
+                issues = script_quality_issues(
+                    script, hook=hook, n_scenes=n_scenes, photo_lock=photo_lock
+                )
                 if issues:
                     quality_note = issues
                     last_err = issues
@@ -2063,7 +2129,9 @@ async def build_video(
                 hook=hook,
                 script_system=script_system,
             )
-            script = enforce_speech_budget(script, user_script=user_script)
+            script = enforce_speech_budget(
+                script, user_script=user_script, photo_lock=photo_lock
+            )
             if packed:
                 if packed.get("title"):
                     script["title"] = packed["title"]
