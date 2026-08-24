@@ -132,6 +132,9 @@ def ensure() -> None:
         _retire_legacy_table(conn, "night_jobs", _JOBS_REQUIRED)
         _retire_legacy_table(conn, "night_runs", _RUNS_REQUIRED)
         conn.executescript(_SCHEMA)
+        from serial_store import ensure as ensure_serial
+
+        ensure_serial(conn)
         for col, spec in (
             ("tiktok_publish_id", "TEXT NOT NULL DEFAULT ''"),
             ("ig_container_id", "TEXT NOT NULL DEFAULT ''"),
@@ -265,7 +268,13 @@ def runway_credits_today(run_date: str) -> int:
 
 def remaining_daily_slots(run_date: str, *, daily_limit: int | None = None) -> int:
     limit = int(daily_limit if daily_limit is not None else config.VIDEOS_PER_NIGHT)
-    return max(0, limit - ready_video_count(run_date))
+    used = sum(
+        1
+        for job in jobs_for_date(run_date)
+        if Path(str(job.get("video_path") or "")).is_file()
+        and str(job.get("kind") or "") != "serial"
+    )
+    return max(0, limit - used)
 
 
 def jobs_for_date(run_date: str) -> list[dict[str, Any]]:

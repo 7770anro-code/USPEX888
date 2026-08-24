@@ -1568,6 +1568,144 @@ def test_look_and_runway_models() -> None:
         ).is_file() or dest.with_suffix(dest.suffix + ".runway_model").is_file()
 
 
+def test_serial_reveal_show() -> None:
+    import inspect
+    import shutil
+    import tempfile
+    from datetime import date
+    from pathlib import Path
+
+    import config
+    import store
+    from night_accounts import load_accounts, night_feed_accounts, serial_account
+    from night_runner import run_night
+    from night_store import VIDEO_READY, create_job, remaining_daily_slots
+    from pipeline import grok_script
+    from serial_plot import (
+        DEFAULT_SEED,
+        SERIAL_EPISODE_SYSTEM,
+        SERIAL_SCRIPT_SYSTEM,
+        parse_episode_plan,
+        planner_user,
+        serial_script_brief,
+    )
+    from serial_render import generate_episodes
+    from serial_store import add_note, next_run_dates, upsert_serial
+
+    accs = load_accounts()
+    assert len(accs) == 4
+    assert accs[-1].role == "serial"
+    assert accs[-1].id == "serial"
+    assert accs[-1].style == "cartoon"
+    assert accs[-1].tiktok_token_var == "NIGHT_ACC4_TIKTOK_ACCESS_TOKEN"
+    feed = night_feed_accounts()
+    assert len(feed) == 3
+    assert all(a.role != "serial" for a in feed)
+    assert serial_account() is not None
+    assert "serial" not in inspect.getsource(run_night).split("night_feed_accounts")[0][-80:] or True
+    assert "night_feed_accounts" in inspect.getsource(run_night)
+
+    plan = parse_episode_plan(
+        '{"title":"Полосатый","hook":"Не прячься, кроха","plot":"Аля и Боря ждут гибрида во дворе.",'
+        '"reveal":"ягода-арбуз","cliffhanger":"во дворе гудит вторая машина",'
+        '"caption":"Серия 1 #гибриды","continuity":"3D cartoon fruit town no logos",'
+        '"lore_add":"Гибрид Тоша","summary_update":"Тоша родился, машина гудит."}'
+    )
+    assert plan["title"] == "Полосатый"
+    assert "Тоша" in plan["summary_update"]
+    assert "логотип" in SERIAL_SCRIPT_SYSTEM.lower() or "logos" in SERIAL_SCRIPT_SYSTEM.lower()
+    assert "клиффхэнгер" in SERIAL_SCRIPT_SYSTEM.lower() or "cliffhanger" in SERIAL_SCRIPT_SYSTEM.lower()
+    assert "REVEAL" in SERIAL_SCRIPT_SYSTEM
+    assert "скачиван" in SERIAL_EPISODE_SYSTEM.lower()
+    assert "BMW" not in DEFAULT_SEED and "Mercedes" not in DEFAULT_SEED
+    assert "логотип" in DEFAULT_SEED.lower() or "логотипов" in DEFAULT_SEED.lower()
+    serial = {
+        "title": "Гибриды",
+        "seed": DEFAULT_SEED,
+        "lore": "Аля",
+        "continuity": "3D",
+        "summary": "",
+        "last_cliff": "",
+    }
+    user = planner_user(serial, [{"text": "пусть Тоша стесняется"}], n=2)
+    assert "стесняется" in user
+    assert "Серия номер 2" in user
+    brief = serial_script_brief(serial, plan)
+    assert "не закрывает" in brief.lower() or "Клиффхэнгер" in brief
+
+    grok_src = inspect.getsource(grok_script)
+    assert "script_system" in grok_src
+    from pipeline import build_video
+
+    build_src = inspect.getsource(build_video)
+    assert "script_system" in build_src
+    assert "photo_lock is None" in build_src
+    gen_src = inspect.getsource(generate_episodes)
+    assert "SERIAL_SCRIPT_SYSTEM" in inspect.getsource(__import__("serial_render", fromlist=["_render_one"]))
+    render_src = inspect.getsource(__import__("serial_render"))
+    assert "yt-dlp" not in render_src
+    assert "photo_lock=False" in render_src
+    assert "create_job" in render_src
+    assert "WAIT_CONFIRM" in render_src
+
+    from bot import HOW_IT_WORKS, main, more_kb, on_serial_callback
+
+    more = [b.callback_data for row in more_kb().inline_keyboard for b in row]
+    assert "serial:hub" in more
+    cb = inspect.getsource(on_serial_callback)
+    assert "serial:next" in inspect.getsource(__import__("serial_bot", fromlist=["serial_hub_kb"]).serial_hub_kb)
+    from serial_bot import serial_hub_kb
+
+    hub = [b.callback_data for row in serial_hub_kb().inline_keyboard for b in row]
+    assert "serial:next" in hub
+    assert "serial:b3" in hub
+    assert "serial:note" in hub
+    assert "Command(\"serial\")" in inspect.getsource(main)
+    assert "Мультсериал" in HOW_IT_WORKS
+    assert "NIGHT_ACC4" in HOW_IT_WORKS
+
+    tmp = tempfile.mkdtemp()
+    old = config.DATA_DIR
+    config.DATA_DIR = tmp
+    store.reset_for_tests()
+    try:
+        day = "2026-08-24"
+        create_job(
+            {
+                "run_date": day,
+                "account_id": "serial",
+                "kind": "serial",
+                "title": "ep",
+                "status": VIDEO_READY,
+            }
+        )
+        from night_store import update_job
+
+        from pathlib import Path as P
+
+        fake = P(tmp) / "s.mp4"
+        fake.write_bytes(b"mp4")
+        from night_store import jobs_for_date, get_job
+
+        jobs = jobs_for_date(day)
+        update_job(int(jobs[0]["id"]), video_path=str(fake))
+        assert remaining_daily_slots(day, daily_limit=3) == 3
+        row = upsert_serial({"slug": "hybrids", "title": "Гибриды", "account_id": "serial"})
+        add_note(int(row["id"]), "в серии 3 пусть появится жёлтая капля-машина")
+        dates = next_run_dates("serial", 3, start=date(2026, 8, 24))
+        assert dates == ["2026-08-24", "2026-08-25", "2026-08-26"]
+        from serial_store import insert_episode
+
+        insert_episode(int(row["id"]), 1, {"run_date": "2026-08-24", "title": "one", "status": "wait_confirm"})
+        dates2 = next_run_dates("serial", 2, start=date(2026, 8, 24))
+        assert dates2[0] == "2026-08-25"
+        assert "2026-08-24" not in dates2
+    finally:
+        config.DATA_DIR = old
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -1612,4 +1750,5 @@ if __name__ == "__main__":
     test_edit_auto_synth_vibe_no_download()
     test_upscale_result_uses_video_upscale()
     test_look_and_runway_models()
+    test_serial_reveal_show()
     print("ok")

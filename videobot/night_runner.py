@@ -19,7 +19,7 @@ import aiohttp
 
 import config
 from joblock import JobLock
-from night_accounts import accounts_round_robin, load_accounts
+from night_accounts import accounts_round_robin, load_accounts, night_feed_accounts
 from night_circuit import CircuitOpen, jitter_pause
 from night_ideas import assign_to_accounts, generate_ideas
 from night_post import persist_publish_results, publish_account
@@ -248,6 +248,7 @@ async def run_night(
             if job.get("status") == VIDEO_READY and Path(str(job.get("video_path") or "")).is_file():
                 update_job(int(job["id"]), status=WAIT_CONFIRM)
     accounts = load_accounts()
+    feed_accounts = night_feed_accounts()
     daily_limit = 1 if smoke else int(config.VIDEOS_PER_NIGHT)
     remaining = remaining_daily_slots(day, daily_limit=daily_limit)
     batch = 1 if smoke else min(int(config.NIGHT_BATCH_PER_TICK), remaining)
@@ -307,7 +308,7 @@ async def run_night(
             for idea in ideas:
                 insert_idea(idea, day)
             save_run(run_id, day, IDEAS_READY, f"ideas_ready {len(ideas)}")
-            shoot = accounts_round_robin(accounts, jobs_for_date(day), batch)
+            shoot = accounts_round_robin(feed_accounts, jobs_for_date(day), batch)
             assigned = assign_to_accounts(
                 ideas, shoot, limit=batch, existing_jobs=jobs_for_date(day)
             )

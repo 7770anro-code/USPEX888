@@ -249,13 +249,19 @@ async def expand_topic_to_idea(
     )
 
 
-async def _grok_raw(session: aiohttp.ClientSession, user_content: str) -> str:
+async def _grok_raw(
+    session: aiohttp.ClientSession,
+    user_content: str,
+    *,
+    system: str | None = None,
+    temperature: float = 0.8,
+) -> str:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
     if not config.XAI_API_KEY_NEW:
         raise PipelineError("Нет XAI_API_KEY_NEW — идеи собрать не могу.")
     messages = [
-        {"role": "system", "content": IDEA_SYSTEM},
+        {"role": "system", "content": system or IDEA_SYSTEM},
         {"role": "user", "content": user_content},
     ]
     headers = {
@@ -267,7 +273,7 @@ async def _grok_raw(session: aiohttp.ClientSession, user_content: str) -> str:
     for model in config.xai_creative_models():
         if not model:
             continue
-        payload = {"model": model, "messages": messages, "temperature": 0.8}
+        payload = {"model": model, "messages": messages, "temperature": float(temperature)}
         for attempt in range(tries):
             try:
                 async with session.post(

@@ -163,7 +163,8 @@ HOW_IT_WORKS = (
     "(«Улучшить качество») и только кнопкой «Готово, это финал» зафиксировать.\n"
     "7) «Нарезка и монтаж»: вручную — ffmpeg без кредитов; авто по своему видео — план Grok + ffmpeg, Runway нет; "
     "авто «описать вайб» — оригинальная синтетика тем же пайплайном, что ночь "
-    "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway), чужие ролики не скачиваю.\n\n"
+    "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway), чужие ролики не скачиваю.\n"
+    "8) Мультсериал «Гибриды» (владелец): reveal-формат, серии продолжают сюжет, слот NIGHT_ACC4, пост да/нет в /night.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -198,6 +199,7 @@ class Flow(StatesGroup):
     edit_auto_video = State()
     edit_auto_brief = State()
     edit_auto_vibe = State()
+    serial_note = State()
     revise_notes = State()
 
 
@@ -235,6 +237,7 @@ def more_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎤 Переозвучить запись", callback_data="more:sts")],
             [InlineKeyboardButton(text="✨ Увеличить качество любого файла", callback_data="more:upscale")],
             [InlineKeyboardButton(text="▶️ Продолжить ролик", callback_data="more:extend")],
+            [InlineKeyboardButton(text="📺 Мультсериал", callback_data="serial:hub")],
             [InlineKeyboardButton(text="🗑 Удалить все свои голоса", callback_data="more:forget")],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
         ]
@@ -1174,8 +1177,80 @@ async def cmd_night_mode(message: Message, state: FSMContext) -> None:
         mode_text()
         + "\n\n/night — отчёт и кнопки да/нет\n"
         + "/night_mode confirm — только с подтверждением (default)\n"
-        + "/night_mode auto — без подтверждения (позже, после App Review)",
+        + "/night_mode auto — без подтверждения (позже, после App Review)\n"
+        + "/serial — мультсериал (следующая серия / пакет / правка)",
         reply_markup=main_menu(),
+    )
+
+
+async def cmd_serial(message: Message, state: FSMContext) -> None:
+    if not _is_night_owner(message.chat.id):
+        await message.answer("Мультсериал только для владельца автоконтура.")
+        return
+    await state.clear()
+    from serial_bot import start_serial_hub
+
+    await start_serial_hub(message)
+
+
+async def on_serial_callback(query: CallbackQuery, state: FSMContext) -> None:
+    chat_id = query.message.chat.id if query.message else 0
+    if not _is_night_owner(chat_id):
+        await query.answer("Только владелец.")
+        return
+    data = (query.data or "serial:")[7:]
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    from serial_bot import hub_intro, run_serial_batch, serial_hub_kb, start_serial_hub
+    from serial_render import status_text
+
+    if data in {"hub", "status"}:
+        await start_serial_hub(msg) if data == "hub" else await msg.answer(
+            status_text()[:3900], reply_markup=serial_hub_kb()
+        )
+        return
+    if data == "note":
+        await state.set_state(Flow.serial_note)
+        await msg.answer(
+            "Напиши поворот сюжета свободным текстом — учту со СЛЕДУЮЩЕЙ серии "
+            "(как правки в «Улучшить качество», но для арки).\n"
+            "Пример: «в следующей серии пусть гибрид Али и Бори будет полосатый и очень стеснительный»."
+        )
+        return
+    if data == "next":
+        await run_serial_batch(msg, 1, busy=BUSY)
+        return
+    if data in {"b3", "b5", "b7"}:
+        await run_serial_batch(msg, int(data[1:]), busy=BUSY)
+        return
+    await msg.answer(hub_intro()[:3900], reply_markup=serial_hub_kb())
+
+
+async def on_serial_note(message: Message, state: FSMContext) -> None:
+    if not _is_night_owner(message.chat.id):
+        await message.answer("Мультсериал только для владельца автоконтура.")
+        return
+    text = (message.text or "").strip()
+    if len(text) < 5:
+        await message.answer("Чуть подробнее — что должно случиться дальше?")
+        return
+    from serial_bot import serial_hub_kb
+    from serial_render import apply_owner_note, status_text
+
+    try:
+        apply_owner_note(text)
+    except Exception as exc:
+        await message.answer(f"Не записал правку: {type(exc).__name__}")
+        return
+    await state.clear()
+    await message.answer(
+        "Записал. Следующая серия пойдёт с этим поворотом.\n\n" + status_text()[:3200],
+        reply_markup=serial_hub_kb(),
     )
 
 
@@ -2530,6 +2605,9 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.w2_extend_video.state:
         await on_w2_extend_video(message, state)
         return
+    if current == Flow.serial_note.state:
+        await message.answer("Напиши правку сюжета текстом.")
+        return
     if current == Flow.edit_cut_video.state:
         await on_edit_cut_video(message, state)
         return
@@ -2569,9 +2647,11 @@ async def main() -> None:
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.message.register(cmd_night, Command("night"))
     dp.message.register(cmd_night_mode, Command("night_mode"))
+    dp.message.register(cmd_serial, Command("serial"))
     dp.message.register(cmd_edit, Command("edit"))
     dp.message.register(cmd_edit, Command("cut"))
     dp.callback_query.register(on_night_callback, F.data.startswith("night:"))
+    dp.callback_query.register(on_serial_callback, F.data.startswith("serial:"))
     dp.callback_query.register(on_edit_callback, F.data.startswith("edit:"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
@@ -2605,6 +2685,7 @@ async def main() -> None:
     dp.message.register(on_edit_auto_brief, Flow.edit_auto_brief, F.text)
     dp.message.register(on_edit_auto_pick_text, Flow.edit_auto_pick, F.text)
     dp.message.register(on_edit_auto_vibe, Flow.edit_auto_vibe, F.text)
+    dp.message.register(on_serial_note, Flow.serial_note, F.text)
     dp.message.register(on_revise_notes, Flow.revise_notes, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)

@@ -785,6 +785,7 @@ async def grok_script(
     extra_brief: str = "",
     photo_lock: bool = False,
     hook: str = "",
+    script_system: str | None = None,
 ) -> dict[str, Any]:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
@@ -829,7 +830,7 @@ async def grok_script(
             )
         return body
 
-    system = script_system_for(photo_lock=photo_lock)
+    system = script_system or script_system_for(photo_lock=photo_lock)
     last_err = ""
     quality_retries = 0 if user_script else SCRIPT_QUALITY_RETRIES
     for model in config.xai_creative_models():
@@ -1985,6 +1986,8 @@ async def build_video(
     quality: str = "optimal",
     watermark: bool = False,
     hook: str = "",
+    script_system: str | None = None,
+    photo_lock: bool | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
     import live_status as live
@@ -2021,11 +2024,13 @@ async def build_video(
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await report("Пишу сценарий…", stage=live.STAGE_SCRIPT)
-        photo_lock = (
+        has_ref = (
             isinstance(reference_image, Path) and reference_image.exists()
         ) or (
             isinstance(reference_image, str) and reference_image.startswith("data:")
         )
+        if photo_lock is None:
+            photo_lock = has_ref
         packed: dict[str, Any] | None = None
         script = load_script(work_dir)
         resumed = script is not None
@@ -2038,6 +2043,7 @@ async def build_video(
                 and not photo_lock
                 and not (hook or "").strip()
                 and is_short_topic(idea)
+                and not script_system
             ):
                 from night_ideas import expand_topic_to_idea, script_brief_from_idea
 
@@ -2056,6 +2062,7 @@ async def build_video(
                 extra_brief=extra_brief,
                 photo_lock=photo_lock,
                 hook=hook,
+                script_system=script_system,
             )
             script = enforce_speech_budget(script, user_script=user_script)
             if packed:

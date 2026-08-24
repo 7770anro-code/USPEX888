@@ -19,6 +19,7 @@ _DEFAULTS = (
         "speed": "norm",
         "quality": "fast",
         "label": "мотивация",
+        "role": "night",
     },
     {
         "id": "absurd",
@@ -29,6 +30,7 @@ _DEFAULTS = (
         "speed": "fast",
         "quality": "fast",
         "label": "абсурд",
+        "role": "night",
     },
     {
         "id": "brand",
@@ -39,6 +41,18 @@ _DEFAULTS = (
         "speed": "slow",
         "quality": "fast",
         "label": "бренд/смесь",
+        "role": "night",
+    },
+    {
+        "id": "serial",
+        "theme": "absurd",
+        "voice_idx": 11,  # Джордж — рассказчик
+        "style": "cartoon",
+        "delivery": "humor",
+        "speed": "fast",
+        "quality": "fast",
+        "label": "мультсериал",
+        "role": "serial",
     },
 )
 
@@ -55,6 +69,7 @@ class Account:
     delivery: str
     speed: str
     quality: str
+    role: str
     tiktok_token_var: str
     ig_user_var: str
     ig_token_var: str
@@ -108,6 +123,9 @@ def load_accounts() -> list[Account]:
         theme = _idx(i, "THEME", base["theme"]).lower()
         if theme not in THEMES:
             theme = base["theme"]
+        role = _idx(i, "ROLE", base.get("role") or "night").lower()
+        if role not in ("night", "serial"):
+            role = str(base.get("role") or "night")
         accounts.append(
             Account(
                 index=i,
@@ -120,6 +138,7 @@ def load_accounts() -> list[Account]:
                 delivery=_idx(i, "DELIVERY", base["delivery"]),
                 speed=_idx(i, "SPEED", base["speed"]),
                 quality=_idx(i, "QUALITY", base["quality"]),
+                role=role,
                 tiktok_token_var=tt_var,
                 ig_user_var=ig_user_var,
                 ig_token_var=ig_token_var,
@@ -128,6 +147,18 @@ def load_accounts() -> list[Account]:
             )
         )
     return accounts
+
+
+def night_feed_accounts() -> list[Account]:
+    """Обычный ночной контур: без слота мультсериала."""
+    return [a for a in load_accounts() if a.role != "serial"]
+
+
+def serial_account() -> Account | None:
+    for acc in load_accounts():
+        if acc.role == "serial":
+            return acc
+    return None
 
 
 def tiktok_token(account: Account) -> str:
