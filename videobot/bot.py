@@ -52,6 +52,14 @@ from presets import (
     voice_settings_payload,
 )
 from joblock import JobLock
+from edit import (
+    MAX_CLIPS,
+    MAX_INPUT_SEC,
+    check_incoming,
+    concat_videos,
+    cut_video,
+    parse_timecodes,
+)
 from store import (
     clear_user_voices,
     delete_cloned_voice,
@@ -113,7 +121,8 @@ HOW_IT_WORKS = (
     "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
-    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n\n"
+    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n"
+    "7) «Нарезка и монтаж» — только твои файлы и ffmpeg, без Grok/Runway/кредитов.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -141,6 +150,9 @@ class Flow(StatesGroup):
     w2_act_video = State()
     w2_extend_video = State()
     w2_extend_prompt = State()
+    edit_cut_video = State()
+    edit_cut_times = State()
+    edit_concat = State()
 
 
 def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
@@ -163,6 +175,7 @@ def main_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎙 Клонировать мой голос", callback_data="menu:clone")],
             [InlineKeyboardButton(text="🗑 Удалить мой голос", callback_data="menu:unclone")],
             [InlineKeyboardButton(text="🎯 Пресеты", callback_data="menu:preset")],
+            [InlineKeyboardButton(text="✂️ Нарезка и монтаж", callback_data="menu:edit")],
             [InlineKeyboardButton(text="🧰 Ещё возможности", callback_data="menu:more")],
             [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
         ]
@@ -203,6 +216,25 @@ def clone_done_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
         ]
     )
+
+
+def edit_hub_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✂️ Нарезать кусок", callback_data="edit:cut")],
+            [InlineKeyboardButton(text="📎 Склеить несколько", callback_data="edit:concat")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def edit_concat_kb(n: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if n >= 2:
+        rows.append([InlineKeyboardButton(text=f"✅ Склеить {n} клипов", callback_data="edit:go")])
+    rows.append([InlineKeyboardButton(text="🗑 Сбросить список", callback_data="edit:reset")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def result_kb() -> InlineKeyboardMarkup:
@@ -390,7 +422,215 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
 
 async def cmd_cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Ок, отменил. Можно начать заново.", reply_markup=main_menu())
+    await message.answer(
+        "Ок, отменил. Можно начать заново.",
+        reply_markup=main_menu(),
+    )
+
+
+async def cmd_edit(message: Message, state: FSMContext) -> None:
+    await _start_edit(message, state)
+
+
+def _incoming_video(message: Message) -> dict[str, Any] | None:
+    if message.video:
+        return {
+            "file_id": message.video.file_id,
+            "size": int(message.video.file_size or 0),
+            "duration": float(message.video.duration or 0),
+            "name": "clip.mp4",
+        }
+    if message.video_note:
+        return {
+            "file_id": message.video_note.file_id,
+            "size": int(message.video_note.file_size or 0),
+            "duration": float(message.video_note.duration or 0),
+            "name": "note.mp4",
+        }
+    doc = message.document
+    if not doc:
+        return None
+    name = (doc.file_name or "clip.mp4").lower()
+    mime = (doc.mime_type or "").lower()
+    if not (mime.startswith("video/") or name.endswith((".mp4", ".mov", ".webm", ".m4v"))):
+        return None
+    return {
+        "file_id": doc.file_id,
+        "size": int(doc.file_size or 0),
+        "duration": None,
+        "name": doc.file_name or "clip.mp4",
+    }
+
+
+async def _start_edit(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "✂️ Нарезка и монтаж — только твои файлы и ffmpeg, кредиты не тратятся.\n\n"
+        "• Нарезать: одно видео, потом таймкоды, например 0:05-0:18\n"
+        "• Склеить: несколько видео подряд, затем «Склеить» — простая склейка без переходов\n\n"
+        f"Лимиты Telegram: входящий файл ≤ 20 МБ и ≤ {MAX_INPUT_SEC} сек, "
+        f"склейка до {MAX_CLIPS} клипов, готовый файл ≤ 49 МБ.",
+        reply_markup=edit_hub_kb(),
+    )
+
+
+async def on_edit_callback(query: CallbackQuery, state: FSMContext) -> None:
+    data = (query.data or "edit:")[5:]
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    if data == "cut":
+        await state.clear()
+        await state.set_state(Flow.edit_cut_video)
+        await msg.answer("Пришли одно видео. Потом напишешь начало и конец куска.")
+        return
+    if data == "concat":
+        await state.clear()
+        await state.update_data(edit_clips=[])
+        await state.set_state(Flow.edit_concat)
+        await msg.answer(
+            "Пришли видео по одному, в том порядке, в каком склеивать.\n"
+            "Когда все на месте — кнопка «Склеить».",
+            reply_markup=edit_concat_kb(0),
+        )
+        return
+    if data == "reset":
+        await state.update_data(edit_clips=[])
+        await state.set_state(Flow.edit_concat)
+        await msg.answer("Список клипов пустой. Пришли видео заново.", reply_markup=edit_concat_kb(0))
+        return
+    if data == "go":
+        await _run_concat(msg, state)
+        return
+
+
+async def on_edit_cut_video(message: Message, state: FSMContext) -> None:
+    clip = _incoming_video(message)
+    if not clip:
+        await message.answer("Нужен видеофайл (mp4/mov/webm), не фото.")
+        return
+    try:
+        check_incoming(size=clip["size"] or None, duration=clip["duration"])
+    except PipelineError as exc:
+        await message.answer(exc.user_message)
+        return
+    await state.update_data(edit_source=clip)
+    caption = (message.caption or "").strip()
+    if caption:
+        try:
+            parse_timecodes(caption)
+        except PipelineError:
+            caption = ""
+    if caption:
+        await _run_cut(message, state, caption)
+        return
+    await state.set_state(Flow.edit_cut_times)
+    await message.answer(
+        "Напиши начало и конец куска.\n"
+        "Примеры: 0:05-0:18 · 12 40 · с 1:00 по 1:12"
+    )
+
+
+async def on_edit_cut_times(message: Message, state: FSMContext) -> None:
+    await _run_cut(message, state, message.text or "")
+
+
+async def _run_cut(message: Message, state: FSMContext, times: str) -> None:
+    try:
+        start, end = parse_timecodes(times)
+    except PipelineError as exc:
+        await message.answer(exc.user_message)
+        return
+    data = await state.get_data()
+    source = data.get("edit_source")
+    if not isinstance(source, dict) or not source.get("file_id"):
+        await message.answer("Сначала пришли видео.", reply_markup=edit_hub_kb())
+        return
+    if BUSY.locked():
+        await message.answer("⏳ Сейчас занят другой задачей. Напиши таймкоды ещё раз чуть позже.")
+        return
+    await BUSY.acquire()
+    work = Path(config.WORK_DIR) / f"edit_{message.chat.id}_{int(time.time())}"
+    try:
+        src = work / "src.mp4"
+        dest = work / "cut.mp4"
+        await message.answer("Режу кусок… кредиты не списываю.")
+        await _tg_download(message.bot, str(source["file_id"]), src)
+        check_incoming(size=src.stat().st_size, duration=None)
+        await cut_video(src, dest, start, end)
+        await _send_video(message, dest, "Нарезанный кусок", filename="cut.mp4")
+        await state.clear()
+        await message.answer("Готово. Ещё нарезка или склейка?", reply_markup=edit_hub_kb())
+    except PipelineError as exc:
+        await message.answer(exc.user_message, reply_markup=edit_hub_kb())
+    except Exception:
+        log.exception("edit cut failed")
+        await message.answer("Не получилось нарезать. Другой файл или другие таймкоды.", reply_markup=edit_hub_kb())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
+
+
+async def on_edit_concat_video(message: Message, state: FSMContext) -> None:
+    clip = _incoming_video(message)
+    if not clip:
+        await message.answer("Нужен видеофайл (mp4/mov/webm).")
+        return
+    try:
+        check_incoming(size=clip["size"] or None, duration=clip["duration"])
+    except PipelineError as exc:
+        await message.answer(exc.user_message)
+        return
+    data = await state.get_data()
+    clips = list(data.get("edit_clips") or [])
+    if len(clips) >= MAX_CLIPS:
+        await message.answer(f"Уже {MAX_CLIPS} клипов — это максимум. Жми «Склеить» или сбрось список.")
+        return
+    clips.append(clip)
+    await state.update_data(edit_clips=clips)
+    extra = "Можно склеить." if len(clips) >= 2 else "Пришли ещё хотя бы один файл."
+    await message.answer(
+        f"Клип {len(clips)}/{MAX_CLIPS} в очереди. {extra}",
+        reply_markup=edit_concat_kb(len(clips)),
+    )
+
+
+async def _run_concat(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    clips = list(data.get("edit_clips") or [])
+    if len(clips) < 2:
+        await message.answer("Нужно минимум два видео.", reply_markup=edit_concat_kb(len(clips)))
+        return
+    if BUSY.locked():
+        await message.answer("⏳ Сейчас занят другой задачей. Нажми «Склеить» ещё раз чуть позже.")
+        return
+    await BUSY.acquire()
+    work = Path(config.WORK_DIR) / f"edit_{message.chat.id}_{int(time.time())}"
+    try:
+        await message.answer(f"Склеиваю {len(clips)} клипов без переходов… кредиты не списываю.")
+        paths: list[Path] = []
+        for i, clip in enumerate(clips):
+            dest = work / f"in_{i:02d}.mp4"
+            await _tg_download(message.bot, str(clip["file_id"]), dest)
+            check_incoming(size=dest.stat().st_size, duration=None)
+            paths.append(dest)
+        out = work / "montage.mp4"
+        await concat_videos(paths, out)
+        await _send_video(message, out, "Склейка", filename="montage.mp4")
+        await state.clear()
+        await message.answer("Готово. Ещё нарезка или склейка?", reply_markup=edit_hub_kb())
+    except PipelineError as exc:
+        await message.answer(exc.user_message, reply_markup=edit_concat_kb(len(clips)))
+    except Exception:
+        log.exception("edit concat failed")
+        await message.answer("Не получилось склеить. Другие файлы или меньше клипов.", reply_markup=edit_concat_kb(len(clips)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
 
 
 async def on_night_callback(query: CallbackQuery) -> None:
@@ -596,6 +836,9 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
             "Две быстрые кнопки в главном меню как были.",
             reply_markup=more_kb(),
         )
+        return
+    if data == "menu:edit":
+        await _start_edit(msg, state)
         return
 
 
@@ -1582,6 +1825,12 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.w2_extend_video.state:
         await on_w2_extend_video(message, state)
         return
+    if current == Flow.edit_cut_video.state:
+        await on_edit_cut_video(message, state)
+        return
+    if current == Flow.edit_concat.state:
+        await on_edit_concat_video(message, state)
+        return
     await message.answer("Нажми кнопку в меню или пришли текст, когда я попрошу.", reply_markup=main_menu())
 
 
@@ -1606,7 +1855,10 @@ async def main() -> None:
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.message.register(cmd_night, Command("night"))
     dp.message.register(cmd_night_mode, Command("night_mode"))
+    dp.message.register(cmd_edit, Command("edit"))
+    dp.message.register(cmd_edit, Command("cut"))
     dp.callback_query.register(on_night_callback, F.data.startswith("night:"))
+    dp.callback_query.register(on_edit_callback, F.data.startswith("edit:"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
     dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")
@@ -1633,6 +1885,7 @@ async def main() -> None:
     dp.message.register(on_custom_script, Flow.custom_script, F.text)
     dp.message.register(on_w2_design_text, Flow.w2_design_text, F.text)
     dp.message.register(on_w2_extend_prompt, Flow.w2_extend_prompt, F.text)
+    dp.message.register(on_edit_cut_times, Flow.edit_cut_times, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_act_photo, Flow.act_photo, F.photo)
@@ -1643,6 +1896,12 @@ async def main() -> None:
     dp.message.register(on_act_photo, Flow.w2_act_photo)
     dp.message.register(on_w2_act_video, Flow.w2_act_video)
     dp.message.register(on_w2_extend_video, Flow.w2_extend_video)
+    dp.message.register(on_edit_cut_video, Flow.edit_cut_video, F.video)
+    dp.message.register(on_edit_cut_video, Flow.edit_cut_video, F.video_note)
+    dp.message.register(on_edit_cut_video, Flow.edit_cut_video, F.document)
+    dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video)
+    dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video_note)
+    dp.message.register(on_edit_concat_video, Flow.edit_concat, F.document)
     dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
     dp.callback_query.register(on_stale_callback)

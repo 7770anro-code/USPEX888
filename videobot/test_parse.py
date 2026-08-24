@@ -365,6 +365,7 @@ def test_wave2_thin_api() -> None:
     assert "🎙 Клонировать мой голос" in labels
     assert "🗑 Удалить мой голос" in labels
     assert "🎯 Пресеты" in labels
+    assert "✂️ Нарезка и монтаж" in labels
     payload = voice_design_payload("спокойный низкий мужской голос, тёплый, спокойный темп")
     assert payload["auto_generate_text"] is True
     assert payload["model_id"] == "eleven_ttv_v3"
@@ -666,6 +667,86 @@ def test_night_policy_defaults() -> None:
     assert 1 <= config.VIDEOS_PER_NIGHT <= 48
 
 
+def test_edit_timecodes_and_limits() -> None:
+    import inspect
+    import shutil
+
+    from pipeline import PipelineError
+    from edit import (
+        MAX_CLIPS,
+        MAX_INPUT_BYTES,
+        MAX_OUTPUT_BYTES,
+        check_incoming,
+        concat_videos,
+        cut_video,
+        parse_clock,
+        parse_timecodes,
+    )
+
+    assert parse_clock("0:05") == 5.0
+    assert parse_clock("1:02") == 62.0
+    assert parse_clock("1:02:03") == 3723.0
+    assert parse_timecodes("0:05-0:18") == (5.0, 18.0)
+    assert parse_timecodes("12 40") == (12.0, 40.0)
+    assert parse_timecodes("с 1:00 по 1:12") == (60.0, 72.0)
+    try:
+        parse_timecodes("20-5")
+        raise AssertionError("expected inverted range")
+    except PipelineError:
+        pass
+    check_incoming(size=1000, duration=10)
+    try:
+        check_incoming(size=MAX_INPUT_BYTES + 1, duration=None)
+        raise AssertionError("expected size reject")
+    except PipelineError:
+        pass
+    assert MAX_OUTPUT_BYTES < 50 * 1024 * 1024
+    assert MAX_CLIPS == 8
+    blob = inspect.getsource(__import__("edit", fromlist=["cut_video"]))
+    assert "api.dev.runwayml.com" not in blob
+    assert "elevenlabs.io" not in blob
+    assert "api.x.ai" not in blob
+    assert "from wave2" not in blob
+    assert "from pipeline import PipelineError" in blob
+    from bot import edit_hub_kb, main
+
+    assert "edit:cut" in [b.callback_data for row in edit_hub_kb().inline_keyboard for b in row]
+    assert "Command(\"edit\")" in inspect.getsource(main)
+    blob = inspect.getsource(__import__("edit", fromlist=["cut_video"]))
+
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        import asyncio
+        import tempfile
+        from pathlib import Path
+
+        async def _roundtrip() -> None:
+            tmp = Path(tempfile.mkdtemp())
+            try:
+                a = tmp / "a.mp4"
+                b = tmp / "b.mp4"
+                for path, color in ((a, "red"), (b, "blue")):
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={color}:s=320x240:d=2",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                        "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                        str(path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    await proc.communicate()
+                    assert proc.returncode == 0
+                cut = tmp / "cut.mp4"
+                await cut_video(a, cut, 0.3, 1.2)
+                assert cut.is_file() and cut.stat().st_size > 1000
+                out = tmp / "cat.mp4"
+                await concat_videos([a, b], out)
+                assert out.is_file() and out.stat().st_size > 1000
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        asyncio.run(_roundtrip())
+
+
 def test_upscale_result_uses_video_upscale() -> None:
     import inspect
 
@@ -714,5 +795,6 @@ if __name__ == "__main__":
     test_watermark_ffmpeg_overlay()
     test_clone_posts_voices_add()
     test_night_policy_defaults()
+    test_edit_timecodes_and_limits()
     test_upscale_result_uses_video_upscale()
     print("ok")
