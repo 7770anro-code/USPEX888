@@ -299,9 +299,7 @@ def test_presets_and_cost() -> None:
     assert "use_speaker_boost" in vs
     est = estimate_cost(n_scenes=5, clip_sec=10, quality="optimal", text="привет мир", need_still=True)
     assert est["runway"] == 5 * 10 * 12 + 5
-    est_max = estimate_cost(n_scenes=5, clip_sec=10, quality="max", text="привет мир", need_still=True)
-    assert est_max["runway"] == 5 * 8 * 20 + 15
-    assert "max" in __import__("presets", fromlist=["QUALITY"]).QUALITY
+    assert "max" not in __import__("presets", fromlist=["QUALITY"]).QUALITY
     assert est["eleven_chars"] == len("привет мир")
     lock = "red coat rainy street"
     prompt = compose_runway_prompt(lock, "subtle head turn", "slow subtle push-in", "minimal body movement")
@@ -1444,9 +1442,9 @@ def test_look_and_runway_models() -> None:
     assert duration_for_model("gen4_turbo", 5) == 5
     assert i2v_fallback_chain("veo3.1") == ["veo3.1", "gen4.5", "gen4_turbo"]
     assert video_models_for_quality("fast") == ("gen4_turbo", "")
-    assert video_models_for_quality("max") == ("veo3.1", "veo3.1")
-    assert still_model_for_quality("max") == "gemini_image3_pro"
+    assert video_models_for_quality("optimal")[0] == "gen4.5"
     assert still_model_for_quality("optimal") == "gen4_image"
+    assert still_model_for_quality("fast") == "gen4_image"
 
     submit_src = inspect.getsource(_runway_submit)
     assert "return str(task_id), model_used" in submit_src

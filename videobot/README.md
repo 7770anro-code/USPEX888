@@ -9,8 +9,8 @@
 1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф.
 2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 голос кнопками + клон из SQLite. Подача и скорость — `voice_settings`.
 3. **Runway** `https://api.dev.runwayml.com`, `X-Runway-Version: 2024-11-06`.
-   - Вертикаль `720:1280`. Клип 5 или 10 сек; качество **Максимум** (Veo 3.1) — 4/6/8 сек.
-   - Качество в UI: **Быстро** (`gen4_turbo`) / **Оптимально** (`gen4.5`, дефолт) / **Максимум** (`veo3.1` + still `gemini_image3_pro` / Nano Banana Pro). Тот же `RUNWAY_API_KEY`, без отдельной подписки. Ночной контур остаётся на **Быстро**.
+   - Вертикаль `720:1280`. Клип 5 или 10 сек.
+   - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`). Veo/Gemini на том же ключе не в UI: живой A/B не дал явного выигрыша. При необходимости `RUNWAY_MODEL` / `RUNWAY_STILL_MODEL`.
    - В подписи готового ролика — фактическая модель на каждый кадр (видно, если сцена ушла в `gen4_turbo`).
    - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
    - Нехватка кредитов: пауза в `{WORK_DIR}/{chat_id}_resume` (сценарий, озвучка, готовые клипы). Кнопка **«Продолжить съёмку»** — не пересобирает Grok/ElevenLabs. «Обновить статус» только GET task_id, кредиты не тратит.

@@ -5,10 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 # Runway: по факту gen4.5 ~12 кр/с (10с = 120). turbo I2V дешевле — оценка 5 кр/с.
-# veo3.1 без native audio ~20 кр/с (с audio до 40); клип Veo 4/6/8 сек.
-RUNWAY_CREDITS_PER_SEC = {"fast": 5, "optimal": 12, "max": 20}
+# Veo/Gemini на том же ключе не выводим в UI: живой A/B не дал явного выигрыша.
+RUNWAY_CREDITS_PER_SEC = {"fast": 5, "optimal": 12}
 STILL_CREDITS = 5
-STILL_CREDITS_BY_QUALITY = {"fast": 5, "optimal": 5, "max": 15}
 ELEVEN_CREDITS_PER_CHAR = 1
 DEFAULT_CLIP_SEC = 10
 
@@ -79,14 +78,6 @@ QUALITY: dict[str, dict[str, Any]] = {
         "i2v_model": "gen4.5",
         "t2v_model": "gen4.5",
         "still_model": "gen4_image",
-        "prefer_t2v": True,
-    },
-    "max": {
-        "label": "Максимум",
-        "hint": "ещё дороже, сильнее картинка",
-        "i2v_model": "veo3.1",
-        "t2v_model": "veo3.1",
-        "still_model": "gemini_image3_pro",
         "prefer_t2v": True,
     },
 }
@@ -264,15 +255,11 @@ def estimate_cost(
     need_still: bool = False,
 ) -> dict[str, Any]:
     n_scenes = max(1, min(6, int(n_scenes or 1)))
-    if quality == "max":
-        clip_sec = 8
-    else:
-        clip_sec = 10 if int(clip_sec) >= 8 else 5
+    clip_sec = 10 if int(clip_sec) >= 8 else 5
     per_sec = RUNWAY_CREDITS_PER_SEC.get(quality, 12)
-    still_cr = STILL_CREDITS_BY_QUALITY.get(quality, STILL_CREDITS)
     runway = n_scenes * clip_sec * per_sec
     if need_still:
-        runway += still_cr
+        runway += STILL_CREDITS
     chars = len((text or "").strip())
     eleven = chars * ELEVEN_CREDITS_PER_CHAR
     q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
@@ -280,7 +267,7 @@ def estimate_cost(
         f"Клипы: {n_scenes} × {clip_sec} сек × {q_label} ≈ {n_scenes * clip_sec * per_sec} кр. Runway",
     ]
     if need_still:
-        lines.append(f"Общий первый кадр ≈ {still_cr} кр.")
+        lines.append(f"Общий первый кадр ≈ {STILL_CREDITS} кр.")
     lines.append(f"Озвучка ≈ {chars} символов ElevenLabs")
     lines.append(f"Итого Runway ≈ {runway} кредитов + озвучка {eleven} кр.")
     return {

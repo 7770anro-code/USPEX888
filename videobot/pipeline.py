@@ -1340,10 +1340,6 @@ def video_models_for_quality(quality: str) -> tuple[str, str]:
     spec = runway_quality_spec(quality)
     if quality == "fast":
         return "gen4_turbo", ""
-    if quality == "max":
-        i2v = str(spec.get("i2v_model") or "veo3.1")
-        t2v = str(spec.get("t2v_model") or i2v)
-        return i2v, t2v if t2v in RUNWAY_T2V_MODELS else ""
     env = (config.RUNWAY_MODEL or "gen4.5").strip() or "gen4.5"
     i2v = env if env in RUNWAY_I2V_MODELS else "gen4.5"
     t2v = env if env in RUNWAY_T2V_MODELS else ("gen4.5" if spec.get("prefer_t2v") else "")
