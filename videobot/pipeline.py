@@ -2042,7 +2042,7 @@ async def build_video(
                 from night_ideas import expand_topic_to_idea, script_brief_from_idea
 
                 await report("Разворачиваю тему в идею…", stage=live.STAGE_SCRIPT)
-                packed = await expand_topic_to_idea(session, idea)
+                packed = await expand_topic_to_idea(session, idea, extra_user=extra_brief)
                 hook = str(packed.get("hook") or packed.get("title") or "").strip()
                 extra_brief = script_brief_from_idea(packed, extra=extra_brief)
                 idea = str(packed.get("plot") or packed.get("title") or idea)

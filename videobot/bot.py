@@ -80,6 +80,9 @@ from edit import (
     parse_timecodes,
     plan_clips,
     render_clips,
+    scenes_for_vibe,
+    vibe_style,
+    vibe_synth_brief,
 )
 from store import (
     clear_last_job,
@@ -158,7 +161,9 @@ HOW_IT_WORKS = (
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
     "6) Сначала оценка кредитов Runway, потом съёмка. После ролика можно править по кругу "
     "(«Улучшить качество») и только кнопкой «Готово, это финал» зафиксировать.\n"
-    "7) «Нарезка и монтаж»: вручную (таймкоды/порядок) или авто (описание → xAI API → ffmpeg). Runway не тратится.\n\n"
+    "7) «Нарезка и монтаж»: вручную — ffmpeg без кредитов; авто по своему видео — план Grok + ffmpeg, Runway нет; "
+    "авто «описать вайб» — оригинальная синтетика тем же пайплайном, что ночь "
+    "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway), чужие ролики не скачиваю.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -189,8 +194,10 @@ class Flow(StatesGroup):
     edit_cut_video = State()
     edit_cut_times = State()
     edit_concat = State()
+    edit_auto_pick = State()
     edit_auto_video = State()
     edit_auto_brief = State()
+    edit_auto_vibe = State()
     revise_notes = State()
 
 
@@ -264,6 +271,16 @@ def edit_hub_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📎 Вручную: склеить", callback_data="edit:concat")],
             [InlineKeyboardButton(text="🤖 Авто-монтаж по описанию", callback_data="edit:auto")],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
+
+
+def edit_auto_source_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📤 Прислать своё видео", callback_data="edit:own")],
+            [InlineKeyboardButton(text="✨ Описать вайб / тему", callback_data="edit:gen")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:edit")],
         ]
     )
 
@@ -674,11 +691,12 @@ async def _start_edit(message: Message, state: FSMContext) -> None:
     await message.answer(
         "✂️ Нарезка и монтаж — два режима.\n\n"
         "• Вручную: сам задаёшь таймкоды или порядок файлов, только ffmpeg, без LLM.\n"
-        "• Авто: присылаешь видео и коротко пишешь, что нужно. План клипов считает "
-        "Grok через xAI API (тот же ключ, что сценарии), затем ffmpeg. "
+        "• Авто: либо своё видео (план клипов через xAI API + ffmpeg, Runway не тратится), "
+        "либо описать вайб/тему — сниму оригинальную синтетику с нуля тем же пайплайном, "
+        "что ночной контур. Интернет не ищу, чужие фильмы и ролики не скачиваю.\n"
         "Браузер grok.com/chatgpt.com не открываю.\n\n"
-        f"Лимиты Telegram: входящий файл ≤ 20 МБ и ≤ {MAX_INPUT_SEC} сек, "
-        f"до {MAX_CLIPS} кусков, готовый файл ≤ 49 МБ. Runway не тратится.",
+        f"Лимиты Telegram на свои файлы: входящий ≤ 20 МБ и ≤ {MAX_INPUT_SEC} сек, "
+        f"до {MAX_CLIPS} кусков, готовый файл ≤ 49 МБ.",
         reply_markup=edit_hub_kb(),
     )
 
@@ -717,10 +735,34 @@ async def on_edit_callback(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "auto":
         await state.clear()
+        await state.set_state(Flow.edit_auto_pick)
+        await msg.answer(
+            "Авто-монтаж — выбери источник.\n\n"
+            "📤 Своё видео — как раньше: план клипов через xAI API, режет ffmpeg, Runway не тратится.\n"
+            "✨ Описать вайб/тему — сниму ОРИГИНАЛЬНЫЙ синтетический ролик с нуля "
+            "(тот же пайплайн, что ночной контур: IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway → голос). "
+            "Интернет не ищу, чужие фильмы и ролики не скачиваю. Название фильма — только ориентир стиля. "
+            "Это тратит кредиты Runway и ElevenLabs. Хронометраж ≈30 сек. "
+            "Субтитры — текст озвучки через ffmpeg.\n\n"
+            "Можно сразу прислать видео или написать вайб текстом.",
+            reply_markup=edit_auto_source_kb(),
+        )
+        return
+    if data == "own":
+        await state.clear()
         await state.set_state(Flow.edit_auto_video)
         await msg.answer(
             "Авто-монтаж: пришли одно видео. Потом коротко опиши, что вырезать.\n"
             "Например: «динамичный ролик 30-45 сек» или «оставь самые яркие моменты»."
+        )
+        return
+    if data == "gen":
+        await state.clear()
+        await state.set_state(Flow.edit_auto_vibe)
+        await msg.answer(
+            "Напиши вайб, тему или фильм как ориентир стиля — 2–3 слова тоже сойдут.\n"
+            "Сниму новый синтетический ролик, ничего из интернета не качаю.\n"
+            "Пример: «ночной неоновый город, энергия Drive» или «мотивация, лестница, фокус»."
         )
         return
 
@@ -848,6 +890,94 @@ async def _run_concat(message: Message, state: FSMContext) -> None:
     finally:
         shutil.rmtree(work, ignore_errors=True)
         BUSY.release()
+
+
+async def on_edit_auto_pick_video(message: Message, state: FSMContext) -> None:
+    await on_edit_auto_video(message, state)
+
+
+async def on_edit_auto_pick_text(message: Message, state: FSMContext) -> None:
+    brief = (message.text or "").strip()
+    if len(brief) < 3:
+        await message.answer(
+            "Чуть конкретнее — вайб/тема хотя бы 2–3 слова, либо пришли своё видео."
+        )
+        return
+    await _run_synth_vibe(message, state, brief)
+
+
+async def on_edit_auto_vibe(message: Message, state: FSMContext) -> None:
+    brief = (message.text or "").strip()
+    if len(brief) < 3:
+        await message.answer("Напиши вайб или тему: хотя бы 2–3 слова.")
+        return
+    await _run_synth_vibe(message, state, brief)
+
+
+async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> None:
+    """Оригинальная синтетика через тот же пайплайн, что ночь. Ничего не скачиваем."""
+    brief = " ".join((brief or "").split())
+    if len(brief) < 3:
+        await message.answer("Тема слишком короткая.")
+        return
+    await state.clear()
+    n = scenes_for_vibe(brief)
+    extra = vibe_synth_brief(brief)
+    voice = voice_by_index(1)
+    quality = "optimal"
+    if credits_paused(resume_work_dir(message.chat.id)):
+        save_checkpoint(
+            resume_work_dir(message.chat.id),
+            pending_new={
+                "idea": brief[:500],
+                "user_script": False,
+                "voice_id": voice["id"],
+                "photo_file_id": "",
+                "voice_name": voice["name"],
+                "consent_verified": False,
+                "n_scenes": n,
+                "extra_brief": extra,
+                "voice_settings": voice_settings_payload("sure", "norm"),
+                "camera": camera_prompt("punch"),
+                "motion": motion_prompt("drive"),
+                "quality": quality,
+                "style": vibe_style(brief),
+                "watermark": False,
+                "hook": "",
+                "kind": "motivational",
+            },
+        )
+        await message.answer(
+            credits_pause_text(message.chat.id),
+            reply_markup=credits_pause_kb(job_key_manual(message.chat.id)),
+        )
+        return
+    cost = estimate_cost(n_scenes=n, quality=quality, text=brief, need_still=True)
+    await message.answer(
+        "Снимаю оригинальный синтетический ролик, интернет не ищу, чужие клипы не качаю.\n"
+        f"≈{n} сцен, цель ~30 сек, качество «Оптимально». "
+        f"Оценка Runway ≈{cost.get('runway')} кр.\n"
+        "Субтитры — текст озвучки (ffmpeg drawtext)."
+    )
+    await _run_job(
+        message,
+        idea=brief[:500],
+        user_script=False,
+        voice_id=voice["id"],
+        photo_file_id=None,
+        bot=message.bot,
+        voice_name=voice["name"],
+        consent_verified=False,
+        n_scenes=n,
+        extra_brief=extra,
+        voice_settings=voice_settings_payload("sure", "norm"),
+        camera=camera_prompt("punch"),
+        motion=motion_prompt("drive"),
+        quality=quality,
+        style=vibe_style(brief),
+        watermark=False,
+        kind="motivational",
+    )
 
 
 async def on_edit_auto_video(message: Message, state: FSMContext) -> None:
@@ -2406,8 +2536,14 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.edit_concat.state:
         await on_edit_concat_video(message, state)
         return
+    if current == Flow.edit_auto_pick.state:
+        await on_edit_auto_video(message, state)
+        return
     if current == Flow.edit_auto_video.state:
         await on_edit_auto_video(message, state)
+        return
+    if current == Flow.edit_auto_vibe.state:
+        await message.answer("Нужен текст вайба, не файл. Либо нажми «Прислать своё видео».")
         return
     await message.answer("Нажми кнопку в меню или пришли текст, когда я попрошу.", reply_markup=main_menu())
 
@@ -2467,6 +2603,8 @@ async def main() -> None:
     dp.message.register(on_w2_extend_prompt, Flow.w2_extend_prompt, F.text)
     dp.message.register(on_edit_cut_times, Flow.edit_cut_times, F.text)
     dp.message.register(on_edit_auto_brief, Flow.edit_auto_brief, F.text)
+    dp.message.register(on_edit_auto_pick_text, Flow.edit_auto_pick, F.text)
+    dp.message.register(on_edit_auto_vibe, Flow.edit_auto_vibe, F.text)
     dp.message.register(on_revise_notes, Flow.revise_notes, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
@@ -2484,6 +2622,9 @@ async def main() -> None:
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video)
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video_note)
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.document)
+    dp.message.register(on_edit_auto_pick_video, Flow.edit_auto_pick, F.video)
+    dp.message.register(on_edit_auto_pick_video, Flow.edit_auto_pick, F.video_note)
+    dp.message.register(on_edit_auto_pick_video, Flow.edit_auto_pick, F.document)
     dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.video)
     dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.video_note)
     dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.document)

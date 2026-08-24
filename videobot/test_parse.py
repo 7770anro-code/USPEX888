@@ -1320,6 +1320,82 @@ def test_edit_timecodes_and_limits() -> None:
         asyncio.run(_roundtrip())
 
 
+def test_edit_auto_synth_vibe_no_download() -> None:
+    import inspect
+
+    from bot import (
+        HOW_IT_WORKS,
+        _run_auto_edit,
+        _run_synth_vibe,
+        edit_auto_source_kb,
+        edit_hub_kb,
+        on_edit_callback,
+    )
+    from edit import (
+        VIBE_SYNTH_LOCK,
+        scenes_for_vibe,
+        vibe_style,
+        vibe_synth_brief,
+    )
+    from night_ideas import expand_topic_to_idea
+    from pipeline import build_video, mux_scene
+
+    hub = [b.callback_data for row in edit_hub_kb().inline_keyboard for b in row]
+    assert "edit:auto" in hub
+    assert "edit:cut" in hub
+    src_kb = [b.callback_data for row in edit_auto_source_kb().inline_keyboard for b in row]
+    assert src_kb == ["edit:own", "edit:gen", "menu:edit"]
+
+    own = inspect.getsource(_run_auto_edit)
+    assert "plan_clips" in own
+    assert "build_video" not in own
+    assert "_run_job" not in own
+    assert "yt-dlp" not in own
+    assert "youtube" not in own.lower()
+
+    gen = inspect.getsource(_run_synth_vibe)
+    assert "_run_job" in gen
+    assert "vibe_synth_brief" in gen
+    assert "photo_file_id=None" in gen
+    assert "yt-dlp" not in gen
+    assert "yt_dlp" not in gen
+    assert "playwright" not in gen.lower()
+    assert "не качаю" in gen or "не ищу" in gen
+
+    cb = inspect.getsource(on_edit_callback)
+    assert 'data == "own"' in cb
+    assert 'data == "gen"' in cb
+    assert "edit_auto_pick" in cb
+    assert "yt-dlp" not in cb
+
+    brief = vibe_synth_brief("в духе Inception, неоновые коридоры")
+    assert "Inception" in brief
+    assert "ориентир" in brief.lower()
+    assert "скачива" in brief.lower()
+    assert "ремейка" in brief.lower() or "ремейк" in VIBE_SYNTH_LOCK.lower()
+    assert "instagram" not in brief.lower()
+    assert scenes_for_vibe("ночной вайб") == 4
+    assert scenes_for_vibe("динамичный 30-45 сек") == 5
+    assert scenes_for_vibe("ролик 20 сек") == 4
+    assert scenes_for_vibe("нарезка 55 секунд") == 6
+    assert vibe_style("мульт про чайник") == "cartoon"
+    assert vibe_style("ночной город") == "cinematic"
+
+    expand_src = inspect.getsource(expand_topic_to_idea)
+    assert "extra_user" in expand_src
+    build_src = inspect.getsource(build_video)
+    assert "extra_user=extra_brief" in build_src
+    mux_src = inspect.getsource(mux_scene)
+    assert "BURN_SUBTITLES" in mux_src
+    assert "drawtext" in mux_src
+
+    assert "чужие ролики не скачиваю" in HOW_IT_WORKS
+    assert "SCRIPT_SYSTEM_SYNTH" in HOW_IT_WORKS
+    assert "whisper" not in gen.lower()
+    assert "grok.com" not in gen.lower()
+    assert "chatgpt.com" not in gen.lower()
+
+
 def test_upscale_result_uses_video_upscale() -> None:
     import inspect
 
@@ -1533,6 +1609,7 @@ if __name__ == "__main__":
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()
     test_edit_timecodes_and_limits()
+    test_edit_auto_synth_vibe_no_download()
     test_upscale_result_uses_video_upscale()
     test_look_and_runway_models()
     print("ok")

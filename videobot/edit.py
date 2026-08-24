@@ -95,6 +95,51 @@ EDIT_SYSTEM = """Ты монтажёр коротких вертикальных
 """
 
 
+VIBE_SYNTH_LOCK = (
+    "Пользователь назвал вайб, тему или фильм ТОЛЬКО как стилистический ориентир. "
+    "Сними ОРИГИНАЛЬНЫЙ синтетический ролик: выдуманный персонаж и свой сюжет. "
+    "Запрещено: искать или скачивать чужие фильмы и ролики из интернета, копировать кадры, "
+    "логотипы, узнаваемых актёров, дословные сцены, названия фильмов на экране, IP-персонажей. "
+    "Никакого ремейка — только новая синтетика в духе описанного настроения."
+)
+
+
+def vibe_synth_brief(user_text: str) -> str:
+    text = " ".join((user_text or "").split())[:800]
+    return (
+        f"{VIBE_SYNTH_LOCK}\n"
+        f"Ориентир пользователя (не исходник для скачивания): {text}\n"
+        "Хронометраж целевой ≈30 секунд, если пользователь не указал другую длину. "
+        "Только синтетика, без реальных лиц."
+    )
+
+
+def vibe_style(text: str) -> str:
+    blob = (text or "").lower()
+    keys = ("мульт", "cartoon", "аниме", "anime", "3d", "пиксель", "pixel")
+    if any(key in blob for key in keys):
+        return "cartoon"
+    return "cinematic"
+
+
+def scenes_for_vibe(brief: str) -> int:
+    """Ночной контур: 4 сцены ≈ 30 сек. Явная длина в тексте → 4–6."""
+    text = (brief or "").lower()
+    explicit = bool(
+        re.search(r"\d{1,3}\s*-\s*\d{1,3}\s*(?:сек|s\b)?", text)
+        or re.search(r"\d{1,3}\s*(?:сек|секунд)", text)
+    )
+    lo, hi = parse_target_range(brief)
+    mid = (lo + hi) / 2.0
+    if not explicit:
+        return 4
+    if mid <= 35:
+        return 4
+    if mid <= 50:
+        return 5
+    return 6
+
+
 def parse_target_range(brief: str) -> tuple[float, float]:
     text = (brief or "").lower().replace("–", "-").replace("—", "-")
     pair = re.search(r"(\d{1,3})\s*-\s*(\d{1,3})\s*(?:сек|s\b)?", text)

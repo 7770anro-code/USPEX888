@@ -197,12 +197,16 @@ def topic_expand_user(topic: str) -> str:
 async def expand_topic_to_idea(
     session: aiohttp.ClientSession,
     topic: str,
+    extra_user: str = "",
 ) -> dict[str, Any]:
     """Короткая тема → одна полная идея (title/hook/plot/caption), тот же IDEA_SYSTEM что ночь."""
     topic = " ".join((topic or "").split())[:200]
     if len(topic) < 3:
         raise PipelineError("Тема слишком короткая. Напиши хотя бы 2–3 слова.")
     user = topic_expand_user(topic)
+    extra = " ".join((extra_user or "").split())
+    if extra:
+        user = user + "\n" + extra[:800]
     last_err: Exception | None = None
     topic_toks = set(tokenize(topic))
     for attempt in range(3):
