@@ -84,9 +84,38 @@ CREATE INDEX IF NOT EXISTS idx_night_jobs_date ON night_jobs(run_date);
 CREATE INDEX IF NOT EXISTS idx_night_ideas_hash ON night_ideas(idea_hash);
 """
 
+# Прототип до state-machine: night_jobs(slot_id,…) и night_runs(mode, planned,…)
+# без id/account_id/status. CREATE TABLE IF NOT EXISTS их не пересоздаёт.
+_JOBS_REQUIRED = ("id", "account_id", "kind", "status", "video_path", "eleven_chars")
+_RUNS_REQUIRED = ("run_id", "run_date", "status", "report")
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _table_columns(conn: sqlite3.Connection, name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({name})").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _retire_legacy_table(conn: sqlite3.Connection, name: str, required: tuple[str, ...]) -> bool:
+    cols = _table_columns(conn, name)
+    if not cols:
+        return False
+    missing = [c for c in required if c not in cols]
+    if not missing:
+        return False
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    dest = f"{name}_legacy_{stamp}"
+    conn.execute(f"ALTER TABLE {name} RENAME TO {dest}")
+    log.warning(
+        "переименовал устаревшую %s (нет колонок %s) → %s; новая таблица создастся заново",
+        name,
+        ",".join(missing),
+        dest,
+    )
+    return True
 
 
 def worker_id() -> str:
@@ -98,10 +127,15 @@ def ensure() -> None:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(path), timeout=30) as conn:
+        _retire_legacy_table(conn, "night_jobs", _JOBS_REQUIRED)
+        _retire_legacy_table(conn, "night_runs", _RUNS_REQUIRED)
         conn.executescript(_SCHEMA)
         for col, spec in (
             ("tiktok_publish_id", "TEXT NOT NULL DEFAULT ''"),
             ("ig_container_id", "TEXT NOT NULL DEFAULT ''"),
+            ("eleven_chars", "INTEGER NOT NULL DEFAULT 0"),
+            ("tiktok_mode", "TEXT NOT NULL DEFAULT ''"),
+            ("instagram_mode", "TEXT NOT NULL DEFAULT ''"),
         ):
             try:
                 conn.execute(f"ALTER TABLE night_jobs ADD COLUMN {col} {spec}")

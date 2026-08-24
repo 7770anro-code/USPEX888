@@ -667,6 +667,92 @@ def test_night_policy_defaults() -> None:
     assert 1 <= config.VIDEOS_PER_NIGHT <= 48
 
 
+def test_legacy_night_schema_migrates() -> None:
+    """Прототипные night_jobs/night_runs без account_id/status не должны ломать ensure()."""
+    import shutil
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+
+    import config
+    import store
+    from night_store import create_job, ensure, jobs_for_date, save_run
+
+    tmp = tempfile.mkdtemp()
+    old = config.DATA_DIR
+    config.DATA_DIR = tmp
+    store.reset_for_tests()
+    try:
+        db = Path(tmp) / "videobot.sqlite3"
+        with sqlite3.connect(str(db)) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE night_jobs (
+                    run_date TEXT NOT NULL,
+                    slot_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    preset TEXT NOT NULL DEFAULT '',
+                    topic TEXT NOT NULL DEFAULT '',
+                    platforms TEXT NOT NULL DEFAULT '',
+                    quality TEXT NOT NULL DEFAULT '',
+                    runway_credits INTEGER NOT NULL DEFAULT 0,
+                    outbox TEXT NOT NULL DEFAULT '',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE night_runs (
+                    run_id TEXT PRIMARY KEY,
+                    run_date TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    planned INTEGER NOT NULL DEFAULT 0,
+                    rendered INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    skipped INTEGER NOT NULL DEFAULT 0,
+                    runway_used INTEGER NOT NULL DEFAULT 0,
+                    report TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO night_jobs VALUES (
+                    '2026-08-24','mon-viral-hour','planned','viral','old',
+                    'tiktok','fast',255,'/tmp/x','','2026-08-23T18:52:47+00:00',
+                    '2026-08-23T18:52:47+00:00'
+                );
+                """
+            )
+            conn.commit()
+        ensure()
+        jid = create_job(
+            {
+                "run_date": "2026-08-24",
+                "account_id": "motiv",
+                "kind": "motivational",
+                "title": "after-migrate",
+            }
+        )
+        assert jid >= 1
+        rows = jobs_for_date("2026-08-24")
+        assert any(r.get("title") == "after-migrate" for r in rows)
+        save_run("abc123", "2026-08-24", "done", "ok")
+        with sqlite3.connect(str(db)) as conn:
+            job_tables = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'night_jobs%'"
+                )
+            ]
+            assert "night_jobs" in job_tables
+            assert any(n.startswith("night_jobs_legacy_") for n in job_tables)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(night_jobs)")}
+            assert "account_id" in cols and "id" in cols
+            run_cols = {r[1] for r in conn.execute("PRAGMA table_info(night_runs)")}
+            assert "status" in run_cols
+    finally:
+        config.DATA_DIR = old
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_edit_timecodes_and_limits() -> None:
     import inspect
     import shutil
@@ -821,6 +907,7 @@ if __name__ == "__main__":
     test_watermark_ffmpeg_overlay()
     test_clone_posts_voices_add()
     test_night_policy_defaults()
+    test_legacy_night_schema_migrates()
     test_edit_timecodes_and_limits()
     test_upscale_result_uses_video_upscale()
     print("ok")
