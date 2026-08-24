@@ -21,6 +21,7 @@ from pipeline import (
     _runway_poll,
     _runway_submit,
     runway_content_moderation,
+    write_runway_model,
 )
 from store import (  # noqa: F401 — реэкспорт для старых импортов
     clear_user_voices,
@@ -452,6 +453,8 @@ async def runway_generate_file(
     *,
     used_image: bool = False,
 ) -> Path:
-    task_id = await _runway_submit(session, api_path, payload, used_image=used_image)
+    task_id, model_used = await _runway_submit(session, api_path, payload, used_image=used_image)
+    if model_used:
+        write_runway_model(dest, model_used)
     url = await _runway_poll(session, task_id, used_image=used_image)
     return await _download(session, url, dest)

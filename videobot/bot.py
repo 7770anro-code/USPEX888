@@ -32,9 +32,11 @@ from pipeline import (
     PipelineError,
     RUNWAY_CREDITS_MSG,
     build_video,
+    compact_runway_models,
     ensure_ffmpeg,
     fetch_runway_task,
     file_to_data_uri,
+    format_runway_usage,
     format_script,
     is_runway_credits_fail,
     script_too_long_for_custom,
@@ -1670,6 +1672,12 @@ async def _run_job(
                 pass
             q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
+            still_name = str(script.get("runway_still_model") or "").strip()
+            models_line = compact_runway_models(script.get("runway_models") if isinstance(script.get("runway_models"), list) else [])
+            if still_name:
+                caption += f"\nпервый кадр: {still_name}"
+            if models_line:
+                caption += f"\n{models_line}"
             title = str(script.get("title") or "video")
             keep = save_last_video(message.chat.id, video_path, title)
             save_last_job(
@@ -1715,6 +1723,9 @@ async def _run_job(
                 hint = (
                     "Это черновик. Напиши, что поменять — или подтверди финал кнопкой ниже."
                 )
+            usage = format_runway_usage(script)
+            if usage:
+                hint = usage + "\n\n" + hint
             await message.answer(hint, reply_markup=result_kb(can_finalize=True))
             ok = True
         except PipelineError as exc:

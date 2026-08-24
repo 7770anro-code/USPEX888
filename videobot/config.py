@@ -88,8 +88,10 @@ def xai_creative_models() -> list[str]:
 ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah
 ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
 
-# gen4.5 — проверенный T2V. seedance2 можно включить через RUNWAY_MODEL.
+# gen4.5 — дефолт видео. seedance2 / veo3.1 — через RUNWAY_MODEL или качество «Максимум».
 RUNWAY_MODEL = _clean("RUNWAY_MODEL") or "gen4.5"
+# Пусто = модель still из пресета качества (gen4_image / gemini_image3_pro).
+RUNWAY_STILL_MODEL = _clean("RUNWAY_STILL_MODEL")
 RUNWAY_RATIO = _clean("RUNWAY_RATIO") or "720:1280"
 RUNWAY_VERSION = _clean("RUNWAY_VERSION") or "2024-11-06"
 RUNWAY_POLL_SEC = float(_clean("RUNWAY_POLL_SEC") or "5")

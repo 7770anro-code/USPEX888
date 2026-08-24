@@ -30,6 +30,15 @@ RUNWAY_PROMPT_MAX = 1000
 RUNWAY_DURATION_MIN = 2
 RUNWAY_DURATION_MAX = 10
 RUNWAY_T2V_MODELS = frozenset({"gen4.5", "veo3", "veo3.1", "veo3.1_fast", "seedance2"})
+RUNWAY_I2V_MODELS = frozenset({"gen4.5", "gen4_turbo", "seedance2", "veo3", "veo3.1", "veo3.1_fast"})
+RUNWAY_VEO_MODELS = frozenset({"veo3", "veo3.1", "veo3.1_fast"})
+RUNWAY_GEMINI_IMAGE = frozenset({"gemini_image3_pro", "gemini_image3.1_flash"})
+GEMINI_IMAGE_RATIO = {
+    "720:1280": "768:1344",
+    "1280:720": "1344:768",
+    "960:960": "1024:1024",
+}
+GEMINI_PROMPT_MAX = 5500
 RUNWAY_DONE_FAIL = frozenset({"FAILED", "CANCELED", "CANCELLED"})
 
 # ElevenLabs: POST /v1/text-to-speech/{voice_id} → сырой audio/mpeg, не JSON.
@@ -55,7 +64,7 @@ SCRIPT_SYSTEM_PHOTO = f"""Ты режиссёр вертикальных TikTok-
 }}
 
 Правила:
-- {SCRIPT_LOCK} Это фото человека: мягкая камера обязательна, иначе плывёт лицо.
+- {SCRIPT_LOCK} Это фото человека: мягкая камера обязательна, иначе плывёт лицо. continuity visual style — photoreal live-action (handheld phone / cinema camera), не CGI-пластик.
 - visual_prompt сцены — только мягкое движение камеры и тела, без нового лица и локации.
 - Сцен от 4 до 6. Каждая narration 18–28 слов (конкретная ситуация, конфликт или вопрос зрителю). Итого 40–60 секунд.
 - Если дан готовый текст пользователя — режь ЕГО слова на сцены, не выдумывай новую речь.
@@ -78,6 +87,7 @@ SCRIPT_SYSTEM_SYNTH = f"""Ты режиссёр вертикальных TikTok-
 
 Правила:
 - {SCRIPT_LOCK} Консистентность персонажа важнее трюка камеры. Новое лицо/локацию не вводить.
+- Если стиль photoreal/cinematic/ad — это live-action пластина «снято камерой», не AI-smooth. Если cartoon/abstract — 3D/графика, без «shot on iPhone/ARRI».
 - Камера и действие МОГУТ быть энергичными. Запрет soft-only / static / «только push-in» здесь НЕ действует (он только для режима с реальным фото).
 - Сцен от 4 до 6. Каждая narration СТРОГО 18–28 слов. Короче 18 — брак, перепиши.
 - Каждая сцена: конкретная ситуация, конфликт или прямой вопрос зрителю. Не голая метафора («лестница = прогресс») без действия.
@@ -91,10 +101,34 @@ SCRIPT_SYSTEM_SYNTH = f"""Ты режиссёр вертикальных TikTok-
 SCRIPT_SYSTEM = SCRIPT_SYSTEM_SYNTH
 
 STYLES = {
-    "cinematic": "photoreal cinematic, shallow depth of field, natural motivated light, subtle film grain, 24fps motion",
-    "ad": "premium commercial, clean high-end lighting, polished product look, slow elegant camera",
-    "cartoon": "stylized 3D animation, vibrant, appealing shapes, not a celebrity likeness",
+    "cinematic": (
+        "photoreal live-action, shot on ARRI Alexa Mini with 35mm anamorphic lens, "
+        "handheld micro-shake, organic film grain, creamy bokeh, natural motivated light, "
+        "natural exposure no blown highlights, 24fps cadence, not CGI, not plastic skin"
+    ),
+    "ad": (
+        "photoreal live-action product, shot on iPhone 15 Pro handheld, natural motion blur, "
+        "real sensor noise, practical light, natural exposure, premium commercial, not CGI plastic"
+    ),
+    "cartoon": (
+        "stylized 3D animation render, appealing shapes, painterly lighting, graphic look, "
+        "not live-action footage, not iPhone, not ARRI, not documentary"
+    ),
 }
+
+# Короткие LOOK-пакеты в visual (Grok может выкинуть стиль из continuity).
+LOOK_ARRI = (
+    "shot on ARRI Alexa Mini 35mm anamorphic, handheld micro-shake, organic grain, "
+    "creamy bokeh, natural exposure, 24fps, not CGI plastic"
+)
+LOOK_PHONE = (
+    "shot on iPhone 15 Pro handheld, natural motion blur, real sensor noise, "
+    "natural exposure, not CGI plastic, not oversharpened"
+)
+LOOK_CARTOON = (
+    "stylized 3D render, appealing shapes, painterly light, not live-action, "
+    "not iPhone, not ARRI, not documentary footage"
+)
 
 RATIO_PRESETS = {
     "9:16": "720:1280",
@@ -440,14 +474,30 @@ def enforce_speech_budget(script: dict[str, Any], *, user_script: bool) -> dict[
     return script
 
 
+def visual_look_lock(style: str = "", *, photo_lock: bool = False) -> str:
+    """Камерный LOOK для live-action; для cartoon — рендер, без iPhone/ARRI."""
+    key = style if style in STYLES else "cinematic"
+    if key == "cartoon":
+        return LOOK_CARTOON
+    if photo_lock or key == "ad":
+        return LOOK_PHONE
+    return LOOK_ARRI
+
+
 def compose_runway_prompt(
     continuity: str,
     scene_visual: str,
     camera: str = "",
     motion: str = "",
+    *,
+    style: str = "cinematic",
+    photo_lock: bool = False,
 ) -> str:
     """Один lock на все клипы + действие сцены + камера/динамика (текстом, не API-параметр)."""
+    look = visual_look_lock(style, photo_lock=photo_lock)
     lock = re.sub(r"\s+", " ", (continuity or "").strip())
+    if look and look.lower() not in lock.lower():
+        lock = f"{look}, {lock}".strip(", ")
     bits = [
         re.sub(r"\s+", " ", (scene_visual or "").strip()),
         re.sub(r"\s+", " ", (camera or "").strip()),
@@ -523,7 +573,41 @@ def format_script(script: dict[str, Any]) -> str:
     if cap:
         lines.append("")
         lines.append(cap[:400])
+    usage = format_runway_usage(script)
+    if usage:
+        lines.append("")
+        lines.append(usage)
     return "\n".join(lines).strip()
+
+
+def format_runway_usage(script: dict[str, Any] | None) -> str:
+    """Фактические модели Runway по кадрам — не тариф, pay-as-you-go кредиты."""
+    data = script or {}
+    still = str(data.get("runway_still_model") or "").strip()
+    raw = data.get("runway_models") or []
+    models = [str(m).strip() for m in raw if str(m).strip()] if isinstance(raw, list) else []
+    if not still and not models:
+        return ""
+    bits: list[str] = []
+    if still:
+        bits.append(f"первый кадр {still}")
+    for i, name in enumerate(models, 1):
+        bits.append(f"сцена {i} {name}")
+    line = "Runway: " + "; ".join(bits) + "."
+    cheap = [m for m in models if "turbo" in m.lower()]
+    has_45 = any(m.replace("_", "") in ("gen45", "gen4.5") or "gen4.5" in m for m in models)
+    if cheap and has_45:
+        line += " gen4_turbo здесь — дешёвый запас при нехватке кредитов, не «другой тариф»."
+    elif cheap and len(cheap) == len(models):
+        line += " Все клипы gen4_turbo (режим «Быстро» или запас по кредитам)."
+    return line
+
+
+def compact_runway_models(models: list[str] | None) -> str:
+    names = [str(m).strip() for m in (models or []) if str(m).strip()]
+    if not names:
+        return ""
+    return "сцены: " + ", ".join(names)
 
 
 def wrap_caption(text: str, width: int = 24) -> str:
@@ -854,6 +938,34 @@ def _runway_headers() -> dict[str, str]:
     }
 
 
+def runway_model_side(dest: Path) -> Path:
+    return dest.with_suffix(dest.suffix + ".runway_model")
+
+
+def write_runway_model(dest: Path, model: str) -> None:
+    name = (model or "").strip()
+    if not name:
+        return
+    try:
+        runway_model_side(dest).write_text(name, encoding="utf-8")
+    except OSError:
+        log.warning("не записал Runway model рядом с %s", dest.name)
+
+
+def read_runway_model(dest: Path) -> str:
+    path = runway_model_side(dest)
+    try:
+        return path.read_text(encoding="utf-8").strip() if path.is_file() else ""
+    except OSError:
+        return ""
+
+
+def _model_from_submit(payload: dict[str, Any], data: dict[str, Any]) -> str:
+    routing = data.get("routing") if isinstance(data.get("routing"), dict) else {}
+    name = str(routing.get("model") or payload.get("model") or "").strip()
+    return name
+
+
 async def _runway_poll(
     session: aiohttp.ClientSession,
     task_id: str,
@@ -1004,7 +1116,7 @@ async def _runway_submit(
     payload: dict[str, Any],
     *,
     used_image: bool = False,
-) -> str:
+) -> tuple[str, str]:
     tries = max(1, int(config.HTTP_RETRIES))
     last_err = ""
     raw = ""
@@ -1042,15 +1154,16 @@ async def _runway_submit(
                 if not task_id:
                     raise PipelineError("Runway не вернул id задачи.", _clip(raw, 240))
                 routing = data.get("routing") if isinstance(data.get("routing"), dict) else {}
+                model_used = _model_from_submit(payload, data)
                 log.info(
-                    "Runway submitted %s id=%s cost=%s router_model=%s router_provider=%s",
+                    "Runway submitted %s id=%s cost=%s model=%s router_provider=%s",
                     path,
                     task_id,
                     data.get("estimatedCost"),
-                    routing.get("model") or "-",
+                    model_used or (routing.get("model") or "-"),
                     routing.get("provider") or "-",
                 )
-                return str(task_id)
+                return str(task_id), model_used
         except PipelineError:
             raise
         except Exception as exc:
@@ -1086,11 +1199,12 @@ async def _resume_or_submit(
                     except OSError:
                         pass
                 raise
-    tid = await _runway_submit(session, path, payload, used_image=used_image)
+    tid, model_used = await _runway_submit(session, path, payload, used_image=used_image)
     try:
         side.write_text(tid, encoding="utf-8")
     except OSError:
         log.warning("не записал Runway task id рядом с %s", dest.name)
+    write_runway_model(dest, model_used)
     _remember_runway_task(tid, path, used_image=used_image)
     return await _runway_poll(session, tid, used_image=used_image)
 
@@ -1165,17 +1279,99 @@ async def _download(session: aiohttp.ClientSession, url: str, dest: Path) -> Pat
     return dest
 
 
-def text_to_image_payload(prompt: str, ratio: str) -> dict[str, Any]:
+def still_ratio_for_model(model: str, ratio: str) -> str:
+    if model in RUNWAY_GEMINI_IMAGE:
+        return GEMINI_IMAGE_RATIO.get(ratio, "768:1344")
+    return {"720:1280": "1080:1920", "960:960": "1080:1080"}.get(ratio, "1920:1080")
+
+
+def duration_for_model(model: str, seconds: int) -> int:
+    """Veo принимает только 4/6/8; gen4.5/turbo — 2–10, у нас 5 или 10."""
+    try:
+        raw = int(seconds)
+    except (TypeError, ValueError):
+        raw = 5
+    if model in RUNWAY_VEO_MODELS:
+        if raw <= 5:
+            return 4
+        if raw <= 7:
+            return 6
+        return 8
+    return 10 if raw >= 8 else 5
+
+
+def video_ratio_for_model(model: str, ratio: str) -> str:
+    ratio = ratio or "720:1280"
+    if ratio not in RATIO_PRESETS.values():
+        ratio = "720:1280"
+    if model in RUNWAY_VEO_MODELS:
+        if ratio in ("720:1280", "1280:720", "1080:1920", "1920:1080"):
+            return ratio
+        width, height = ratio_wh(ratio)
+        return "720:1280" if height >= width else "1280:720"
+    return ratio
+
+
+def i2v_fallback_chain(primary: str) -> list[str]:
+    chain: list[str] = []
+    for name in (primary, "gen4.5" if primary in RUNWAY_VEO_MODELS else "", "gen4_turbo"):
+        if name and name not in chain:
+            chain.append(name)
+    return chain or ["gen4_turbo"]
+
+
+def runway_quality_spec(quality: str) -> dict[str, Any]:
+    from presets import QUALITY
+
+    return QUALITY.get(quality) or QUALITY["optimal"]
+
+
+def still_model_for_quality(quality: str) -> str:
+    override = (config.RUNWAY_STILL_MODEL or "").strip()
+    if override:
+        return override
+    spec = runway_quality_spec(quality)
+    name = str(spec.get("still_model") or "gen4_image").strip()
+    return name or "gen4_image"
+
+
+def video_models_for_quality(quality: str) -> tuple[str, str]:
+    """(i2v_model, t2v_model). t2v пустой, если этот режим только I2V."""
+    spec = runway_quality_spec(quality)
+    if quality == "fast":
+        return "gen4_turbo", ""
+    if quality == "max":
+        i2v = str(spec.get("i2v_model") or "veo3.1")
+        t2v = str(spec.get("t2v_model") or i2v)
+        return i2v, t2v if t2v in RUNWAY_T2V_MODELS else ""
+    env = (config.RUNWAY_MODEL or "gen4.5").strip() or "gen4.5"
+    i2v = env if env in RUNWAY_I2V_MODELS else "gen4.5"
+    t2v = env if env in RUNWAY_T2V_MODELS else ("gen4.5" if spec.get("prefer_t2v") else "")
+    return i2v, t2v
+
+
+def text_to_image_payload(prompt: str, ratio: str, model: str | None = None) -> dict[str, Any]:
     """POST /v1/text_to_image без фото пользователя.
 
     docs.dev.runwayml.com (2024-11-06): у gen4_image_turbo поле referenceImages
     обязательно, min 1 / max 3, элемент {uri, tag?}. Пустой массив не принимают.
     У gen4_image referenceImages необязателен — его не шлём, если референса нет.
+    gemini_image3_pro / gemini_image3.1_flash — Nano Banana, свои ratio, без contentModeration.
     """
+    name = (model or "gen4_image").strip() or "gen4_image"
+    if name in RUNWAY_GEMINI_IMAGE:
+        text = re.sub(r"\s+", " ", (prompt or "").strip())[:GEMINI_PROMPT_MAX]
+        if not text:
+            raise PipelineError("Пустой visual-промпт для Runway.")
+        return {
+            "model": name,
+            "promptText": text,
+            "ratio": still_ratio_for_model(name, ratio),
+        }
     return {
         "model": "gen4_image",
         "promptText": runway_prompt_text(prompt),
-        "ratio": {"720:1280": "1080:1920", "960:960": "1080:1080"}.get(ratio, "1920:1080"),
+        "ratio": still_ratio_for_model("gen4_image", ratio),
         "contentModeration": runway_content_moderation(),
     }
 
@@ -1185,26 +1381,66 @@ async def _text_to_image_url(
     prompt: str,
     ratio: str,
     dest_hint: Path | None = None,
+    model: str | None = None,
 ) -> str:
     """Общий still для цепочки I2V, если пользователь не прислал фото."""
-    payload = text_to_image_payload(prompt, ratio)
-    if dest_hint is not None:
-        return await _resume_or_submit(session, "/v1/text_to_image", payload, dest_hint)
-    task_id = await _runway_submit(session, "/v1/text_to_image", payload)
-    return await _runway_poll(session, task_id)
+    wanted = (model or "gen4_image").strip() or "gen4_image"
+    chain = [wanted]
+    if wanted != "gen4_image":
+        chain.append("gen4_image")
+    last_exc: PipelineError | None = None
+    for name in chain:
+        payload = text_to_image_payload(prompt, ratio, model=name)
+        try:
+            if dest_hint is not None:
+                return await _resume_or_submit(session, "/v1/text_to_image", payload, dest_hint)
+            task_id, _model = await _runway_submit(session, "/v1/text_to_image", payload)
+            return await _runway_poll(session, task_id)
+        except PipelineError as exc:
+            last_exc = exc
+            if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
+            if is_runway_user_facing(exc):
+                raise
+            status = getattr(exc, "status", None)
+            if status in (400, 404, 422) and name != chain[-1]:
+                log.warning("still %s failed, try gen4_image: %s", name, exc.detail)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    raise PipelineError("Runway не вернул still.")
 
 
-def _clip_payload_base(model: str, visual: str, ratio: str, seconds: int, seed: int | None) -> dict[str, Any]:
+def runway_video_payload(
+    model: str,
+    visual: str,
+    ratio: str,
+    seconds: int,
+    *,
+    seed: int | None = None,
+    prompt_image: str | None = None,
+) -> dict[str, Any]:
+    """Поля строго по модели: Veo не принимает seed/contentModeration, duration 4/6/8, audio=false."""
     payload: dict[str, Any] = {
         "model": model,
         "promptText": visual,
-        "ratio": ratio,
-        "duration": seconds,
-        "contentModeration": runway_content_moderation(),
+        "ratio": video_ratio_for_model(model, ratio),
+        "duration": duration_for_model(model, seconds),
     }
-    if seed is not None:
-        payload["seed"] = int(seed) & 0xFFFFFFFF
+    if model in RUNWAY_VEO_MODELS:
+        payload["audio"] = False
+    else:
+        payload["contentModeration"] = runway_content_moderation()
+        if seed is not None:
+            payload["seed"] = int(seed) & 0xFFFFFFFF
+    if prompt_image:
+        payload["promptImage"] = prompt_image
     return payload
+
+
+def _clip_payload_base(model: str, visual: str, ratio: str, seconds: int, seed: int | None) -> dict[str, Any]:
+    return runway_video_payload(model, visual, ratio, seconds, seed=seed)
 
 
 def runway_router_video_payload(
@@ -1251,8 +1487,7 @@ async def runway_clip(
 ) -> Path:
     if not config.RUNWAY_API_KEY:
         raise PipelineError("Камера сейчас недоступна. Попробуй ещё раз чуть позже.")
-    # gen4.5 image_to_video: на практике 5 или 10; API допускает integer 2–10.
-    seconds = 10 if int(seconds) >= 8 else 5
+    requested = int(seconds)
     visual = runway_prompt_text(prompt)
     ratio = ratio or "720:1280"
     if ratio not in RATIO_PRESETS.values():
@@ -1262,10 +1497,11 @@ async def runway_clip(
             "RUNWAY_USE_MODEL_ROUTER=1, но RUNWAY_ROUTER_CONFIG_ID пуст — прямой вызов модели"
         )
     if config.runway_model_router_enabled():
+        router_sec = 10 if requested >= 8 else 5
         payload = runway_router_video_payload(
             visual,
             ratio,
-            seconds,
+            router_sec,
             prompt_image=prompt_image,
             seed=seed,
         )
@@ -1276,42 +1512,62 @@ async def runway_clip(
             dest,
             used_image=bool(prompt_image),
         )
-        return await _download(session, video_url, dest)
-    model = config.RUNWAY_MODEL or "gen4.5"
-    if quality == "fast":
-        model = "gen4_turbo"
-        i2v_model = "gen4_turbo"
-    else:
-        i2v_model = model if model in ("gen4.5", "gen4_turbo", "seedance2", "veo3.1", "veo3.1_fast") else "gen4.5"
+        path_out = await _download(session, video_url, dest)
+        if not read_runway_model(dest):
+            write_runway_model(dest, "router")
+        return path_out
+    i2v_model, t2v_model = video_models_for_quality(quality)
+    still_model = still_model_for_quality(quality)
     last_fail: PipelineError | None = None
     label = f"клип {clip_index} из {clip_total}"
 
     async def _i2v(image: str, mdl: str) -> Path:
-        payload = _clip_payload_base(mdl, visual, ratio, seconds, seed)
-        payload["promptImage"] = image
+        payload = runway_video_payload(
+            mdl, visual, ratio, requested, seed=seed, prompt_image=image
+        )
         video_url = await _resume_or_submit(
             session, "/v1/image_to_video", payload, dest, used_image=True
         )
-        return await _download(session, video_url, dest)
+        out = await _download(session, video_url, dest)
+        write_runway_model(dest, read_runway_model(dest) or mdl)
+        return out
+
+    async def _i2v_with_fallback(image: str, primary: str) -> Path:
+        chain = i2v_fallback_chain(primary)
+        last_exc: PipelineError | None = None
+        for idx, mdl in enumerate(chain):
+            try:
+                return await _i2v(image, mdl)
+            except PipelineError as exc:
+                last_exc = exc
+                if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                    raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
+                if is_runway_user_facing(exc):
+                    raise
+                status = getattr(exc, "status", None)
+                if status in (400, 404, 422) and idx < len(chain) - 1:
+                    log.warning("I2V %s failed, try %s: %s", mdl, chain[idx + 1], exc.detail)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise PipelineError("Runway не вернул клип.")
 
     for round_i in range(2):
         try:
             if prompt_image:
-                try:
-                    return await _i2v(prompt_image, i2v_model)
-                except PipelineError as exc:
-                    if is_runway_user_facing(exc) and getattr(exc, "code", "") != "credits":
-                        raise
-                    status = getattr(exc, "status", None)
-                    if status in (400, 404, 422) and i2v_model != "gen4_turbo":
-                        log.warning("I2V %s failed, try gen4_turbo: %s", i2v_model, exc.detail)
-                        return await _i2v(prompt_image, "gen4_turbo")
-                    raise
+                return await _i2v_with_fallback(prompt_image, i2v_model)
             if quality == "fast":
-                still = await _text_to_image_url(session, visual, ratio, dest.with_name(dest.stem + "_still.hint"))
-                return await _i2v(still, "gen4_turbo")
-            if model in RUNWAY_T2V_MODELS:
-                t2v_payload = _clip_payload_base(model, visual, ratio, seconds, seed)
+                still = await _text_to_image_url(
+                    session,
+                    visual,
+                    ratio,
+                    dest.with_name(dest.stem + "_still.hint"),
+                    model=still_model,
+                )
+                return await _i2v_with_fallback(still, "gen4_turbo")
+            if t2v_model in RUNWAY_T2V_MODELS:
+                t2v_payload = runway_video_payload(t2v_model, visual, ratio, requested, seed=seed)
                 try:
                     video_url = await _resume_or_submit(session, "/v1/text_to_video", t2v_payload, dest)
                     return await _download(session, video_url, dest)
@@ -1324,8 +1580,14 @@ async def runway_clip(
                     if status not in (400, 404, 422):
                         raise
                     log.warning("T2V rejected (%s), fallback still+I2V: %s", status, exc.detail)
-            still = await _text_to_image_url(session, visual, ratio, dest.with_name(dest.stem + "_still.hint"))
-            return await _i2v(still, "gen4_turbo")
+            still = await _text_to_image_url(
+                session,
+                visual,
+                ratio,
+                dest.with_name(dest.stem + "_still.hint"),
+                model=still_model,
+            )
+            return await _i2v_with_fallback(still, i2v_model)
         except PipelineError as exc:
             last_fail = exc
             if is_runway_user_facing(exc):
@@ -1755,9 +2017,12 @@ async def build_video(
                         "medium shot, looking into camera, still",
                         camera,
                         motion,
+                        style=style,
+                        photo_lock=photo_lock,
                     ),
                     ratio,
                     work_dir / "bible_still.hint",
+                    model=still_model_for_quality(quality),
                 )
                 await _download(session, still_url, still_png)
                 anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
@@ -1770,9 +2035,15 @@ async def build_video(
                 anchor_image = None
         prompt_image = anchor_image
         tracker.still_done = True
+        still_model = read_runway_model(work_dir / "bible_still.hint")
+        if still_model:
+            script["runway_still_model"] = still_model
+        elif still_png.is_file() and not photo_lock:
+            script["runway_still_model"] = still_model or "gen4_image"
         await report("Первый кадр готов", stage=live.STAGE_STILL)
 
         muxed: list[Path] = []
+        clip_models: list[str] = []
         for i, scene in enumerate(scenes):
             n = i + 1
             mixed_path = work_dir / f"m{i}.mp4"
@@ -1789,6 +2060,7 @@ async def build_video(
                     except PipelineError:
                         prompt_image = anchor_image
                 await report(f"Клип {n} из {total} уже смонтирован", stage=live.STAGE_RUNWAY, scene=n)
+                clip_models.append(read_runway_model(clip_path) or "?")
                 continue
             await report(f"Озвучка ElevenLabs · сцена {n} из {total}", stage=live.STAGE_TTS, scene=n)
             audio = await eleven_tts(
@@ -1805,7 +2077,12 @@ async def build_video(
                 scene=n,
             )
             prompt = compose_runway_prompt(
-                continuity, scene["visual_prompt"], camera, motion
+                continuity,
+                scene["visual_prompt"],
+                camera,
+                motion,
+                style=style,
+                photo_lock=photo_lock,
             )
             if file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
                 log.info("resume clip %s/%s", n, total)
@@ -1850,8 +2127,11 @@ async def build_video(
             )
             muxed.append(mixed)
             tracker.video_done = n
-            save_checkpoint(work_dir, scene_done=n, credits_paused=False)
+            clip_models.append(read_runway_model(clip_path) or "?")
+            save_checkpoint(work_dir, scene_done=n, credits_paused=False, runway_models=clip_models)
             await report(f"Клип {n} из {total} смонтирован", stage=live.STAGE_RUNWAY, scene=n)
+        script["runway_models"] = clip_models
+        save_script(work_dir, script)
         await report("Сборка финального файла ffmpeg…", stage=live.STAGE_MUX)
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)
         if watermark:

@@ -12,10 +12,14 @@ from pipeline import (
     SCRIPT_SYSTEM,
     SCRIPT_TOO_LONG_MSG,
     compose_runway_prompt,
+    compact_runway_models,
+    duration_for_model,
     enforce_speech_budget,
     estimate_speech_sec,
     fallback_split_script,
+    format_runway_usage,
     format_script,
+    i2v_fallback_chain,
     is_runway_credits_fail,
     is_runway_person_moderation,
     is_runway_safety_fail,
@@ -31,8 +35,11 @@ from pipeline import (
     scene_durations,
     script_too_long_for_custom,
     split_text_to_speech_budget,
+    still_model_for_quality,
     target_scene_count,
     text_to_image_payload,
+    video_models_for_quality,
+    visual_look_lock,
     wrap_caption,
 )
 from voices import VOICES, catalog_for, voice_by_index
@@ -292,6 +299,9 @@ def test_presets_and_cost() -> None:
     assert "use_speaker_boost" in vs
     est = estimate_cost(n_scenes=5, clip_sec=10, quality="optimal", text="привет мир", need_still=True)
     assert est["runway"] == 5 * 10 * 12 + 5
+    est_max = estimate_cost(n_scenes=5, clip_sec=10, quality="max", text="привет мир", need_still=True)
+    assert est_max["runway"] == 5 * 8 * 20 + 15
+    assert "max" in __import__("presets", fromlist=["QUALITY"]).QUALITY
     assert est["eleven_chars"] == len("привет мир")
     lock = "red coat rainy street"
     prompt = compose_runway_prompt(lock, "subtle head turn", "slow subtle push-in", "minimal body movement")
@@ -1357,6 +1367,110 @@ def test_upscale_result_uses_video_upscale() -> None:
     assert "extra_brief.strip()[:4000]" in gsrc
 
 
+def test_look_and_runway_models() -> None:
+    from pathlib import Path
+    import inspect
+    import tempfile
+
+    from pipeline import (
+        _runway_submit,
+        read_runway_model,
+        runway_clip,
+        runway_video_payload,
+        write_runway_model,
+    )
+
+    cine = compose_runway_prompt("red coat, rainy street", "slow push-in", style="cinematic")
+    assert "ARRI Alexa Mini" in cine
+    assert "shot on iPhone" not in cine
+    assert visual_look_lock("cinematic").startswith("shot on ARRI")
+    cartoon = compose_runway_prompt("pixel hero, neon stairs", "punch-in", style="cartoon")
+    assert "shot on iPhone" not in cartoon
+    assert "shot on ARRI" not in cartoon
+    assert "3D render" in cartoon
+    phone = compose_runway_prompt("product on table", "hold", style="cinematic", photo_lock=True)
+    assert "iPhone 15 Pro" in phone
+    assert "shot on ARRI" not in phone
+    ad = compose_runway_prompt("bottle on marble", "push", style="ad")
+    assert "iPhone 15 Pro" in ad
+
+    usage = format_runway_usage(
+        {
+            "runway_still_model": "gen4_image",
+            "runway_models": ["gen4.5", "gen4_turbo", "gen4.5"],
+        }
+    )
+    assert "сцена 1 gen4.5" in usage
+    assert "сцена 2 gen4_turbo" in usage
+    assert "дешёвый запас" in usage
+    assert compact_runway_models(["gen4.5", "gen4_turbo"]) == "сцены: gen4.5, gen4_turbo"
+    preview = format_script(
+        {
+            "title": "X",
+            "scenes": [{"narration": "hi", "visual_prompt": "x"}],
+            "runway_still_model": "gemini_image3_pro",
+            "runway_models": ["veo3.1", "veo3.1"],
+        }
+    )
+    assert "gemini_image3_pro" in preview
+    assert "veo3.1" in preview
+
+    gem = text_to_image_payload("still", "720:1280", model="gemini_image3_pro")
+    assert gem["model"] == "gemini_image3_pro"
+    assert gem["ratio"] == "768:1344"
+    assert "contentModeration" not in gem
+    flash = text_to_image_payload("still", "720:1280", model="gemini_image3.1_flash")
+    assert flash["model"] == "gemini_image3.1_flash"
+    gen = text_to_image_payload("still", "720:1280")
+    assert gen["model"] == "gen4_image"
+    assert gen["contentModeration"]["publicFigureThreshold"] == "auto"
+
+    veo = runway_video_payload(
+        "veo3.1", "a quiet kitchen", "720:1280", 10, seed=7, prompt_image="data:x"
+    )
+    assert veo["duration"] == 8
+    assert veo["audio"] is False
+    assert "seed" not in veo
+    assert "contentModeration" not in veo
+    assert veo["promptImage"] == "data:x"
+    fast_veo = runway_video_payload("veo3.1_fast", "a quiet kitchen", "720:1280", 5)
+    assert fast_veo["duration"] == 4
+    assert fast_veo["audio"] is False
+    g45 = runway_video_payload("gen4.5", "a quiet kitchen", "720:1280", 10, seed=7)
+    assert g45["duration"] == 10
+    assert g45["seed"] == 7
+    assert g45["contentModeration"]["publicFigureThreshold"] == "auto"
+    assert duration_for_model("veo3.1_fast", 5) == 4
+    assert duration_for_model("gen4_turbo", 5) == 5
+    assert i2v_fallback_chain("veo3.1") == ["veo3.1", "gen4.5", "gen4_turbo"]
+    assert video_models_for_quality("fast") == ("gen4_turbo", "")
+    assert video_models_for_quality("max") == ("veo3.1", "veo3.1")
+    assert still_model_for_quality("max") == "gemini_image3_pro"
+    assert still_model_for_quality("optimal") == "gen4_image"
+
+    submit_src = inspect.getsource(_runway_submit)
+    assert "return str(task_id), model_used" in submit_src
+    clip_src = inspect.getsource(runway_clip)
+    assert "_i2v_with_fallback" in clip_src
+    assert "is_runway_credits_fail" in clip_src
+    credits_at = clip_src.find("is_runway_credits_fail")
+    next_at = clip_src.find("I2V %s failed, try")
+    assert credits_at != -1 and next_at != -1 and credits_at < next_at
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "compact_runway_models" in bot_src
+    assert "format_runway_usage" in bot_src
+    assert "первый кадр:" in bot_src
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "c0.mp4"
+        dest.write_bytes(b"x" * 20)
+        write_runway_model(dest, "gen4_turbo")
+        assert read_runway_model(dest) == "gen4_turbo"
+        assert dest.with_suffix(".mp4.runway_model").is_file() or dest.with_name(
+            dest.name + ".runway_model"
+        ).is_file() or dest.with_suffix(dest.suffix + ".runway_model").is_file()
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -1399,4 +1513,5 @@ if __name__ == "__main__":
     test_live_status_runway_fields()
     test_edit_timecodes_and_limits()
     test_upscale_result_uses_video_upscale()
+    test_look_and_runway_models()
     print("ok")
