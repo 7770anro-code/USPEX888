@@ -1,5 +1,5 @@
 [Unit]
-Description=VideoBot Успех 888 night_runner (not the Telegram bot)
+Description=DEPRECATED — VideoBot auto pipeline lives in videobot.service, do not enable this unit
 After=network-online.target
 Wants=network-online.target
 

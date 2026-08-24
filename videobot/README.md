@@ -41,28 +41,27 @@ SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной �
 
 В «Ещё возможности»: голос по описанию, Speech-to-Speech, upscale любого файла, Seedance extend.
 
-## Ночной пайплайн «Успех 888»
+## Автоконтур «Успех 888»
 
-Отдельный процесс `night_runner.py` + systemd timer (`videobot-night.timer`). **Не** APScheduler внутри бота.
+Крутится **внутри** `videobot.service` как фоновая задача бота, интервал `NIGHT_INTERVAL_MINUTES` (по умолчанию 90 мин). Отдельный `videobot-night.timer` **не нужен и не включать**.
 
-Цикл: идеи (Grok) → топ-N видео (Runway+ElevenLabs, 9:16) → автопост TikTok/Instagram если включён → утренний отчёт в Telegram.
+Цикл тика: идеи (Grok) → до `NIGHT_BATCH_PER_TICK` видео (по умолчанию 1) → очередь на постинг с да/нет в Telegram. Дневной потолок — `VIDEOS_PER_NIGHT`. Пока лимит не набран, тики продолжаются весь день.
 
 - Синтетика only: без фото людей, без Act Two, без клона голоса.
-- `VIDEOS_PER_NIGHT` (по умолчанию 3) — по одному ролику на аккаунт, разный голос/темп/стиль.
-- State machine в SQLite: `pending → ideas_ready → generating → video_ready → posting → posted | failed` (+ `wait_confirm` / `publish_unknown` / `manual_review`). Путь к mp4 пишется в `video_ready` сразу; рестарт не переснимает аккаунт, если файл уже есть. Stale `generating`/`posting` старше `NIGHT_STALE_MINUTES` снимаются с лока.
-- Зависшие `generating`/`posting` (stale lock) возвращаются в `pending` или `video_ready`.
-- Дедуп идей 21 день (Jaccard) + запрет похожих тем в один день.
-- По умолчанию **утро = да/нет в Telegram** (`/night`, кнопки): идеи и видео сами, реальный пост только после подтверждения владельца. Полный автопост позже: `/night_mode auto` или `NIGHT_REQUIRE_CONFIRM=0` и `NIGHT_AUTOPOST=1`.
-- Один файл не уходит на все 3 аккаунта: разные идеи, хуки, голос, стиль. Denylist реальных людей и опасных тем. Стоп после нескольких moderation/rejection подряд.
-- Кнопка «Да» публикует даже при `NIGHT_AUTOPOST=0`. Автопост ночью без кнопок — только после явной настройки.
-- TikTok: `is_aigc=true` (inbox и direct). Timeout → `PUBLISH_UNKNOWN`: не повторяем POST, сначала статус по publish/container ID. Runway timeout — poll сохранённого task ID. Ретраи только 429/5xx/сеть; OAuth/App Review/формат/модерация → `MANUAL_REVIEW`.
-- Между постами случайная пауза `NIGHT_POST_PAUSE_MIN`…`MAX`. После нескольких moderation подряд — стоп.
+- `VIDEOS_PER_NIGHT` — лимит роликов **за день** (не за тик). Разный голос/темп/стиль на аккаунт, round-robin.
+- State machine в SQLite: `pending → ideas_ready → generating → video_ready → posting → posted | failed` (+ `wait_confirm` / `publish_unknown` / `manual_review`). Файл пишется сразу; следующий тик не переснимает уже готовое. Stale `generating`/`posting` старше `NIGHT_STALE_MINUTES` снимаются с лока.
+- Дедуп идей 21 день (Jaccard, окно 14–30 через `NIGHT_DEDUP_DAYS`) + запрет похожих тем в один день на том же аккаунте.
+- По умолчанию публикация только после да/нет (`/night`, кнопки). Полный автопост позже: `/night_mode auto`.
+- Один файл не уходит на все 3 аккаунта. Denylist реальных людей и опасных тем. Стоп после нескольких moderation/rejection подряд.
+- TikTok: `is_aigc=true`. Timeout → `PUBLISH_UNKNOWN` (resume по publish/container/task ID). Ретраи только 429/5xx/сеть; OAuth/App Review/формат/модерация → `MANUAL_REVIEW`.
+- **Замки:** ручная съёмка и автоконтур в одном процессе сериализует `BUSY` (`asyncio.Lock`). `videobot.lock` (fcntl) оставлен только против второго процесса — CLI `night_runner.py --smoke` или случайно включённый старый timer.
+- `NIGHT_RUNWAY_DAILY_BUDGET=0` — без потолка кредитов; ненулевое значение останавливает тик, когда сумма за день достигнута.
 
 ```bash
 python night_runner.py --smoke --no-telegram
 ```
 
-Деплой и timer — только после отдельного «ок» владельца.
+Деплой `videobot.service` — только после отдельного «ок» владельца. `videobot-night.timer` не ставить.
 
 ## Пока не трогаем
 

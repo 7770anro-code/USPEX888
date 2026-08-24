@@ -104,16 +104,15 @@ sudo systemctl restart videobot.service
 
 Не выполнять `systemctl restart uspex` / `vector`.
 
-## Ночной night_runner (после отдельного «ок»)
+## Автоконтур внутри videobot.service (после отдельного «ок»)
 
-Только `/opt/videobot`. Units: `videobot-night.service` + `videobot-night.timer`.
-Не стартовать, пока владелец не напишет «ок». Первая неделя: `NIGHT_REQUIRE_CONFIRM=1`, `NIGHT_AUTOPOST=0` — публикация только после да/нет в Telegram (`/night`). Полный автопост позже: `/night_mode auto`.
+Генерация idea→video идёт в процессе бота, не отдельным timer. `videobot-night.timer` **не копировать и не enable**.
+
+Первая неделя: `NIGHT_REQUIRE_CONFIRM=1`, `NIGHT_AUTOPOST=0` — публикация только после да/нет в Telegram (`/night`). Интервал по умолчанию 90 мин (`NIGHT_INTERVAL_MINUTES`). Дневной лимит роликов — `VIDEOS_PER_NIGHT`. Чтобы снимать чаще весь день, поднимите лимит в `.env`.
 
 ```bash
-sudo cp /opt/videobot/videobot-night.service /etc/systemd/system/
-sudo cp /opt/videobot/videobot-night.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-# sudo systemctl enable --now videobot-night.timer   # только после «ок»
+# не делать:
+# sudo systemctl enable --now videobot-night.timer
 sudo -u videobot /opt/videobot/venv/bin/python /opt/videobot/night_runner.py --smoke --no-telegram
 ```
 

@@ -78,6 +78,26 @@ def _idx(n: int, key: str, default: str | int) -> str:
     return raw if raw else str(default)
 
 
+def accounts_round_robin(accounts: list[Account], jobs: list[dict], n: int) -> list[Account]:
+    """Следующие n съёмок: меньше готовых роликов за день — раньше в очереди."""
+    from collections import Counter
+    from pathlib import Path
+
+    if n <= 0 or not accounts:
+        return []
+    counts: Counter[str] = Counter()
+    for job in jobs:
+        if Path(str(job.get("video_path") or "")).is_file():
+            counts[str(job.get("account_id") or "")] += 1
+    work = Counter(counts)
+    out: list[Account] = []
+    for _ in range(int(n)):
+        acc = min(accounts, key=lambda a: (work[a.id], a.index))
+        out.append(acc)
+        work[acc.id] += 1
+    return out
+
+
 def load_accounts() -> list[Account]:
     accounts: list[Account] = []
     for i, base in enumerate(_DEFAULTS, start=1):

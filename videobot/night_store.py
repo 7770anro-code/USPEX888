@@ -201,12 +201,29 @@ def get_job(job_id: int) -> dict[str, Any] | None:
 
 
 def accounts_with_video(run_date: str) -> set[str]:
-    """Аккаунты с готовым mp4 за дату — рестарт их не переснимает."""
+    """Аккаунты с готовым mp4 за дату."""
     return {
         str(job.get("account_id") or "")
         for job in jobs_for_date(run_date)
         if job.get("account_id") and Path(str(job.get("video_path") or "")).is_file()
     }
+
+
+def ready_video_count(run_date: str) -> int:
+    return sum(
+        1
+        for job in jobs_for_date(run_date)
+        if Path(str(job.get("video_path") or "")).is_file()
+    )
+
+
+def runway_credits_today(run_date: str) -> int:
+    return sum(int(job.get("runway_credits") or 0) for job in jobs_for_date(run_date))
+
+
+def remaining_daily_slots(run_date: str, *, daily_limit: int | None = None) -> int:
+    limit = int(daily_limit if daily_limit is not None else config.VIDEOS_PER_NIGHT)
+    return max(0, limit - ready_video_count(run_date))
 
 
 def jobs_for_date(run_date: str) -> list[dict[str, Any]]:

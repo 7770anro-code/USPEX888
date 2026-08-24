@@ -458,7 +458,7 @@ def night_confirm_kb(job_ids: list[int]) -> InlineKeyboardMarkup:
 
 async def cmd_night(message: Message, state: FSMContext) -> None:
     if not _is_night_owner(message.chat.id):
-        await message.answer("Эта команда только для владельца ночного пайплайна.")
+        await message.answer("Эта команда только для владельца автоконтура.")
         return
     from night_report import mode_text, status_text
     from night_store import pending_owner_ids
@@ -475,7 +475,7 @@ async def cmd_night(message: Message, state: FSMContext) -> None:
 
 async def cmd_night_mode(message: Message, state: FSMContext) -> None:
     if not _is_night_owner(message.chat.id):
-        await message.answer("Эта команда только для владельца ночного пайплайна.")
+        await message.answer("Эта команда только для владельца автоконтура.")
         return
     from night_report import mode_text
     from night_store import set_publish_mode
@@ -1010,7 +1010,7 @@ async def _run_job(
     if not file_lock.acquire():
         BUSY.release()
         await message.answer(
-            "⏳ Ночной пайплайн уже снимает. Напиши позже.",
+            "⏳ Сейчас уже идёт съёмка. Напиши позже.",
             reply_markup=main_menu(),
         )
         return
@@ -1646,8 +1646,19 @@ async def main() -> None:
     dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
     dp.callback_query.register(on_stale_callback)
+    from night_loop import start_auto_pipeline
+
+    auto_task = start_auto_pipeline(BUSY) if config.NIGHT_BACKGROUND else None
     log.info("VideoBot polling start")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if auto_task is not None:
+            auto_task.cancel()
+            try:
+                await auto_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 [Unit]
-Description=VideoBot night_runner 02:15 Europe/Moscow
+Description=DEPRECATED — do not enable. Auto pipeline now runs inside videobot.service
 
 [Timer]
 OnCalendar=*-*-* 02:15:00

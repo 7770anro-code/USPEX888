@@ -1,5 +1,5 @@
 [Unit]
-Description=VideoBot Telegram (idea to 15-20s video)
+Description=VideoBot Telegram + auto idea/video pipeline
 After=network-online.target
 Wants=network-online.target
 

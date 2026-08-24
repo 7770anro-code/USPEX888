@@ -14,7 +14,7 @@ log = logging.getLogger("videobot.night")
 
 def format_report(payload: dict[str, Any]) -> str:
     lines = [
-        "Успех 888 · утренний отчёт",
+        "Успех 888 · отчёт автоконтура",
         f"Дата: {payload.get('date')} · видео: {payload.get('videos_ok', 0)}/{payload.get('videos_planned', 0)}",
         f"Идей: {payload.get('ideas', 0)} · автопост: {'on' if payload.get('autopost') else 'off'}"
         + (
@@ -102,15 +102,26 @@ def mode_text() -> str:
 
     confirm = require_confirm()
     auto = autopost_enabled()
+    interval = (
+        f"Интервал автоконтура: {config.NIGHT_INTERVAL_MINUTES} мин, "
+        f"за тик {config.NIGHT_BATCH_PER_TICK} ролик(ов), дневной лимит {config.VIDEOS_PER_NIGHT}. "
+        + (
+            f"Бюджет Runway/день: {config.NIGHT_RUNWAY_DAILY_BUDGET}."
+            if config.NIGHT_RUNWAY_DAILY_BUDGET
+            else "Бюджет Runway/день: без потолка (NIGHT_RUNWAY_DAILY_BUDGET=0)."
+        )
+    )
     if confirm or not auto:
         return (
-            "Режим: идеи и видео сами, публикация только после да/нет "
-            "(/night или кнопки утром). Это default первой недели.\n"
+            "Режим: идеи и видео сами весь день, публикация только после да/нет "
+            "(/night или кнопки). Это default первой недели.\n"
+            f"{interval}\n"
             "Полный автопост позже: /night_mode auto "
             "(или NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1)."
         )
     return (
         "Режим: полный автопост без подтверждения. "
+        f"{interval} "
         "Вернуть да/нет: /night_mode confirm."
     )
 
@@ -124,7 +135,7 @@ def status_text() -> str:
         return str(last["report"])[:3900]
     jobs = jobs_for_date(today_msk().isoformat())
     if not jobs:
-        return "Ночной пайплайн ещё не запускался. Отдельный процесс night_runner + systemd timer."
+        return "Автоконтур ещё не запускался. Он крутится внутри videobot.service по NIGHT_INTERVAL_MINUTES."
     return format_report(
         {
             "date": today_msk().isoformat(),

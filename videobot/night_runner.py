@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Успех 888 — отдельный ночной процесс (systemd timer), не внутри Telegram-бота.
+"""Автоконтур idea→video. CLI для smoke; в проде крутится внутри bot.py.
 
-  python night_runner.py              # полный цикл
-  python night_runner.py --smoke      # 1 идея → 1 видео → пост если токены есть
+  python night_runner.py              # один тик
+  python night_runner.py --smoke      # 1 идея → 1 видео, без Telegram
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import aiohttp
 
 import config
 from joblock import JobLock
-from night_accounts import load_accounts
+from night_accounts import accounts_round_robin, load_accounts
 from night_circuit import CircuitOpen, jitter_pause
 from night_ideas import assign_to_accounts, generate_ideas
 from night_post import persist_publish_results, publish_account
@@ -33,7 +33,6 @@ from night_store import (
     POSTING,
     VIDEO_READY,
     WAIT_CONFIRM,
-    accounts_with_video,
     autopost_enabled,
     consecutive_moderation,
     create_job,
@@ -42,8 +41,11 @@ from night_store import (
     lock_job,
     mark_video_ready,
     pending_owner_ids,
+    ready_video_count,
     recover_stale,
+    remaining_daily_slots,
     require_confirm,
+    runway_credits_today,
     save_run,
     update_job,
     worker_id,
@@ -52,10 +54,6 @@ from night_time import today_msk
 from night_video import estimate_job, render_idea
 from pipeline import PipelineError, ensure_ffmpeg
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
 log = logging.getLogger("videobot.night")
 
 
@@ -69,7 +67,7 @@ def _blockers_from_accounts(accounts) -> list[str]:
     lines: list[str] = []
     if require_confirm() or not autopost_enabled():
         lines.append(
-            "Первая неделя: идеи и видео сами, публикация — да/нет утром в Telegram "
+            "Первая неделя: идеи и видео сами весь день, публикация — да/нет в Telegram "
             "(/night или кнопки). Полный автопост позже: /night_mode auto "
             "или NIGHT_REQUIRE_CONFIRM=0 и NIGHT_AUTOPOST=1."
         )
@@ -98,7 +96,7 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
     wid = worker_id()
     lock_job(int(job["id"]), GENERATING, wid)
     day = str(job["run_date"])
-    dest = _outbox(day, account.id) / "final.mp4"
+    dest = _outbox(day, account.id) / f"{job['id']}.mp4"
     work = Path(config.WORK_DIR) / f"night_{day}_{account.id}_{job['id']}"
     try:
         video, script, cost = await render_idea(
@@ -184,7 +182,13 @@ async def _post_job(session: aiohttp.ClientSession, job: dict, account) -> None:
     persist_publish_results(int(job["id"]), job, results)
 
 
-async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
+async def run_night(
+    *,
+    smoke: bool = False,
+    notify: bool = True,
+    busy: asyncio.Lock | None = None,
+    idle_quiet: bool = False,
+) -> dict:
     ensure_ffmpeg()
     recover_stale()
     day = today_msk().isoformat()
@@ -195,23 +199,49 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
             if job.get("status") == VIDEO_READY and Path(str(job.get("video_path") or "")).is_file():
                 update_job(int(job["id"]), status=WAIT_CONFIRM)
     accounts = load_accounts()
-    n_videos = 1 if smoke else int(config.VIDEOS_PER_NIGHT)
+    daily_limit = 1 if smoke else int(config.VIDEOS_PER_NIGHT)
+    remaining = remaining_daily_slots(day, daily_limit=daily_limit)
+    batch = 1 if smoke else min(int(config.NIGHT_BATCH_PER_TICK), remaining)
     n_ideas = 5 if smoke else int(config.NIGHT_IDEAS_PER_NIGHT)
     n_scenes = 4
     run_id = uuid.uuid4().hex[:12]
     owner_blockers = _blockers_from_accounts(accounts)
+    ideas: list = []
+    held_busy = False
+    new_job_ids: list[int] = []
+
+    if remaining <= 0 and not smoke:
+        log.info("автоконтур: дневной лимит %s уже набран, тик пустой", daily_limit)
+        return {"skipped": True, "reason": "daily_quota", "payload": {"videos_ok": ready_video_count(day)}}
+
+    budget = int(config.NIGHT_RUNWAY_DAILY_BUDGET or 0)
+    if budget and runway_credits_today(day) >= budget:
+        log.info("автоконтур: дневной бюджет Runway (%s) исчерпан", budget)
+        return {"skipped": True, "reason": "runway_budget"}
+
+    if busy is not None:
+        if busy.locked():
+            log.info("автоконтур: пропуск тика, идёт ручная съёмка")
+            return {"skipped": True, "reason": "busy"}
+        await busy.acquire()
+        held_busy = True
 
     file_lock = JobLock()
     if not file_lock.acquire():
+        if held_busy and busy is not None:
+            busy.release()
+        log.info("автоконтур: videobot.lock занят другим процессом (CLI/timer)")
+        if idle_quiet:
+            return {"skipped": True, "reason": "file_lock"}
         report = format_report(
             {
                 "date": day,
                 "videos_ok": 0,
-                "videos_planned": n_videos,
+                "videos_planned": batch,
                 "ideas": 0,
                 "autopost": auto,
                 "jobs": [],
-                "owner_blockers": ["videobot.lock занят живым ботом или другим night_runner"],
+                "owner_blockers": ["videobot.lock занят другим процессом (CLI smoke или старый timer)"],
             }
         )
         save_run(run_id, day, "skipped_lock", report)
@@ -220,7 +250,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
         print(report, end="")
         return {"text": report, "skipped": True}
 
-    ideas: list = []
+    produced = 0
     try:
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -228,16 +258,20 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
             for idea in ideas:
                 insert_idea(idea, day)
             save_run(run_id, day, IDEAS_READY, f"ideas_ready {len(ideas)}")
-            already = accounts_with_video(day)
-            shoot = [a for a in accounts if a.id not in already][:n_videos]
+            shoot = accounts_round_robin(accounts, jobs_for_date(day), batch)
             assigned = assign_to_accounts(
-                ideas, shoot, limit=n_videos, existing_jobs=jobs_for_date(day)
+                ideas, shoot, limit=batch, existing_jobs=jobs_for_date(day)
             )
             if smoke:
                 assigned = assigned[:1]
             jobs = []
             for acc, idea in assigned:
-                estimate_job(idea, acc, n_scenes=n_scenes)
+                cost = estimate_job(idea, acc, n_scenes=n_scenes)
+                if budget and runway_credits_today(day) + int(cost.get("runway") or 0) > budget:
+                    owner_blockers.append(
+                        f"Остановка: NIGHT_RUNWAY_DAILY_BUDGET={budget} (сегодня уже {runway_credits_today(day)})."
+                    )
+                    break
                 jid = create_job(
                     {
                         "run_date": day,
@@ -251,12 +285,13 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                         "status": IDEAS_READY,
                     }
                 )
+                new_job_ids.append(jid)
                 jobs.append(({"id": jid, "run_date": day, **idea, "account_id": acc.id}, acc, idea))
 
-            mod_hits = 0
             for job, acc, idea in jobs:
                 try:
                     await _render_job(job, acc, idea, n_scenes=n_scenes)
+                    produced += 1
                 except Exception as exc:
                     log.warning("render stop/continue: %s", type(exc).__name__)
                     if isinstance(exc, PipelineError) and getattr(exc, "code", "") in (
@@ -275,6 +310,7 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                         getattr(exc, "code", "") == "credits"
                         or "кредит" in (exc.user_message or "").lower()
                     ):
+                        owner_blockers.append("Runway вернул нехватку кредитов — тик остановлен.")
                         break
                 pause = 3 if smoke else jitter_pause(8, 25)
                 if pause:
@@ -286,6 +322,8 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                 first_post = True
                 for row in posted_jobs:
                     if row.get("status") not in (VIDEO_READY, WAIT_CONFIRM):
+                        continue
+                    if int(row["id"]) not in new_job_ids:
                         continue
                     if consecutive_moderation(day) >= config.NIGHT_MODERATION_STOP:
                         owner_blockers.append(
@@ -301,9 +339,9 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
                         )
                     first_post = False
                     await _post_job(session, row, acc)
-            else:
+            elif produced:
                 owner_blockers.append(
-                    "Публикация ждёт да/нет утром в Telegram (кнопки или /night). "
+                    "Публикация ждёт да/нет в Telegram (кнопки или /night). "
                     "Полный автопост позже: /night_mode auto."
                 )
     except Exception as exc:
@@ -311,12 +349,14 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
         owner_blockers.append(f"прогон оборвался: {type(exc).__name__}")
     finally:
         file_lock.release()
+        if held_busy and busy is not None:
+            busy.release()
 
     rows = jobs_for_date(day)
     payload = {
         "date": day,
         "videos_ok": sum(1 for j in rows if Path(str(j.get("video_path") or "")).is_file()),
-        "videos_planned": n_videos,
+        "videos_planned": daily_limit,
         "ideas": len(ideas) if "ideas" in locals() else 0,
         "autopost": auto,
         "require_confirm": confirm,
@@ -343,15 +383,23 @@ async def run_night(*, smoke: bool = False, notify: bool = True) -> dict:
     out = Path(config.NIGHT_OUTBOX) / day / "_report.txt"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text, encoding="utf-8")
-    if notify:
-        wait_ids = pending_owner_ids(day)
+    should_notify = notify and (produced > 0 or (not idle_quiet and not smoke))
+    if should_notify:
+        wait_ids = [jid for jid in pending_owner_ids(day) if jid in new_job_ids] or pending_owner_ids(day)
         await send_telegram(text, reply_markup=confirm_markup(wait_ids) if wait_ids else None)
-    print(text, end="")
-    return {"text": text, "payload": payload}
+    if not idle_quiet:
+        print(text, end="")
+    else:
+        log.info("автоконтур тик: produced=%s remaining_after=%s", produced, remaining_daily_slots(day, daily_limit=daily_limit))
+    return {"text": text, "payload": payload, "produced": produced}
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Успех 888 night_runner")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    parser = argparse.ArgumentParser(description="Успех 888 auto pipeline (один тик)")
     parser.add_argument("--smoke", action="store_true", help="1 идея, 1 видео, короткие паузы")
     parser.add_argument("--no-telegram", action="store_true")
     args = parser.parse_args(argv)

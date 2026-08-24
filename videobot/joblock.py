@@ -1,4 +1,9 @@
-"""Межпроцессный замок: Telegram-бот и night_runner не снимают одновременно."""
+"""Межпроцессный fcntl-замок.
+
+Ручная съёмка в боте и автоконтур живут в одном процессе videobot.service —
+их сериализует asyncio.Lock `BUSY`. Этот файл нужен только против второго
+процесса: CLI `night_runner.py --smoke` или случайно включённый старый timer.
+"""
 
 from __future__ import annotations
 

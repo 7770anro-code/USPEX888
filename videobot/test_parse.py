@@ -519,7 +519,9 @@ def test_night_policy_defaults() -> None:
         VIDEO_READY,
         consecutive_moderation,
         create_job,
+        ready_video_count,
         recover_stale,
+        remaining_daily_slots,
         require_confirm,
         set_publish_mode,
         update_job,
@@ -627,19 +629,41 @@ def test_night_policy_defaults() -> None:
         assert n >= 1
         update_job(jid, status=MANUAL_REVIEW, last_error="moderation")
         assert consecutive_moderation(day) >= 1
+        assert ready_video_count(day) >= 1
+        assert remaining_daily_slots(day, daily_limit=3) <= 2
     finally:
         config.DATA_DIR = old
         config.NIGHT_OUTBOX = old_out
         store.reset_for_tests()
         shutil.rmtree(tmp, ignore_errors=True)
 
-    from bot import cmd_night_mode, night_confirm_kb
+    from night_accounts import accounts_round_robin
+    from types import SimpleNamespace
+
+    accs = [
+        SimpleNamespace(id="motiv", index=1),
+        SimpleNamespace(id="absurd", index=2),
+        SimpleNamespace(id="brand", index=3),
+    ]
+    order = [a.id for a in accounts_round_robin(accs, [], 4)]
+    assert order == ["motiv", "absurd", "brand", "motiv"]
+
+    from bot import cmd_night_mode, main, night_confirm_kb
+    from night_loop import auto_pipeline_loop
+    from night_runner import _render_job, run_night
 
     kb = night_confirm_kb([11, 12])
     data = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert "night:ok:11" in data
     assert "night:okall" in data
     assert "night_mode" in inspect.getsource(cmd_night_mode)
+    assert "start_auto_pipeline" in inspect.getsource(main)
+    assert "NIGHT_INTERVAL_MINUTES" in inspect.getsource(auto_pipeline_loop)
+    assert "busy" in inspect.getsource(run_night)
+    assert "{job['id']}.mp4" in inspect.getsource(_render_job)
+    assert 15 <= config.NIGHT_INTERVAL_MINUTES <= 24 * 60
+    assert config.NIGHT_BATCH_PER_TICK >= 1
+    assert 1 <= config.VIDEOS_PER_NIGHT <= 48
 
 
 def test_upscale_result_uses_video_upscale() -> None:
