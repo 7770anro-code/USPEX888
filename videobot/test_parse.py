@@ -213,6 +213,8 @@ def test_runway_credits_message() -> None:
     assert err.code == "credits"
     assert err.user_message == RUNWAY_CREDITS_MSG
     assert "закончились кредиты" in err.user_message
+    assert "Прогресс сохранён" in err.user_message
+    assert "Продолжить съёмку" in err.user_message
     assert is_runway_user_facing(err)
     generic = PipelineError(
         "🎥 Не получился клип 1 из 6. Я остановился, чтобы не склеить кривой ролик. "
@@ -804,6 +806,97 @@ def test_runway_model_router_optional() -> None:
     assert "_runway_submit" in resume_src
 
 
+def test_credits_resume_keeps_artifacts() -> None:
+    import inspect
+    import tempfile
+    from pathlib import Path
+
+    from pipeline import eleven_tts, runway_clip
+    from resume_job import (
+        format_resume_progress,
+        load_script,
+        mark_credits_pause,
+        next_scene_to_render,
+        resume_progress,
+        resume_work_dir,
+        run_kwargs_from_checkpoint,
+        save_checkpoint,
+        save_script,
+        script_is_resumable,
+        wipe_resume,
+    )
+
+    tts_src = inspect.getsource(eleven_tts)
+    assert "skip existing" in tts_src
+    clip_src = inspect.getsource(runway_clip)
+    assert "T2V rejected" in clip_src
+    assert 'getattr(exc, "code", "") == "credits"' in clip_src
+    submit_src = inspect.getsource(__import__("pipeline", fromlist=["_resume_or_submit"])._resume_or_submit)
+    assert "side.unlink" in submit_src
+    build_src = inspect.getsource(__import__("pipeline", fromlist=["build_video"]).build_video)
+    assert "load_script" in build_src
+    assert "resume muxed" in build_src
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "resume:go" in bot_src
+    assert "credits_pause_kb" in bot_src
+    assert "resume_work_dir" in bot_src
+
+    tmp = tempfile.mkdtemp()
+    work = Path(tmp)
+    script = {
+        "title": "Тест",
+        "plot": "лестница микро",
+        "scenes": [
+            {"narration": "один два три четыре пять шесть семь восемь девять десять", "visual_prompt": "kitchen still"},
+            {"narration": "ещё фраза для второй сцены нужна длиннее", "visual_prompt": "street still"},
+            {"narration": "третья сцена тоже с достаточным текстом здесь", "visual_prompt": "window still"},
+            {"narration": "четвёртая сцена завершает ролик призывом подписаться", "visual_prompt": "door still"},
+        ],
+    }
+    assert script_is_resumable(script)
+    save_script(work, script)
+    assert load_script(work) is not None
+    (work / "n0.mp3").write_bytes(b"x" * 500)
+    (work / "n1.mp3").write_bytes(b"x" * 500)
+    (work / "n2.mp3").write_bytes(b"x" * 500)
+    (work / "n3.mp3").write_bytes(b"x" * 500)
+    (work / "c0.mp4").write_bytes(b"x" * 20_000)
+    (work / "c1.mp4").write_bytes(b"x" * 20_000)
+    (work / "c2.mp4").write_bytes(b"x" * 20_000)
+    (work / "m0.mp4").write_bytes(b"x" * 20_000)
+    (work / "m1.mp4").write_bytes(b"x" * 20_000)
+    (work / "m2.mp4").write_bytes(b"x" * 20_000)
+    (work / "bible_still.png").write_bytes(b"x" * 2000)
+    mark_credits_pause(
+        work,
+        run={
+            "idea": "лестница микро",
+            "n_scenes": 4,
+            "quality": "optimal",
+            "voice_name": "Сара",
+        },
+    )
+    prog = resume_progress(work, 4)
+    assert prog["has_script"] is True
+    assert prog["has_still"] is True
+    assert prog["tts"] == 4
+    assert prog["clips"] == 3
+    assert prog["muxed"] == 3
+    assert next_scene_to_render(work, 4) == 3
+    text = format_resume_progress(work, 4)
+    assert "4/4" in text
+    assert "3/4" in text
+    kw = run_kwargs_from_checkpoint(work)
+    assert kw is not None
+    assert kw["idea"] == "лестница микро"
+    assert resume_work_dir(7).name == "7_resume"
+    wipe_resume(7)
+
+    import shutil
+
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_night_policy_defaults() -> None:
     import inspect
     import shutil
@@ -1300,6 +1393,7 @@ if __name__ == "__main__":
     test_watermark_ffmpeg_overlay()
     test_clone_posts_voices_add()
     test_runway_model_router_optional()
+    test_credits_resume_keeps_artifacts()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()

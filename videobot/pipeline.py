@@ -117,7 +117,9 @@ RUNWAY_SAFETY_MSG = (
     "Измени текст или фото и попробуй ещё раз."
 )
 RUNWAY_CREDITS_MSG = (
-    "На Runway закончились кредиты, пополните баланс и попробуйте снова"
+    "На Runway закончились кредиты, пополните баланс и попробуйте снова. "
+    "Прогресс сохранён: сценарий, озвучка и уже снятые сцены на месте. "
+    "После пополнения нажмите «Продолжить съёмку» — Grok и ElevenLabs заново не спишем."
 )
 
 _PERSON_MOD_RE = re.compile(
@@ -780,6 +782,9 @@ async def eleven_tts(
     voice_id: str | None = None,
     voice_settings: dict[str, Any] | None = None,
 ) -> Path:
+    if dest.is_file() and dest.stat().st_size >= 200:
+        log.info("ElevenLabs skip existing %s bytes=%s", dest.name, dest.stat().st_size)
+        return dest
     if not config.ELEVENLABS_API_KEY:
         raise PipelineError("Голос сейчас недоступен. Попробуй ещё раз чуть позже.")
     voice_id = voice_id or config.ELEVENLABS_VOICE_ID
@@ -1071,7 +1076,16 @@ async def _resume_or_submit(
         if tid:
             log.info("Runway resume poll task_id=%s file=%s", tid, dest.name)
             _remember_runway_task(tid, path, used_image=used_image)
-            return await _runway_poll(session, tid, used_image=used_image)
+            try:
+                return await _runway_poll(session, tid, used_image=used_image)
+            except PipelineError as exc:
+                timeout = "слишком долго" in (exc.user_message or "").lower()
+                if not timeout:
+                    try:
+                        side.unlink()
+                    except OSError:
+                        pass
+                raise
     tid = await _runway_submit(session, path, payload, used_image=used_image)
     try:
         side.write_text(tid, encoding="utf-8")
@@ -1302,7 +1316,9 @@ async def runway_clip(
                     video_url = await _resume_or_submit(session, "/v1/text_to_video", t2v_payload, dest)
                     return await _download(session, video_url, dest)
                 except PipelineError as exc:
-                    if is_runway_user_facing(exc) and getattr(exc, "code", "") != "credits":
+                    if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                        raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
+                    if is_runway_user_facing(exc):
                         raise
                     status = getattr(exc, "status", None)
                     if status not in (400, 404, 422):
@@ -1641,6 +1657,15 @@ async def build_video(
         text = live.format_status(snap) if snap else tracker.render(label)
         await _notify(progress, text)
 
+    from resume_job import (
+        MP4_MIN_BYTES,
+        file_ready,
+        load_checkpoint,
+        load_script,
+        save_checkpoint,
+        save_script,
+    )
+
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         await report("Пишу сценарий…", stage=live.STAGE_SCRIPT)
@@ -1650,40 +1675,49 @@ async def build_video(
             isinstance(reference_image, str) and reference_image.startswith("data:")
         )
         packed: dict[str, Any] | None = None
-        if (
-            not user_script
-            and not photo_lock
-            and not (hook or "").strip()
-            and is_short_topic(idea)
-        ):
-            from night_ideas import expand_topic_to_idea, script_brief_from_idea
+        script = load_script(work_dir)
+        resumed = script is not None
+        if resumed:
+            log.info("resume script.json scenes=%s dir=%s", len(script["scenes"]), work_dir)
+            await report("Сценарий уже есть — не пишу заново", stage=live.STAGE_SCRIPT)
+        else:
+            if (
+                not user_script
+                and not photo_lock
+                and not (hook or "").strip()
+                and is_short_topic(idea)
+            ):
+                from night_ideas import expand_topic_to_idea, script_brief_from_idea
 
-            await report("Разворачиваю тему в идею…", stage=live.STAGE_SCRIPT)
-            packed = await expand_topic_to_idea(session, idea)
-            hook = str(packed.get("hook") or packed.get("title") or "").strip()
-            extra_brief = script_brief_from_idea(packed, extra=extra_brief)
-            idea = str(packed.get("plot") or packed.get("title") or idea)
-            planned = max(planned, 4)
-        script = await grok_script(
-            session,
-            idea,
-            style=style,
-            n_scenes=planned,
-            user_script=user_script,
-            extra_brief=extra_brief,
-            photo_lock=photo_lock,
-            hook=hook,
-        )
-        script = enforce_speech_budget(script, user_script=user_script)
-        if packed:
-            if packed.get("title"):
-                script["title"] = packed["title"]
-            script["hook"] = hook
-            if packed.get("caption"):
-                script["caption"] = packed["caption"]
-        script["plot"] = idea
-        if hook:
-            script["hook"] = hook
+                await report("Разворачиваю тему в идею…", stage=live.STAGE_SCRIPT)
+                packed = await expand_topic_to_idea(session, idea)
+                hook = str(packed.get("hook") or packed.get("title") or "").strip()
+                extra_brief = script_brief_from_idea(packed, extra=extra_brief)
+                idea = str(packed.get("plot") or packed.get("title") or idea)
+                planned = max(planned, 4)
+            script = await grok_script(
+                session,
+                idea,
+                style=style,
+                n_scenes=planned,
+                user_script=user_script,
+                extra_brief=extra_brief,
+                photo_lock=photo_lock,
+                hook=hook,
+            )
+            script = enforce_speech_budget(script, user_script=user_script)
+            if packed:
+                if packed.get("title"):
+                    script["title"] = packed["title"]
+                script["hook"] = hook
+                if packed.get("caption"):
+                    script["caption"] = packed["caption"]
+            script["plot"] = idea
+            if hook:
+                script["hook"] = hook
+            script["ratio"] = ratio
+            script["style"] = style
+            save_script(work_dir, script)
         scenes = script["scenes"]
         continuity = script.get("continuity") or ""
         script["ratio"] = ratio
@@ -1694,13 +1728,23 @@ async def build_video(
         tracker.script_done = True
         await report("Сценарий готов", stage=live.STAGE_SCRIPT)
 
-        job_seed = random.randint(0, 2_147_483_647)
+        ckpt = load_checkpoint(work_dir) or {}
+        try:
+            job_seed = int(ckpt.get("job_seed"))
+        except (TypeError, ValueError):
+            job_seed = random.randint(0, 2_147_483_647)
+        save_checkpoint(work_dir, job_seed=job_seed, n_scenes=total, credits_paused=False)
+        still_png = work_dir / "bible_still.png"
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
             await report("Готовлю фото как первый кадр…", stage=live.STAGE_STILL)
             anchor_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
         elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
             anchor_image = reference_image
+        elif file_ready(still_png, min_bytes=1000):
+            log.info("resume still %s", still_png.name)
+            await report("Первый кадр уже есть — Runway не дергаю", stage=live.STAGE_STILL)
+            anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
         else:
             await report("Общий первый кадр в Runway…", stage=live.STAGE_STILL)
             try:
@@ -1715,9 +1759,8 @@ async def build_video(
                     ratio,
                     work_dir / "bible_still.hint",
                 )
-                still_path = work_dir / "bible_still.png"
-                await _download(session, still_url, still_path)
-                anchor_image = await file_to_data_uri(still_path, work_dir / "bible_ref.jpg")
+                await _download(session, still_url, still_png)
+                anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
             except PipelineError as exc:
                 if is_runway_user_facing(exc):
                     if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
@@ -1732,11 +1775,26 @@ async def build_video(
         muxed: list[Path] = []
         for i, scene in enumerate(scenes):
             n = i + 1
+            mixed_path = work_dir / f"m{i}.mp4"
+            clip_path = work_dir / f"c{i}.mp4"
+            audio_path = work_dir / f"n{i}.mp3"
+            if file_ready(mixed_path, min_bytes=MP4_MIN_BYTES):
+                log.info("resume muxed scene %s/%s", n, total)
+                muxed.append(mixed_path)
+                tracker.tts_done = max(tracker.tts_done, n)
+                tracker.video_done = n
+                if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
+                    try:
+                        prompt_image = await last_frame_data_uri(clip_path, work_dir / f"tail{i}.jpg")
+                    except PipelineError:
+                        prompt_image = anchor_image
+                await report(f"Клип {n} из {total} уже смонтирован", stage=live.STAGE_RUNWAY, scene=n)
+                continue
             await report(f"Озвучка ElevenLabs · сцена {n} из {total}", stage=live.STAGE_TTS, scene=n)
             audio = await eleven_tts(
                 session,
                 scene["narration"],
-                work_dir / f"n{i}.mp3",
+                audio_path,
                 voice_id=voice_id,
                 voice_settings=voice_settings,
             )
@@ -1749,28 +1807,32 @@ async def build_video(
             prompt = compose_runway_prompt(
                 continuity, scene["visual_prompt"], camera, motion
             )
-            audio_sec = await media_duration(audio)
-            clip_sec = pick_clip_duration(audio_sec or 10.0)
-            await report(
-                f"Сцена {n} из {total} рендерится в Runway",
-                stage=live.STAGE_RUNWAY,
-                scene=n,
-            )
-            try:
-                clip = await runway_clip(
-                    session,
-                    prompt,
-                    clip_sec,
-                    work_dir / f"c{i}.mp4",
-                    ratio=ratio,
-                    prompt_image=prompt_image,
-                    clip_index=n,
-                    clip_total=total,
-                    seed=job_seed,
-                    quality=quality,
+            if file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
+                log.info("resume clip %s/%s", n, total)
+                clip = clip_path
+            else:
+                audio_sec = await media_duration(audio)
+                clip_sec = pick_clip_duration(audio_sec or 10.0)
+                await report(
+                    f"Сцена {n} из {total} рендерится в Runway",
+                    stage=live.STAGE_RUNWAY,
+                    scene=n,
                 )
-            except PipelineError:
-                raise
+                try:
+                    clip = await runway_clip(
+                        session,
+                        prompt,
+                        clip_sec,
+                        clip_path,
+                        ratio=ratio,
+                        prompt_image=prompt_image,
+                        clip_index=n,
+                        clip_total=total,
+                        seed=job_seed,
+                        quality=quality,
+                    )
+                except PipelineError:
+                    raise
             # Клип 1: якорь (фото или still). Клипы 2+: last frame, иначе снова якорь.
             if prompt_image and n < total:
                 try:
@@ -1781,13 +1843,14 @@ async def build_video(
             mixed = await mux_scene(
                 clip,
                 audio,
-                work_dir / f"m{i}.mp4",
+                mixed_path,
                 caption=scene["narration"],
                 width=width,
                 height=height,
             )
             muxed.append(mixed)
             tracker.video_done = n
+            save_checkpoint(work_dir, scene_done=n, credits_paused=False)
             await report(f"Клип {n} из {total} смонтирован", stage=live.STAGE_RUNWAY, scene=n)
         await report("Сборка финального файла ffmpeg…", stage=live.STAGE_MUX)
         out = await concat_mp4(muxed, work_dir / "final.mp4", width=width, height=height)

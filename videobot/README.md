@@ -12,6 +12,7 @@
    - Вертикаль `720:1280`. Клип 5 или 10 сек.
    - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`).
    - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
+   - Нехватка кредитов: пауза в `{WORK_DIR}/{chat_id}_resume` (сценарий, озвучка, готовые клипы). Кнопка **«Продолжить съёмку»** — не пересобирает Grok/ElevenLabs. «Обновить статус» только GET task_id, кредиты не тратит.
    - Опционально Model Router: `RUNWAY_USE_MODEL_ROUTER=1` + `RUNWAY_ROUTER_CONFIG_ID` (slug с [dev.runwayml.com/model-routers](https://dev.runwayml.com/model-routers)). Тогда `POST /v1/generate/video` с `configId` вместо модели; polling тот же `GET /v1/tasks/{id}` + sidecar `.runway_id`. По умолчанию флаг выкл.
 4. **ffmpeg** — `atempo`, склейка 9:16, субтитры, опциональный водяной знак (текст/лого, вкл/выкл).
 5. Перед запуском — оценка кредитов Runway + символы ElevenLabs, кнопки **Создать / Отмена** (и «Изменить»).

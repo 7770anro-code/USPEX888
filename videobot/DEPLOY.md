@@ -24,6 +24,8 @@ VIDEOBOT_TELEGRAM_TOKEN=...
 
 Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. По умолчанию прямой `gen4.5` / `gen4_turbo`.
 
+Нехватка кредитов Runway: ручная съёмка паузится в `/tmp/videobot/{chat_id}_resume` (или `WORK_DIR`). Кнопка «Продолжить съёмку» доснимает с места остановки. «Обновить статус» только GET, без новых задач.
+
 Клон голоса: `POST /v1/voices/add` требует план ElevenLabs с Instant Voice Clone. На тарифе без IVC API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning` — это не баг ключа TTS.
 
 ## Команды по SSH (один раз, после «ок»)

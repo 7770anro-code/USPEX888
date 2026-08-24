@@ -30,11 +30,13 @@ from aiogram.types import (
 import config
 from pipeline import (
     PipelineError,
+    RUNWAY_CREDITS_MSG,
     build_video,
     ensure_ffmpeg,
     fetch_runway_task,
     file_to_data_uri,
     format_script,
+    is_runway_credits_fail,
     script_too_long_for_custom,
     target_scene_count,
 )
@@ -96,6 +98,16 @@ from store import (
     set_watermark,
 )
 from voices import catalog_for, voice_by_index, voice_label
+from resume_job import (
+    credits_paused,
+    format_resume_progress,
+    load_checkpoint,
+    mark_credits_pause,
+    resume_work_dir,
+    run_kwargs_from_checkpoint,
+    save_checkpoint,
+    wipe_resume,
+)
 from wave2 import (
     CLONE_CONSENT_MSG,
     act_two_payload,
@@ -333,12 +345,85 @@ async def on_live_refresh(query: CallbackQuery) -> None:
                 pass
             return
     text, alive = await compose_live_text(key)
+    paused = False
     if query.message:
+        paused = credits_paused(resume_work_dir(query.message.chat.id))
+    if paused and not alive and query.message:
+        try:
+            await query.message.edit_text(
+                credits_pause_text(query.message.chat.id),
+                reply_markup=credits_pause_kb(key),
+            )
+        except Exception:
+            await query.message.answer(
+                credits_pause_text(query.message.chat.id),
+                reply_markup=credits_pause_kb(key),
+            )
+    elif query.message:
         await edit_live_message(query.message, key, text, alive=alive)
     try:
         await query.answer("Обновил" if get_job(key) else "Съёмки нет")
     except Exception:
         pass
+
+
+async def on_resume_callback(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    action = (query.data or "resume:go").split(":", 1)[-1]
+    work = resume_work_dir(msg.chat.id)
+    if action == "fresh":
+        pending = (load_checkpoint(work) or {}).get("pending_new")
+        wipe_resume(msg.chat.id)
+        await state.clear()
+        if isinstance(pending, dict) and str(pending.get("idea") or "").strip():
+            await msg.answer("Старую съёмку убрал. Снимаю новую тему с нуля.")
+            settings = pending.get("voice_settings")
+            revisions = pending.get("revisions")
+            await _run_job(
+                msg,
+                idea=str(pending.get("idea") or ""),
+                user_script=bool(pending.get("user_script")),
+                voice_id=str(pending.get("voice_id") or "") or None,
+                photo_file_id=str(pending.get("photo_file_id") or "") or None,
+                bot=msg.bot,
+                voice_name=str(pending.get("voice_name") or "Сара"),
+                consent_verified=bool(pending.get("consent_verified")),
+                n_scenes=int(pending.get("n_scenes") or 5),
+                extra_brief=str(pending.get("extra_brief") or ""),
+                voice_settings=settings if isinstance(settings, dict) else None,
+                camera=str(pending.get("camera") or ""),
+                motion=str(pending.get("motion") or ""),
+                quality=str(pending.get("quality") or "optimal"),
+                style=str(pending.get("style") or "cinematic"),
+                watermark=bool(pending.get("watermark")),
+                hook=str(pending.get("hook") or ""),
+                revisions=revisions if isinstance(revisions, list) else None,
+                preset_brief=str(pending.get("preset_brief") or ""),
+                kind=str(pending.get("kind") or "motivational"),
+                wipe=True,
+            )
+            return
+        await msg.answer(
+            "Старую съёмку убрал. Нажми «Видео за 1 клик», если снимаем новую тему.",
+            reply_markup=main_menu(),
+        )
+        return
+    kwargs = run_kwargs_from_checkpoint(work)
+    if not kwargs:
+        await msg.answer(
+            "Нет сохранённой съёмки, которую можно продолжить. Нажми /start.",
+            reply_markup=main_menu(),
+        )
+        return
+    await state.clear()
+    await msg.answer("Продолжаю с места остановки — сценарий и озвучку не пересобираю.")
+    await _run_job(msg, bot=msg.bot, wipe=False, **kwargs)
 
 
 def presets_kb() -> InlineKeyboardMarkup:
@@ -443,6 +528,31 @@ def confirm_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✏️ Изменить", callback_data="job:edit")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="job:no")],
         ]
+    )
+
+
+def credits_pause_kb(job_key: str = "") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="▶ Продолжить съёмку", callback_data="resume:go")],
+        [InlineKeyboardButton(text="🗑 Начать заново", callback_data="resume:fresh")],
+    ]
+    if job_key:
+        rows.insert(
+            1,
+            [InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"live:{job_key}")],
+        )
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def credits_pause_text(chat_id: int, *, headline: str = "") -> str:
+    work = resume_work_dir(chat_id)
+    head = (headline or RUNWAY_CREDITS_MSG).strip()
+    return (
+        f"{head}\n\n"
+        f"{format_resume_progress(work)}\n\n"
+        "Прогресс на диске. После пополнения баланса нажмите «Продолжить съёмку» — "
+        "сценарий и озвучку заново не спишем, доснимем с места остановки."
     )
 
 
@@ -984,6 +1094,12 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "menu:quick":
         await state.clear()
+        if credits_paused(resume_work_dir(msg.chat.id)):
+            await msg.answer(
+                credits_pause_text(msg.chat.id),
+                reply_markup=credits_pause_kb(job_key_manual(msg.chat.id)),
+            )
+            return
         job = await _new_job("quick", msg.chat.id)
         await _save_job(state, job)
         await state.set_state(Flow.quick_idea)
@@ -995,11 +1111,23 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "menu:preset":
         await state.clear()
+        if credits_paused(resume_work_dir(msg.chat.id)):
+            await msg.answer(
+                credits_pause_text(msg.chat.id),
+                reply_markup=credits_pause_kb(job_key_manual(msg.chat.id)),
+            )
+            return
         await state.set_state(Flow.preset_topic)
         await msg.answer("Выбери пресет — ты пишешь только тему, остальное уже настроено:", reply_markup=presets_kb())
         return
     if data == "menu:custom":
         await state.clear()
+        if credits_paused(resume_work_dir(msg.chat.id)):
+            await msg.answer(
+                credits_pause_text(msg.chat.id),
+                reply_markup=credits_pause_kb(job_key_manual(msg.chat.id)),
+            )
+            return
         job = await _new_job("custom", msg.chat.id)
         await _save_job(state, job)
         await state.set_state(Flow.custom_script)
@@ -1346,8 +1474,7 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
     voice = voice_by_index(int(job.get("voice_idx") or 1), extra)
     if job.get("voice_id"):
         voice = {"id": str(job["voice_id"]), "name": str(job.get("voice_name") or voice["name"])}
-    await _run_job(
-        msg,
+    run_kw = dict(
         idea=str(job["idea"]),
         user_script=bool(job.get("user_script")),
         voice_id=voice["id"],
@@ -1364,6 +1491,21 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
         style=str(job.get("style") or "cinematic"),
         watermark=bool(job.get("watermark")),
     )
+    if credits_paused(resume_work_dir(msg.chat.id)):
+        save_checkpoint(
+            resume_work_dir(msg.chat.id),
+            pending_new={
+                k: v
+                for k, v in run_kw.items()
+                if k != "bot"
+            },
+        )
+        await msg.answer(
+            credits_pause_text(msg.chat.id),
+            reply_markup=credits_pause_kb(job_key_manual(msg.chat.id)),
+        )
+        return
+    await _run_job(msg, **run_kw)
 
 
 async def _download_photo(bot: Bot, file_id: str, dest: Path) -> Path:
@@ -1430,6 +1572,7 @@ async def _run_job(
     revisions: list[str] | None = None,
     preset_brief: str = "",
     kind: str = "motivational",
+    wipe: bool = False,
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -1451,8 +1594,36 @@ async def _run_job(
         )
         return
     ok = False
-    work = Path(config.WORK_DIR) / f"{message.chat.id}_{int(time.time())}"
+    work = resume_work_dir(message.chat.id)
+    paused = credits_paused(work)
+    if wipe or not paused:
+        wipe_resume(message.chat.id)
+        work = resume_work_dir(message.chat.id)
     job_key = job_key_manual(message.chat.id)
+    save_checkpoint(
+        work,
+        credits_paused=False,
+        run={
+            "idea": idea,
+            "user_script": bool(user_script),
+            "voice_id": voice_id or "",
+            "photo_file_id": photo_file_id or "",
+            "voice_name": voice_name,
+            "consent_verified": bool(consent_verified),
+            "n_scenes": int(n_scenes or 5),
+            "extra_brief": extra_brief or "",
+            "voice_settings": dict(voice_settings or {}) or None,
+            "camera": camera,
+            "motion": motion,
+            "quality": quality,
+            "style": style,
+            "watermark": bool(watermark),
+            "hook": hook or "",
+            "revisions": list(revisions or []),
+            "preset_brief": preset_brief or "",
+            "kind": kind or "motivational",
+        },
+    )
     try:
         start_job(job_key, chat_id=message.chat.id, title="", scene_total=n_scenes)
         status = await message.answer(
@@ -1471,7 +1642,8 @@ async def _run_job(
             if photo_file_id and consent_verified:
                 photo_path = work / "user_photo.jpg"
                 work.mkdir(parents=True, exist_ok=True)
-                await _download_photo(bot, photo_file_id, photo_path)
+                if not photo_path.is_file():
+                    await _download_photo(bot, photo_file_id, photo_path)
             with job_scope(job_key):
                 video_path, script = await build_video(
                     idea,
@@ -1548,7 +1720,14 @@ async def _run_job(
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
             finish_job(job_key, failed=True, label=exc.user_message)
-            await message.answer(exc.user_message, reply_markup=main_menu())
+            if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
+                mark_credits_pause(work)
+                await message.answer(
+                    credits_pause_text(message.chat.id, headline=exc.user_message),
+                    reply_markup=credits_pause_kb(job_key),
+                )
+            else:
+                await message.answer(exc.user_message, reply_markup=main_menu())
         except Exception:
             log.exception("unhandled")
             finish_job(job_key, failed=True, label="Сломалось на моей стороне")
@@ -1557,7 +1736,9 @@ async def _run_job(
                 reply_markup=main_menu(),
             )
         finally:
-            if ok or not config.KEEP_FAILED_DIR:
+            if ok:
+                wipe_resume(message.chat.id)
+            elif not config.KEEP_FAILED_DIR and not credits_paused(work):
                 shutil.rmtree(work, ignore_errors=True)
             else:
                 log.warning("оставил рабочие файлы: %s", work)
@@ -2267,6 +2448,7 @@ async def main() -> None:
     dp.callback_query.register(on_job, Flow.confirm, F.data.startswith("job:"))
     dp.callback_query.register(on_upscale_last, F.data == "upscale:last")
     dp.callback_query.register(on_revise_final, F.data == "revise:final")
+    dp.callback_query.register(on_resume_callback, F.data.startswith("resume:"))
     dp.message.register(on_quick_idea, Flow.quick_idea, F.text)
     dp.message.register(on_preset_topic, Flow.preset_topic, F.text)
     dp.message.register(on_custom_script, Flow.custom_script, F.text)
