@@ -1,14 +1,32 @@
-"""Нарезка и склейка пользовательских роликов. Только ffmpeg, без Grok/Runway/ElevenLabs."""
+"""Нарезка и склейка пользовательских роликов.
+
+Ручной режим — только ffmpeg.
+Авто-режим — план клипов через официальный xAI API (тот же ключ, что сценарии), затем ffmpeg.
+Веб-кабинеты подписок и браузерную автоматизацию не используем.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
-from pipeline import PipelineError
+import aiohttp
+
+import config
+from pipeline import (
+    RETRY_STATUSES,
+    XAI_CHAT_URL,
+    XAI_RESPONSES_URL,
+    PipelineError,
+    _clip,
+    _read_error,
+    sleep_backoff,
+)
 
 log = logging.getLogger("videobot.edit")
 
@@ -60,6 +78,121 @@ def parse_timecodes(text: str) -> tuple[float, float]:
     if end - start > MAX_OUTPUT_SEC + 0.05:
         raise PipelineError(f"Готовый кусок длиннее {MAX_OUTPUT_SEC} сек — так Telegram может не принять файл.")
     return start, end
+
+
+Clip = tuple[float, float]
+
+EDIT_SYSTEM = """Ты монтажёр коротких вертикальных роликов.
+Верни ТОЛЬКО JSON без markdown:
+
+{"clips": [{"start": 1.2, "end": 5.0}, {"start": 12.0, "end": 18.5}], "note": "кратко"}
+
+Жёстко:
+- start и end — секунды, числа. 0 ≤ start < end ≤ duration.
+- 1–8 клипов, порядок clips = порядок склейки.
+- Суммарная длина не больше max_out секунд и не больше duration.
+- Не выдумывай таймкоды за пределами duration. Исходник ты не видишь — опирайся на запрос и длительность.
+"""
+
+
+def parse_target_range(brief: str) -> tuple[float, float]:
+    text = (brief or "").lower().replace("–", "-").replace("—", "-")
+    pair = re.search(r"(\d{1,3})\s*-\s*(\d{1,3})\s*(?:сек|s\b)?", text)
+    if pair:
+        lo, hi = float(pair.group(1)), float(pair.group(2))
+        if hi < lo:
+            lo, hi = hi, lo
+        return max(5.0, lo), min(float(MAX_OUTPUT_SEC), hi)
+    one = re.search(r"(\d{1,3})\s*(?:сек|секунд)", text)
+    if one:
+        sec = float(one.group(1))
+        return max(5.0, sec * 0.8), min(float(MAX_OUTPUT_SEC), max(sec, sec * 1.15))
+    return 30.0, 45.0
+
+
+def parse_edit_plan(raw: str) -> list[dict[str, Any]]:
+    text = (raw or "").strip()
+    if not text:
+        raise PipelineError("Пустой план монтажа.")
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.S)
+    data = json.loads(text)
+    items = data.get("clips") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise PipelineError("В плане монтажа нет списка clips.")
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        out.append({"start": start, "end": end})
+    if not out:
+        raise PipelineError("В плане нет ни одного клипа с start/end.")
+    return out
+
+
+def validate_clips(clips: list[dict[str, Any]] | list[Clip], duration: float) -> list[Clip]:
+    dur = max(0.0, float(duration or 0))
+    out: list[Clip] = []
+    total = 0.0
+    for item in clips:
+        if isinstance(item, dict):
+            start, end = float(item["start"]), float(item["end"])
+        else:
+            start, end = float(item[0]), float(item[1])
+        if start > end:
+            start, end = end, start
+        start = max(0.0, start)
+        if dur:
+            end = min(end, dur)
+            start = min(start, dur)
+        if end - start < MIN_CLIP_SEC:
+            continue
+        remain = MAX_OUTPUT_SEC - total
+        if remain < MIN_CLIP_SEC:
+            break
+        if end - start > remain:
+            end = start + remain
+        if end - start < MIN_CLIP_SEC:
+            continue
+        out.append((round(start, 3), round(end, 3)))
+        total += end - start
+        if len(out) >= MAX_CLIPS:
+            break
+    return out
+
+
+def heuristic_plan(duration: float, brief: str = "") -> list[Clip]:
+    """Простой монтаж без LLM: куски по длине ролика и запросу «N сек»."""
+    dur = max(0.0, float(duration or 0))
+    if dur < MIN_CLIP_SEC * 2:
+        return []
+    lo, hi = parse_target_range(brief)
+    want = min(dur, max(lo, min(hi, dur if dur <= hi else (lo + hi) / 2)))
+    if dur <= want + 0.5:
+        return [(0.0, round(dur, 3))]
+    n = min(MAX_CLIPS, max(2, int(round(want / 7.0))))
+    clip_len = want / n
+    margin = min(dur * 0.06, 4.0)
+    usable = max(clip_len, dur - 2 * margin)
+    step = usable / n if n else usable
+    clips: list[Clip] = []
+    for i in range(n):
+        start = margin + i * step
+        end = min(dur, start + clip_len)
+        if end - start >= MIN_CLIP_SEC:
+            clips.append((round(start, 3), round(end, 3)))
+    return validate_clips(clips, dur)
+
+
+def format_clips(clips: list[Clip]) -> str:
+    parts = [f"{s:.1f}–{e:.1f}с" for s, e in clips]
+    total = sum(e - s for s, e in clips)
+    return f"{len(clips)} куск.: {', '.join(parts)} (≈{total:.0f} сек)"
 
 
 async def _run_ffmpeg(args: list[str]) -> None:
@@ -293,3 +426,134 @@ def check_incoming(*, size: int | None, duration: float | None) -> None:
         raise PipelineError("Файл больше 20 МБ — Telegram боту столько не отдаёт. Короткий ролик.")
     if duration is not None and duration > MAX_INPUT_SEC + 0.5:
         raise PipelineError(f"Ролик длиннее {MAX_INPUT_SEC} сек. Нарежь короче и пришли снова.")
+
+
+async def render_clips(src: Path, dest: Path, clips: list[Clip]) -> Path:
+    if not clips:
+        raise PipelineError("Нет валидных кусков для склейки.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if len(clips) == 1:
+        return await cut_video(src, dest, clips[0][0], clips[0][1])
+    parts: list[Path] = []
+    for i, (start, end) in enumerate(clips):
+        piece = dest.parent / f"auto_{i:02d}.mp4"
+        await cut_video(src, piece, start, end)
+        parts.append(piece)
+    return await concat_videos(parts, dest)
+
+
+async def grok_edit_plan(session: aiohttp.ClientSession, *, duration: float, brief: str) -> str:
+    if config.XAI_API_KEY_ERROR:
+        raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
+    if not config.XAI_API_KEY_NEW:
+        raise PipelineError("Нет XAI_API_KEY_NEW — авто-монтаж без плана не собрать.")
+    user_content = (
+        f"duration={duration:.2f}\n"
+        f"max_out={MAX_OUTPUT_SEC}\n"
+        f"max_clips={MAX_CLIPS}\n"
+        f"Запрос пользователя:\n{(brief or '').strip()[:800]}"
+    )
+    messages = [
+        {"role": "system", "content": EDIT_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+    headers = {
+        "Authorization": f"Bearer {config.XAI_API_KEY_NEW}",
+        "Content-Type": "application/json",
+    }
+    last_err = ""
+    tries = max(1, int(config.HTTP_RETRIES))
+    for model in (config.XAI_MODEL, config.XAI_FALLBACK_MODEL):
+        if not model:
+            continue
+        payload = {"model": model, "messages": messages, "temperature": 0.2}
+        for attempt in range(tries):
+            try:
+                async with session.post(
+                    XAI_CHAT_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=90),
+                ) as resp:
+                    if resp.status in RETRY_STATUSES and attempt < tries - 1:
+                        last_err = f"{model} chat HTTP {resp.status}"
+                        await sleep_backoff(attempt)
+                        continue
+                    if resp.status < 400:
+                        data = await resp.json()
+                        content = (
+                            (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
+                            or ""
+                        )
+                        if str(content).strip():
+                            log.info("Grok edit plan ok model=%s", model)
+                            return str(content)
+                        last_err = f"{model}: пустой chat"
+                    else:
+                        last_err = f"{model} chat: {await _read_error(resp)}"
+            except Exception as exc:
+                last_err = f"{model} chat: {type(exc).__name__}"
+                if attempt < tries - 1:
+                    await sleep_backoff(attempt)
+                    continue
+        payload_r = {"model": model, "input": messages}
+        for attempt in range(tries):
+            try:
+                async with session.post(
+                    XAI_RESPONSES_URL,
+                    headers=headers,
+                    json=payload_r,
+                    timeout=aiohttp.ClientTimeout(total=90),
+                ) as resp:
+                    raw = await resp.text()
+                    if resp.status in RETRY_STATUSES and attempt < tries - 1:
+                        await sleep_backoff(attempt)
+                        continue
+                    if resp.status >= 400:
+                        last_err = f"{model} responses: {_clip(f'HTTP {resp.status}', 200)}"
+                        break
+                    data = json.loads(raw)
+                chunks: list[str] = []
+                if isinstance(data.get("output_text"), str):
+                    chunks.append(data["output_text"])
+                for item in data.get("output") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    for part in item.get("content") or []:
+                        if isinstance(part, dict) and part.get("text"):
+                            chunks.append(str(part["text"]))
+                content = "\n".join(chunks).strip()
+                if content:
+                    log.info("Grok edit plan responses ok model=%s", model)
+                    return content
+            except Exception as exc:
+                last_err = f"{model} responses: {type(exc).__name__}"
+                if attempt < tries - 1:
+                    await sleep_backoff(attempt)
+                    continue
+    raise PipelineError("Не получил план монтажа от Grok.", last_err)
+
+
+async def plan_clips(
+    *, duration: float, brief: str, session: aiohttp.ClientSession | None = None
+) -> tuple[list[Clip], str]:
+    """Вернуть (клипы, источник: grok | heuristic). Без браузера."""
+    fallback = heuristic_plan(duration, brief)
+    try:
+        own = session is None
+        sess = session or aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90))
+        try:
+            raw = await grok_edit_plan(sess, duration=duration, brief=brief)
+        finally:
+            if own:
+                await sess.close()
+        clips = validate_clips(parse_edit_plan(raw), duration)
+        if clips:
+            return clips, "grok"
+    except Exception as exc:
+        log.warning("edit auto grok fallback: %s", type(exc).__name__)
+    if fallback:
+        return fallback, "heuristic"
+    raise PipelineError(
+        "Не смог собрать план монтажа. Напиши таймкоды вручную или другое описание."
+    )

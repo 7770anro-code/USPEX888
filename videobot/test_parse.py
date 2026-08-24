@@ -681,6 +681,7 @@ def test_edit_timecodes_and_limits() -> None:
         cut_video,
         parse_clock,
         parse_timecodes,
+        render_clips,
     )
 
     assert parse_clock("0:05") == 5.0
@@ -703,16 +704,38 @@ def test_edit_timecodes_and_limits() -> None:
     assert MAX_OUTPUT_BYTES < 50 * 1024 * 1024
     assert MAX_CLIPS == 8
     blob = inspect.getsource(__import__("edit", fromlist=["cut_video"]))
-    assert "api.dev.runwayml.com" not in blob
-    assert "elevenlabs.io" not in blob
-    assert "api.x.ai" not in blob
+    assert "grok.com" not in blob.lower()
+    assert "chatgpt.com" not in blob.lower()
+    assert "playwright" not in blob.lower()
     assert "from wave2" not in blob
-    assert "from pipeline import PipelineError" in blob
+    assert "XAI_CHAT_URL" in blob
     from bot import edit_hub_kb, main
 
-    assert "edit:cut" in [b.callback_data for row in edit_hub_kb().inline_keyboard for b in row]
+    data = [b.callback_data for row in edit_hub_kb().inline_keyboard for b in row]
+    assert "edit:cut" in data
+    assert "edit:auto" in data
     assert "Command(\"edit\")" in inspect.getsource(main)
-    blob = inspect.getsource(__import__("edit", fromlist=["cut_video"]))
+
+    from edit import heuristic_plan, parse_edit_plan, parse_target_range, validate_clips
+
+    assert parse_target_range("динамичный ролик 30-45 сек") == (30.0, 45.0)
+    plan = parse_edit_plan('{"clips":[{"start":1,"end":4},{"start":10,"end":16}]}')
+    assert plan[0]["start"] == 1
+    fenced = parse_edit_plan('```json\n{"clips":[{"start":0,"end":2}]}\n```')
+    assert fenced[0]["end"] == 2
+    ok = validate_clips([{"start": -1, "end": 5}, {"start": 90, "end": 92}], 20)
+    assert ok[0] == (0.0, 5.0)
+    assert all(e <= 20 for _, e in ok)
+    bad = validate_clips([{"start": 50, "end": 60}], 10)
+    assert bad == []
+    swapped = validate_clips([{"start": 8, "end": 3}], 10)
+    assert swapped and swapped[0][0] < swapped[0][1]
+    hz = heuristic_plan(120, "яркие моменты 30-45 сек")
+    assert 2 <= len(hz) <= 8
+    total = sum(e - s for s, e in hz)
+    assert 25 <= total <= 50
+    short = heuristic_plan(20, "весь ролик")
+    assert short and short[0][0] == 0.0
 
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         import asyncio
@@ -741,6 +764,9 @@ def test_edit_timecodes_and_limits() -> None:
                 out = tmp / "cat.mp4"
                 await concat_videos([a, b], out)
                 assert out.is_file() and out.stat().st_size > 1000
+                auto = tmp / "auto.mp4"
+                await render_clips(a, auto, [(0.2, 0.8), (1.0, 1.6)])
+                assert auto.is_file() and auto.stat().st_size > 1000
             finally:
                 shutil.rmtree(tmp, ignore_errors=True)
 

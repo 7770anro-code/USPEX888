@@ -58,7 +58,11 @@ from edit import (
     check_incoming,
     concat_videos,
     cut_video,
+    format_clips,
+    media_duration,
     parse_timecodes,
+    plan_clips,
+    render_clips,
 )
 from store import (
     clear_user_voices,
@@ -122,7 +126,7 @@ HOW_IT_WORKS = (
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
     "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n"
-    "7) «Нарезка и монтаж» — только твои файлы и ffmpeg, без Grok/Runway/кредитов.\n\n"
+    "7) «Нарезка и монтаж»: вручную (таймкоды/порядок) или авто (описание → xAI API → ffmpeg). Runway не тратится.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -153,6 +157,8 @@ class Flow(StatesGroup):
     edit_cut_video = State()
     edit_cut_times = State()
     edit_concat = State()
+    edit_auto_video = State()
+    edit_auto_brief = State()
 
 
 def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
@@ -221,8 +227,9 @@ def clone_done_kb() -> InlineKeyboardMarkup:
 def edit_hub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✂️ Нарезать кусок", callback_data="edit:cut")],
-            [InlineKeyboardButton(text="📎 Склеить несколько", callback_data="edit:concat")],
+            [InlineKeyboardButton(text="✂️ Вручную: нарезать", callback_data="edit:cut")],
+            [InlineKeyboardButton(text="📎 Вручную: склеить", callback_data="edit:concat")],
+            [InlineKeyboardButton(text="🤖 Авто-монтаж по описанию", callback_data="edit:auto")],
             [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
         ]
     )
@@ -465,11 +472,13 @@ def _incoming_video(message: Message) -> dict[str, Any] | None:
 async def _start_edit(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "✂️ Нарезка и монтаж — только твои файлы и ffmpeg, кредиты не тратятся.\n\n"
-        "• Нарезать: одно видео, потом таймкоды, например 0:05-0:18\n"
-        "• Склеить: несколько видео подряд, затем «Склеить» — простая склейка без переходов\n\n"
+        "✂️ Нарезка и монтаж — два режима.\n\n"
+        "• Вручную: сам задаёшь таймкоды или порядок файлов, только ffmpeg, без LLM.\n"
+        "• Авто: присылаешь видео и коротко пишешь, что нужно. План клипов считает "
+        "Grok через xAI API (тот же ключ, что сценарии), затем ffmpeg. "
+        "Браузер grok.com/chatgpt.com не открываю.\n\n"
         f"Лимиты Telegram: входящий файл ≤ 20 МБ и ≤ {MAX_INPUT_SEC} сек, "
-        f"склейка до {MAX_CLIPS} клипов, готовый файл ≤ 49 МБ.",
+        f"до {MAX_CLIPS} кусков, готовый файл ≤ 49 МБ. Runway не тратится.",
         reply_markup=edit_hub_kb(),
     )
 
@@ -505,6 +514,14 @@ async def on_edit_callback(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "go":
         await _run_concat(msg, state)
+        return
+    if data == "auto":
+        await state.clear()
+        await state.set_state(Flow.edit_auto_video)
+        await msg.answer(
+            "Авто-монтаж: пришли одно видео. Потом коротко опиши, что вырезать.\n"
+            "Например: «динамичный ролик 30-45 сек» или «оставь самые яркие моменты»."
+        )
         return
 
 
@@ -628,6 +645,89 @@ async def _run_concat(message: Message, state: FSMContext) -> None:
     except Exception:
         log.exception("edit concat failed")
         await message.answer("Не получилось склеить. Другие файлы или меньше клипов.", reply_markup=edit_concat_kb(len(clips)))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
+
+
+async def on_edit_auto_video(message: Message, state: FSMContext) -> None:
+    clip = _incoming_video(message)
+    if not clip:
+        await message.answer("Нужен видеофайл (mp4/mov/webm), не фото.")
+        return
+    try:
+        check_incoming(size=clip["size"] or None, duration=clip["duration"])
+    except PipelineError as exc:
+        await message.answer(exc.user_message)
+        return
+    await state.update_data(edit_source=clip)
+    caption = (message.caption or "").strip()
+    if len(caption) >= 4:
+        await _run_auto_edit(message, state, caption)
+        return
+    await state.set_state(Flow.edit_auto_brief)
+    await message.answer(
+        "Коротко напиши, что сделать с роликом.\n"
+        "Примеры: «динамичный 30-45 сек», «оставь яркие моменты», «нарезка под рилс 20 сек»."
+    )
+
+
+async def on_edit_auto_brief(message: Message, state: FSMContext) -> None:
+    brief = (message.text or "").strip()
+    if len(brief) < 4:
+        await message.answer("Чуть подробнее — хотя бы несколько слов, чего хочешь от монтажа.")
+        return
+    await _run_auto_edit(message, state, brief)
+
+
+async def _run_auto_edit(message: Message, state: FSMContext, brief: str) -> None:
+    data = await state.get_data()
+    source = data.get("edit_source")
+    if not isinstance(source, dict) or not source.get("file_id"):
+        await message.answer("Сначала пришли видео.", reply_markup=edit_hub_kb())
+        return
+    if BUSY.locked():
+        await message.answer("⏳ Сейчас занят другой задачей. Напиши описание ещё раз чуть позже.")
+        return
+    await BUSY.acquire()
+    work = Path(config.WORK_DIR) / f"edit_{message.chat.id}_{int(time.time())}"
+    try:
+        src = work / "src.mp4"
+        dest = work / "auto.mp4"
+        await message.answer(
+            "Скачиваю ролик, спрашиваю план у Grok (xAI API, не браузер), потом режу ffmpeg. Runway не трогаю."
+        )
+        await _tg_download(message.bot, str(source["file_id"]), src)
+        check_incoming(size=src.stat().st_size, duration=None)
+        duration = await media_duration(src) or float(source.get("duration") or 0)
+        if duration < 1:
+            raise PipelineError("Не удалось узнать длительность файла (ffprobe). Другой ролик?")
+        check_incoming(size=None, duration=duration)
+        clips, origin = await plan_clips(duration=duration, brief=brief)
+        note = (
+            "План от Grok"
+            if origin == "grok"
+            else "План модели не подошёл — собрал простой эвристический монтаж"
+        )
+        await message.answer(f"{note}: {format_clips(clips)}")
+        await render_clips(src, dest, clips)
+        await _send_video(message, dest, "Авто-монтаж", filename="auto_edit.mp4")
+        await state.clear()
+        extra = ""
+        if origin != "grok":
+            extra = " Если не то — уточни описание или нарежь вручную таймкодами."
+        await message.answer("Готово." + extra, reply_markup=edit_hub_kb())
+    except PipelineError as exc:
+        await message.answer(
+            exc.user_message + "\nМожно переформулировать запрос или перейти в ручной режим.",
+            reply_markup=edit_hub_kb(),
+        )
+    except Exception:
+        log.exception("edit auto failed")
+        await message.answer(
+            "Авто-монтаж не собрался. Попробуй другое описание или ручные таймкоды.",
+            reply_markup=edit_hub_kb(),
+        )
     finally:
         shutil.rmtree(work, ignore_errors=True)
         BUSY.release()
@@ -1831,6 +1931,9 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.edit_concat.state:
         await on_edit_concat_video(message, state)
         return
+    if current == Flow.edit_auto_video.state:
+        await on_edit_auto_video(message, state)
+        return
     await message.answer("Нажми кнопку в меню или пришли текст, когда я попрошу.", reply_markup=main_menu())
 
 
@@ -1886,6 +1989,7 @@ async def main() -> None:
     dp.message.register(on_w2_design_text, Flow.w2_design_text, F.text)
     dp.message.register(on_w2_extend_prompt, Flow.w2_extend_prompt, F.text)
     dp.message.register(on_edit_cut_times, Flow.edit_cut_times, F.text)
+    dp.message.register(on_edit_auto_brief, Flow.edit_auto_brief, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_act_photo, Flow.act_photo, F.photo)
@@ -1902,6 +2006,9 @@ async def main() -> None:
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video)
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.video_note)
     dp.message.register(on_edit_concat_video, Flow.edit_concat, F.document)
+    dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.video)
+    dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.video_note)
+    dp.message.register(on_edit_auto_video, Flow.edit_auto_video, F.document)
     dp.message.register(on_plain_text, F.text)
     dp.message.register(on_other)
     dp.callback_query.register(on_stale_callback)
