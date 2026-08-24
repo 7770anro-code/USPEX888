@@ -88,8 +88,8 @@ def xai_creative_models() -> list[str]:
 ELEVENLABS_VOICE_ID = _clean("ELEVENLABS_VOICE_ID") or "EXAVITQu4vr4xnSDxMaL"  # Sarah
 ELEVENLABS_MODEL_ID = _clean("ELEVENLABS_MODEL_ID") or "eleven_multilingual_v2"
 
-# gen4.5 — дефолт видео. veo3.1 / gemini_image3_pro — тот же ключ, только через
-# RUNWAY_MODEL / RUNWAY_STILL_MODEL (живой A/B не вывел их в UI).
+# gen4.5 — дефолт видео. veo3.1 / seedance2_5 / gemini_image3_pro — тот же ключ,
+# только через RUNWAY_MODEL / RUNWAY_STILL_MODEL (A/B не вывел их в UI по умолчанию).
 RUNWAY_MODEL = _clean("RUNWAY_MODEL") or "gen4.5"
 # Пусто = still из пресета качества (обычно gen4_image).
 RUNWAY_STILL_MODEL = _clean("RUNWAY_STILL_MODEL")

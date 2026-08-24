@@ -1380,6 +1380,8 @@ def test_look_and_runway_models() -> None:
 
     cine = compose_runway_prompt("red coat, rainy street", "slow push-in", style="cinematic")
     assert "ARRI Alexa Mini" in cine
+    assert "same character as reference image" in cine
+    assert "do not alter face" in cine
     assert "shot on iPhone" not in cine
     assert visual_look_lock("cinematic").startswith("shot on ARRI")
     cartoon = compose_runway_prompt("pixel hero, neon stairs", "punch-in", style="cartoon")
@@ -1441,6 +1443,16 @@ def test_look_and_runway_models() -> None:
     assert duration_for_model("veo3.1_fast", 5) == 4
     assert duration_for_model("gen4_turbo", 5) == 5
     assert i2v_fallback_chain("veo3.1") == ["veo3.1", "gen4.5", "gen4_turbo"]
+    assert i2v_fallback_chain("seedance2_5") == ["seedance2_5", "gen4.5", "gen4_turbo"]
+    sd = runway_video_payload(
+        "seedance2_5", "a quiet kitchen", "720:1280", 5, seed=7, prompt_image="data:x"
+    )
+    assert sd["duration"] == 5
+    assert sd["audio"] is False
+    assert "seed" not in sd
+    assert "contentModeration" not in sd
+    assert sd["promptImage"] == [{"uri": "data:x", "position": "first"}]
+    assert duration_for_model("seedance2_5", 3) == 4
     assert video_models_for_quality("fast") == ("gen4_turbo", "")
     assert video_models_for_quality("optimal")[0] == "gen4.5"
     assert still_model_for_quality("optimal") == "gen4_image"

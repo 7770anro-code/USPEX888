@@ -10,7 +10,8 @@
 2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 голос кнопками + клон из SQLite. Подача и скорость — `voice_settings`.
 3. **Runway** `https://api.dev.runwayml.com`, `X-Runway-Version: 2024-11-06`.
    - Вертикаль `720:1280`. Клип 5 или 10 сек.
-   - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`). Veo/Gemini на том же ключе не в UI: живой A/B не дал явного выигрыша. При необходимости `RUNWAY_MODEL` / `RUNWAY_STILL_MODEL`.
+   - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`). Veo / Seedance 2.5 / Gemini на том же ключе не в UI по умолчанию. При необходимости `RUNWAY_MODEL` (`veo3.1_fast`, `seedance2_5`) / `RUNWAY_STILL_MODEL`.
+   - В каждый visual: `same character as reference image, do not alter face, outfit, or visual style`. First frame / last-frame chaining как раньше; gen4.5 и Seedance I2V не смешивают first-frame с отдельным character reference.
    - В подписи готового ролика — фактическая модель на каждый кадр (видно, если сцена ушла в `gen4_turbo`).
    - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
    - Нехватка кредитов: пауза в `{WORK_DIR}/{chat_id}_resume` (сценарий, озвучка, готовые клипы). Кнопка **«Продолжить съёмку»** — не пересобирает Grok/ElevenLabs. «Обновить статус» только GET task_id, кредиты не тратит.

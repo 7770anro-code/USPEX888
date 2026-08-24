@@ -29,9 +29,12 @@ RUNWAY_VERSION = "2024-11-06"
 RUNWAY_PROMPT_MAX = 1000
 RUNWAY_DURATION_MIN = 2
 RUNWAY_DURATION_MAX = 10
-RUNWAY_T2V_MODELS = frozenset({"gen4.5", "veo3", "veo3.1", "veo3.1_fast", "seedance2"})
-RUNWAY_I2V_MODELS = frozenset({"gen4.5", "gen4_turbo", "seedance2", "veo3", "veo3.1", "veo3.1_fast"})
+RUNWAY_T2V_MODELS = frozenset({"gen4.5", "veo3", "veo3.1", "veo3.1_fast", "seedance2", "seedance2_5"})
+RUNWAY_I2V_MODELS = frozenset(
+    {"gen4.5", "gen4_turbo", "seedance2", "seedance2_5", "veo3", "veo3.1", "veo3.1_fast"}
+)
 RUNWAY_VEO_MODELS = frozenset({"veo3", "veo3.1", "veo3.1_fast"})
+RUNWAY_SEEDANCE_MODELS = frozenset({"seedance2", "seedance2_5", "seedance2_fast", "seedance2_mini"})
 RUNWAY_GEMINI_IMAGE = frozenset({"gemini_image3_pro", "gemini_image3.1_flash"})
 GEMINI_IMAGE_RATIO = {
     "720:1280": "768:1344",
@@ -128,6 +131,12 @@ LOOK_PHONE = (
 LOOK_CARTOON = (
     "stylized 3D render, appealing shapes, painterly light, not live-action, "
     "not iPhone, not ARRI, not documentary footage"
+)
+# Жёсткая фиксация персонажа: still/фото уходит как promptImage (first),
+# gen4.5 не принимает второй reference. Seedance I2V тоже не смешивает
+# first-frame и reference в одном массиве — поэтому lock в тексте на каждую сцену.
+CHARACTER_LOCK = (
+    "same character as reference image, do not alter face, outfit, or visual style"
 )
 
 RATIO_PRESETS = {
@@ -492,12 +501,15 @@ def compose_runway_prompt(
     *,
     style: str = "cinematic",
     photo_lock: bool = False,
+    character_lock: bool = True,
 ) -> str:
     """Один lock на все клипы + действие сцены + камера/динамика (текстом, не API-параметр)."""
     look = visual_look_lock(style, photo_lock=photo_lock)
     lock = re.sub(r"\s+", " ", (continuity or "").strip())
     if look and look.lower() not in lock.lower():
         lock = f"{look}, {lock}".strip(", ")
+    if character_lock and CHARACTER_LOCK.lower() not in lock.lower():
+        lock = f"{CHARACTER_LOCK}. {lock}".strip()
     bits = [
         re.sub(r"\s+", " ", (scene_visual or "").strip()),
         re.sub(r"\s+", " ", (camera or "").strip()),
@@ -1297,6 +1309,8 @@ def duration_for_model(model: str, seconds: int) -> int:
         if raw <= 7:
             return 6
         return 8
+    if model in RUNWAY_SEEDANCE_MODELS:
+        return max(4, min(30, raw if raw >= 4 else 4))
     return 10 if raw >= 8 else 5
 
 
@@ -1314,7 +1328,10 @@ def video_ratio_for_model(model: str, ratio: str) -> str:
 
 def i2v_fallback_chain(primary: str) -> list[str]:
     chain: list[str] = []
-    for name in (primary, "gen4.5" if primary in RUNWAY_VEO_MODELS else "", "gen4_turbo"):
+    extra = ""
+    if primary in RUNWAY_VEO_MODELS or primary in RUNWAY_SEEDANCE_MODELS:
+        extra = "gen4.5"
+    for name in (primary, extra, "gen4_turbo"):
         if name and name not in chain:
             chain.append(name)
     return chain or ["gen4_turbo"]
@@ -1417,19 +1434,25 @@ def runway_video_payload(
     seed: int | None = None,
     prompt_image: str | None = None,
 ) -> dict[str, Any]:
-    """Поля строго по модели: Veo не принимает seed/contentModeration, duration 4/6/8, audio=false."""
+    """Поля строго по модели: Veo/Seedance не принимают seed/contentModeration; Veo duration 4/6/8."""
     payload: dict[str, Any] = {
         "model": model,
-        "promptText": visual,
+        "promptText": visual[:15000] if model in RUNWAY_SEEDANCE_MODELS else visual,
         "ratio": video_ratio_for_model(model, ratio),
         "duration": duration_for_model(model, seconds),
     }
-    if model in RUNWAY_VEO_MODELS:
+    if model in RUNWAY_VEO_MODELS or model in RUNWAY_SEEDANCE_MODELS:
         payload["audio"] = False
-    else:
-        payload["contentModeration"] = runway_content_moderation()
-        if seed is not None:
-            payload["seed"] = int(seed) & 0xFFFFFFFF
+        if prompt_image:
+            if model in RUNWAY_SEEDANCE_MODELS:
+                # keyframe mode: first-frame. Reference images нельзя смешать с first/last.
+                payload["promptImage"] = [{"uri": prompt_image, "position": "first"}]
+            else:
+                payload["promptImage"] = prompt_image
+        return payload
+    payload["contentModeration"] = runway_content_moderation()
+    if seed is not None:
+        payload["seed"] = int(seed) & 0xFFFFFFFF
     if prompt_image:
         payload["promptImage"] = prompt_image
     return payload
