@@ -3,7 +3,7 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
-Пока нет явного «ок» на выкладку — **не копировать на сервер и не systemctl start**.
+Выложено **2026-08-24** на `/opt/videobot` после «ок» владельца. Рестарт только `videobot.service`. `uspex.service` / `vector.service` не трогали. `videobot-night.timer` не ставили.
 
 ## Что должно быть в `/opt/videobot/.env`
 
