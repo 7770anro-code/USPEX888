@@ -594,6 +594,11 @@ def test_wave2_thin_api() -> None:
     assert "отдельно от согласия на фото" in CLONE_CONSENT_MSG.lower()
     result_btns = [b.callback_data for row in result_kb().inline_keyboard for b in row]
     assert "upscale:last" in result_btns
+    assert "revise:final" in result_btns
+    assert "menu:home" in result_btns
+    labels = [b.text for row in result_kb().inline_keyboard for b in row]
+    assert any("Улучшить" in t for t in labels)
+    assert any("финал" in t.lower() for t in labels)
 
 
 def test_store_sqlite_voices_and_prefs() -> None:
@@ -637,6 +642,20 @@ def test_store_sqlite_voices_and_prefs() -> None:
         assert keep.is_file()
         assert store.get_last_video(7) == keep
         assert store.get_last_title(7) == "Ролик"
+        store.save_last_job(
+            7,
+            {"idea": "лестница микро", "hook": "Не прыгай", "revisions": []},
+            status="draft",
+        )
+        job = store.get_last_job(7)
+        assert job is not None
+        assert job["hook"] == "Не прыгай"
+        assert job["status"] == "draft"
+        fin = store.mark_last_job_final(7)
+        assert fin is not None and fin["status"] == "final"
+        assert store.get_last_job(7)["status"] == "final"
+        store.clear_last_job(7)
+        assert store.get_last_job(7) is None
         store.save_user_voice(7, {"id": "design-1", "name": "Дизайн", "tag": "по описанию", "kind": "design"})
         ids = store.clear_user_voices(7)
         assert "design-1" in ids
@@ -1120,15 +1139,42 @@ def test_edit_timecodes_and_limits() -> None:
 def test_upscale_result_uses_video_upscale() -> None:
     import inspect
 
-    from bot import on_upscale_last
+    from bot import _pixel_upscale_last, on_revise_notes, on_upscale_last, result_kb
     from wave2 import video_upscale_payload
 
-    src = inspect.getsource(on_upscale_last)
-    assert "/v1/video_upscale" in src
-    assert "video_upscale_payload" in src
-    assert "_send_video" in src
+    ask = inspect.getsource(on_upscale_last)
+    assert "REVISE_ASK" in ask
+    assert "revise_notes" in ask
+    assert "/v1/video_upscale" not in ask
+    notes = inspect.getsource(on_revise_notes)
+    assert "_revision_extra_brief" in notes
+    assert "revisions" in notes
+    pix = inspect.getsource(_pixel_upscale_last)
+    assert "/v1/video_upscale" in pix
+    assert "video_upscale_payload" in pix
+    assert "_send_video" in pix
     payload = video_upscale_payload("runway://final")
     assert payload["model"] == "magnific_video_upscaler_creative"
+    kb = result_kb(can_finalize=True)
+    data = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert data == ["upscale:last", "revise:final", "menu:home"]
+    slim = [b.callback_data for row in result_kb(can_finalize=False).inline_keyboard for b in row]
+    assert "revise:final" not in slim
+    from bot import _revision_extra_brief
+
+    blob = _revision_extra_brief(
+        {
+            "kind": "motivational",
+            "hook": "Не прыгай выше головы.",
+            "idea": "Пиксельный герой по ступеням.",
+            "title": "Лестница",
+            "preset_brief": "",
+            "revisions": ["вторая сцена скучная", "хук слабый"],
+        }
+    )
+    assert "Не прыгай выше головы" in blob
+    assert "вторая сцена скучная" in blob
+    assert "хук слабый" in blob
 
 
 if __name__ == "__main__":

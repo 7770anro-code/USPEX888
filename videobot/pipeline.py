@@ -1614,6 +1614,9 @@ async def build_video(
             script["hook"] = hook
             if packed.get("caption"):
                 script["caption"] = packed["caption"]
+        script["plot"] = idea
+        if hook:
+            script["hook"] = hook
         scenes = script["scenes"]
         continuity = script.get("continuity") or ""
         script["ratio"] = ratio

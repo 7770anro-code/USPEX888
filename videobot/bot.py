@@ -78,14 +78,18 @@ from edit import (
     render_clips,
 )
 from store import (
+    clear_last_job,
     clear_user_voices,
     delete_cloned_voice,
     get_cloned_voice,
+    get_last_job,
     get_last_title,
     get_last_video,
     get_watermark,
     init_db,
     load_user_voices,
+    mark_last_job_final,
+    save_last_job,
     save_last_video,
     save_user_voice,
     set_cloned_voice,
@@ -138,7 +142,8 @@ HOW_IT_WORKS = (
     "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
-    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика — «Улучшить качество».\n"
+    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика можно править по кругу "
+    "(«Улучшить качество») и только кнопкой «Готово, это финал» зафиксировать.\n"
     "7) «Нарезка и монтаж»: вручную (таймкоды/порядок) или авто (описание → xAI API → ffmpeg). Runway не тратится.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
@@ -172,6 +177,7 @@ class Flow(StatesGroup):
     edit_concat = State()
     edit_auto_video = State()
     edit_auto_brief = State()
+    revise_notes = State()
 
 
 def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
@@ -257,13 +263,26 @@ def edit_concat_kb(n: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def result_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✨ Улучшить качество", callback_data="upscale:last")],
-            [InlineKeyboardButton(text="🎬 Новый ролик", callback_data="menu:home")],
-        ]
-    )
+REVISE_ASK = (
+    "Что именно не так? Напиши свободным текстом — например:\n"
+    "• картинка мыльная, тёмная или не та камера\n"
+    "• голос, темп, слишком коротко или длинно\n"
+    "• конкретная сцена (вторая скучная, хук слабый)\n"
+    "• другой сюжет / другой призыв к действию\n\n"
+    "Пересниму ролик с учётом этого. Когда устроит — нажми «✅ Готово, это финал»."
+)
+
+
+def result_kb(*, can_finalize: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="✨ Улучшить качество", callback_data="upscale:last")],
+    ]
+    if can_finalize:
+        rows.append(
+            [InlineKeyboardButton(text="✅ Готово, это финал", callback_data="revise:final")]
+        )
+    rows.append([InlineKeyboardButton(text="🎬 Новый ролик", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def compose_live_text(job_key: str) -> tuple[str, bool]:
@@ -1407,6 +1426,10 @@ async def _run_job(
     quality: str = "optimal",
     style: str = "cinematic",
     watermark: bool = False,
+    hook: str = "",
+    revisions: list[str] | None = None,
+    preset_brief: str = "",
+    kind: str = "motivational",
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -1466,6 +1489,7 @@ async def _run_job(
                     motion=motion,
                     quality=quality,
                     watermark=watermark,
+                    hook=hook,
                 )
             preview = format_script(script)
             try:
@@ -1476,6 +1500,31 @@ async def _run_job(
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
             title = str(script.get("title") or "video")
             keep = save_last_video(message.chat.id, video_path, title)
+            save_last_job(
+                message.chat.id,
+                {
+                    "idea": str(script.get("plot") or idea),
+                    "hook": str(script.get("hook") or hook or ""),
+                    "title": title,
+                    "caption": str(script.get("caption") or ""),
+                    "kind": kind or "motivational",
+                    "user_script": bool(user_script) and not list(revisions or []),
+                    "preset_brief": str(preset_brief or ("" if revisions else extra_brief) or ""),
+                    "revisions": list(revisions or []),
+                    "voice_id": voice_id or "",
+                    "voice_name": voice_name,
+                    "photo_file_id": photo_file_id or "",
+                    "consent_verified": bool(consent_verified),
+                    "n_scenes": int(n_scenes or 5),
+                    "voice_settings": dict(voice_settings or {}),
+                    "camera": camera,
+                    "motion": motion,
+                    "quality": quality,
+                    "style": style,
+                    "watermark": bool(watermark),
+                },
+                status="draft",
+            )
             await _send_video(
                 message,
                 keep,
@@ -1484,13 +1533,17 @@ async def _run_job(
             )
             finish_job(job_key, label="Готово — видео выше.")
             try:
-                await status.edit_text("✅ Готово — видео выше.")
+                await status.edit_text("✅ Черновик готов — видео выше.")
             except Exception:
                 pass
-            await message.answer(
-                "Можно улучшить качество этого ролика.",
-                reply_markup=result_kb(),
-            )
+            n_rev = len(revisions or [])
+            if n_rev:
+                hint = f"Учёл правку #{n_rev}. Можно ещё раз улучшить или зафиксировать финал."
+            else:
+                hint = (
+                    "Это черновик. Напиши, что поменять — или подтверди финал кнопкой ниже."
+                )
+            await message.answer(hint, reply_markup=result_kb(can_finalize=True))
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
@@ -1790,10 +1843,11 @@ async def on_w2_upscale(message: Message, state: FSMContext) -> None:
                 dest = work / "out.mp4"
                 await runway_generate_file(session, "/v1/video_upscale", video_upscale_payload(uri), dest)
                 keep = save_last_video(message.chat.id, dest, "Увеличенное видео")
+                clear_last_job(message.chat.id)
                 await _send_video(message, keep, "Увеличенное видео", filename="upscale_tiktok.mp4")
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Можно ещё раз улучшить или снять новый ролик.", reply_markup=result_kb())
+        await message.answer("Можно ещё раз улучшить или снять новый ролик.", reply_markup=result_kb(can_finalize=False))
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
@@ -1854,10 +1908,11 @@ async def on_w2_act_video(message: Message, state: FSMContext) -> None:
                 used_image=True,
             )
             keep = save_last_video(message.chat.id, dest, "Оживлённое фото")
+            clear_last_job(message.chat.id)
             await _send_video(message, keep, "Оживлённое фото", filename="act_tiktok.mp4")
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb())
+        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb(can_finalize=False))
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=main_menu())
     except Exception:
@@ -1900,9 +1955,10 @@ async def on_w2_extend_prompt(message: Message, state: FSMContext) -> None:
             await runway_generate_file(session, "/v1/video_to_video", extend_video_payload(uri, prompt), dest)
             await _send_video(message, dest, "Продолжение ролика", filename="extend_tiktok.mp4")
         keep = save_last_video(message.chat.id, dest, "Продолжение")
+        clear_last_job(message.chat.id)
         await state.clear()
         await status.edit_text("Готово.")
-        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb())
+        await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb(can_finalize=False))
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=more_kb())
     except Exception:
@@ -1912,14 +1968,29 @@ async def on_w2_extend_prompt(message: Message, state: FSMContext) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
-async def on_upscale_last(query: CallbackQuery) -> None:
-    try:
-        await query.answer()
-    except Exception:
-        pass
-    msg = query.message
-    if not isinstance(msg, Message):
-        return
+def _revision_extra_brief(job: dict[str, Any]) -> str:
+    from night_ideas import script_brief_from_idea
+
+    base = script_brief_from_idea(
+        {
+            "kind": job.get("kind") or "motivational",
+            "hook": job.get("hook") or "",
+            "plot": job.get("idea") or "",
+            "title": job.get("title") or "",
+        },
+        extra=str(job.get("preset_brief") or ""),
+    )
+    notes = [str(n).strip() for n in (job.get("revisions") or []) if str(n).strip()]
+    if notes:
+        numbered = "\n".join(f"{i}. {n}" for i, n in enumerate(notes, 1))
+        base += (
+            "\n\nПравки зрителя к предыдущей версии (учесть обязательно, не игнорировать):\n"
+            + numbered
+        )
+    return base
+
+
+async def _pixel_upscale_last(msg: Message) -> None:
     src = get_last_video(msg.chat.id)
     if not src:
         await msg.answer("Нет готового ролика для улучшения. Сначала сними видео.", reply_markup=main_menu())
@@ -1929,7 +2000,7 @@ async def on_upscale_last(query: CallbackQuery) -> None:
         return
     title = get_last_title(msg.chat.id) or "video"
     work = _w2_work(msg)
-    status = await msg.answer("⏳ Улучшаю качество готового ролика…")
+    status = await msg.answer("⏳ Улучшаю картинку готового файла…")
     await BUSY.acquire()
     try:
         local = work / "final.mp4"
@@ -1942,19 +2013,116 @@ async def on_upscale_last(query: CallbackQuery) -> None:
             await _send_video(
                 msg,
                 keep,
-                "Улучшенное качество",
+                "Улучшенное качество картинки",
                 filename=tiktok_upload_filename(title),
             )
-        await status.edit_text("Готово — улучшенный файл выше.")
-        await msg.answer("Можно улучшить ещё раз или снять новый ролик.", reply_markup=result_kb())
+        await status.edit_text("Готово — увеличенный файл выше.")
+        await msg.answer(
+            "Это увеличение картинки готового файла. Переснять сюжет с правками можно после «идея → видео».",
+            reply_markup=result_kb(can_finalize=False),
+        )
     except PipelineError as exc:
-        await msg.answer(exc.user_message, reply_markup=result_kb())
+        await msg.answer(exc.user_message, reply_markup=result_kb(can_finalize=False))
     except Exception:
         log.exception("upscale last")
-        await msg.answer("Не получилось улучшить. Попробуй ещё раз чуть позже.", reply_markup=result_kb())
+        await msg.answer("Не получилось улучшить. Попробуй ещё раз чуть позже.", reply_markup=result_kb(can_finalize=False))
     finally:
         shutil.rmtree(work, ignore_errors=True)
         BUSY.release()
+
+
+async def on_upscale_last(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    if BUSY.locked():
+        await msg.answer("⏳ Я уже снимаю другой ролик. Напиши, когда пришлю результат.")
+        return
+    job = get_last_job(msg.chat.id)
+    if job and str(job.get("idea") or "").strip():
+        await state.set_state(Flow.revise_notes)
+        await msg.answer(REVISE_ASK, reply_markup=result_kb(can_finalize=True))
+        return
+    if get_last_video(msg.chat.id):
+        await msg.answer(
+            "У этого файла нет исходной съёмки, чтобы переснять сюжет. "
+            "Могу увеличить картинку. Если нужен другой монтаж — сними новый ролик.",
+            reply_markup=result_kb(can_finalize=False),
+        )
+        await _pixel_upscale_last(msg)
+        return
+    await msg.answer("Нет готового ролика для улучшения. Сначала сними видео.", reply_markup=main_menu())
+
+
+async def on_revise_notes(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if len(text) < 3:
+        await message.answer("Напиши чуть конкретнее, что поменять.")
+        return
+    job = get_last_job(message.chat.id)
+    if not job or not str(job.get("idea") or "").strip():
+        await state.clear()
+        await message.answer(
+            "Съёмка потерялась. Нажми /start и сними ролик заново.",
+            reply_markup=main_menu(),
+        )
+        return
+    notes = [str(n).strip() for n in (job.get("revisions") or []) if str(n).strip()]
+    notes.append(text)
+    job["revisions"] = notes
+    save_last_job(message.chat.id, job, status="draft")
+    await state.clear()
+    extra = _revision_extra_brief(job)
+    settings = job.get("voice_settings")
+    if not isinstance(settings, dict):
+        settings = None
+    await _run_job(
+        message,
+        idea=str(job.get("idea") or ""),
+        user_script=False,
+        voice_id=str(job.get("voice_id") or "") or None,
+        photo_file_id=str(job.get("photo_file_id") or "") or None,
+        bot=message.bot,
+        voice_name=str(job.get("voice_name") or "Сара"),
+        consent_verified=bool(job.get("consent_verified")),
+        n_scenes=int(job.get("n_scenes") or 5),
+        extra_brief=extra,
+        voice_settings=settings,
+        camera=str(job.get("camera") or ""),
+        motion=str(job.get("motion") or ""),
+        quality="optimal",
+        style=str(job.get("style") or "cinematic"),
+        watermark=bool(job.get("watermark")),
+        hook=str(job.get("hook") or ""),
+        revisions=notes,
+        preset_brief=str(job.get("preset_brief") or ""),
+        kind=str(job.get("kind") or "motivational"),
+    )
+
+
+async def on_revise_final(query: CallbackQuery, state: FSMContext) -> None:
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    await state.clear()
+    job = mark_last_job_final(msg.chat.id)
+    if not job:
+        await msg.answer("Нечего подтверждать — сначала сними ролик.", reply_markup=main_menu())
+        return
+    title = str(job.get("title") or get_last_title(msg.chat.id) or "ролик")
+    await msg.answer(
+        f"Финал зафиксирован: «{title}». Этот ролик больше не черновик.\n"
+        "Новый ролик — кнопка в меню.",
+        reply_markup=main_menu(),
+    )
 
 
 async def on_stale_callback(query: CallbackQuery) -> None:
@@ -1977,6 +2145,9 @@ async def on_plain_text(message: Message, state: FSMContext) -> None:
 
 async def on_other(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
+    if current == Flow.revise_notes.state:
+        await message.answer("Напиши правки текстом — что поменять в ролике.")
+        return
     if current == Flow.custom_photo.state:
         await on_custom_photo(message, state)
         return
@@ -2059,6 +2230,7 @@ async def main() -> None:
     dp.callback_query.register(on_tune, Flow.tune, F.data.startswith("tune:"))
     dp.callback_query.register(on_job, Flow.confirm, F.data.startswith("job:"))
     dp.callback_query.register(on_upscale_last, F.data == "upscale:last")
+    dp.callback_query.register(on_revise_final, F.data == "revise:final")
     dp.message.register(on_quick_idea, Flow.quick_idea, F.text)
     dp.message.register(on_preset_topic, Flow.preset_topic, F.text)
     dp.message.register(on_custom_script, Flow.custom_script, F.text)
@@ -2066,6 +2238,7 @@ async def main() -> None:
     dp.message.register(on_w2_extend_prompt, Flow.w2_extend_prompt, F.text)
     dp.message.register(on_edit_cut_times, Flow.edit_cut_times, F.text)
     dp.message.register(on_edit_auto_brief, Flow.edit_auto_brief, F.text)
+    dp.message.register(on_revise_notes, Flow.revise_notes, F.text)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_act_photo, Flow.act_photo, F.photo)

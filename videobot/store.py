@@ -77,6 +77,12 @@ def init_db() -> None:
                     title TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS last_jobs (
+                    user_id INTEGER PRIMARY KEY,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             conn.commit()
@@ -219,6 +225,58 @@ def get_last_title(user_id: int) -> str:
             (int(user_id),),
         ).fetchone()
     return str(row["title"] or "") if row else ""
+
+
+def save_last_job(user_id: int, payload: dict[str, Any], *, status: str = "draft") -> None:
+    """Параметры последней пайплайн-съёмки, чтобы крутить правки до финала."""
+    init_db()
+    data = dict(payload or {})
+    status = "final" if status == "final" else "draft"
+    data["status"] = status
+    blob = json.dumps(data, ensure_ascii=False)
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO last_jobs (user_id, payload, status, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, "
+            "status = excluded.status, updated_at = excluded.updated_at",
+            (int(user_id), blob, status, _now()),
+        )
+        conn.commit()
+
+
+def get_last_job(user_id: int) -> dict[str, Any] | None:
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT payload, status FROM last_jobs WHERE user_id = ?",
+            (int(user_id),),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        data = json.loads(str(row["payload"] or "{}"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["status"] = str(row["status"] or data.get("status") or "draft")
+    return data
+
+
+def mark_last_job_final(user_id: int) -> dict[str, Any] | None:
+    job = get_last_job(user_id)
+    if not job:
+        return None
+    save_last_job(user_id, job, status="final")
+    job["status"] = "final"
+    return job
+
+
+def clear_last_job(user_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        conn.execute("DELETE FROM last_jobs WHERE user_id = ?", (int(user_id),))
+        conn.commit()
 
 
 def _migrate_json_voices() -> None:
