@@ -481,6 +481,58 @@ def test_night_script_quality_and_hook() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_manual_short_topic_expands() -> None:
+    import inspect
+
+    from bot import on_preset_topic, on_quick_idea
+    from night_ideas import script_brief_from_idea, topic_expand_user
+    from pipeline import build_video, is_short_topic
+    from presets import default_job
+
+    assert is_short_topic("лестница микро")
+    assert is_short_topic("фокус")
+    assert is_short_topic("утренний кофе на балконе")
+    long_plot = (
+        "Пиксельный персонаж поднимается по ступеням: каждая ступень — пять минут фокуса, "
+        "лестница светлеет с каждым шагом, герой не прыгает через пролёты."
+    )
+    assert not is_short_topic(long_plot)
+
+    q = inspect.getsource(on_quick_idea)
+    assert "len(idea) < 3" in q
+    assert "len(idea) < 8" not in q
+    p = inspect.getsource(on_preset_topic)
+    assert "len(idea) < 3" in p
+
+    src = inspect.getsource(build_video)
+    assert "expand_topic_to_idea" in src
+    assert "is_short_topic" in src
+    assert "not user_script" in src
+    assert "not photo_lock" in src
+
+    user = topic_expand_user("лестница микро")
+    assert "лестница микро" in user
+    assert "hook" in user.lower()
+    brief = script_brief_from_idea(
+        {
+            "kind": "motivational",
+            "title": "Лестница",
+            "hook": "Не прыгай выше головы.",
+            "plot": "Герой шагает по пяти минутам.",
+        }
+    )
+    assert "Не прыгай выше головы" in brief
+    assert "Хук первой секунды" in brief
+
+    quick = default_job(mode="quick")
+    assert quick["camera"] == "punch"
+    assert quick["motion"] == "drive"
+    custom = default_job(mode="custom")
+    assert custom["camera"] == "push"
+    assert custom["motion"] == "nat"
+    assert custom["user_script"] is True
+
+
 def test_tiktok_upload_filename() -> None:
     assert tiktok_upload_filename("Мой ролик") == "Мой_ролик_tiktok.mp4"
     assert tiktok_upload_filename("  ") == "video_tiktok.mp4"
@@ -1106,6 +1158,7 @@ if __name__ == "__main__":
     test_camera_motion_soft()
     test_tiktok_upload_filename()
     test_night_script_quality_and_hook()
+    test_manual_short_topic_expands()
     test_last_frame_chains_with_user_photo()
     test_wave2_thin_api()
     test_store_sqlite_voices_and_prefs()

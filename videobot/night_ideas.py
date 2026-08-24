@@ -165,6 +165,86 @@ def parse_ideas(raw: str) -> list[dict[str, Any]]:
     return out
 
 
+def script_brief_from_idea(idea: dict[str, Any], *, extra: str = "") -> str:
+    """Один extra_brief для ночи и для ручной темы: хук, сюжет, CTA."""
+    hook = str(idea.get("hook") or idea.get("title") or "").strip()
+    brief = (
+        "Только синтетические сцены, без реальных людей и узнаваемых лиц. "
+        f"Тип: {idea.get('kind') or 'motivational'}. "
+        f"Хук первой секунды (narration сцены 1 обязана начинаться с этой фразы "
+        f"или её прямого усиления, не с нейтрального описания): {hook}. "
+        f"Сюжет: {idea.get('plot') or ''}. "
+        "Каждая сцена — конкретная ситуация, конфликт или вопрос зрителю, не общая метафора. "
+        "Призыв к действию не только в финале."
+    )
+    extra = (extra or "").strip()
+    if extra:
+        brief = brief + "\n" + extra
+    return brief
+
+
+def topic_expand_user(topic: str) -> str:
+    topic = " ".join((topic or "").split())[:200]
+    return (
+        f"Тема пользователя (короткая, разверни сам): «{topic}».\n"
+        "Сделай ровно 2 идеи ролика «Успех 888» строго по этой теме "
+        "(можно обе motivational, absurd — только если тема явно шутка).\n"
+        "Не уходи от темы. hook — цепляющая фраза 1-й секунды, не нейтральное описание кадра. "
+        "plot — 2–3 предложения конкретного сюжета. caption с #Успех888."
+    )
+
+
+async def expand_topic_to_idea(
+    session: aiohttp.ClientSession,
+    topic: str,
+) -> dict[str, Any]:
+    """Короткая тема → одна полная идея (title/hook/plot/caption), тот же IDEA_SYSTEM что ночь."""
+    topic = " ".join((topic or "").split())[:200]
+    if len(topic) < 3:
+        raise PipelineError("Тема слишком короткая. Напиши хотя бы 2–3 слова.")
+    user = topic_expand_user(topic)
+    last_err: Exception | None = None
+    topic_toks = set(tokenize(topic))
+    for attempt in range(3):
+        prompt = user if attempt == 0 else (
+            user + f"\nПОВТОР {attempt}: предыдущий JSON не подошёл. Верни ideas[] по теме «{topic}»."
+        )
+
+        async def _call(p: str = prompt) -> str:
+            return await _grok_raw(session, p)
+
+        try:
+            raw = await with_breaker(GROK, _call, retries=3)
+            ideas = parse_ideas(raw)
+        except Exception as exc:
+            last_err = exc
+            log.warning("expand topic attempt %s failed: %s", attempt + 1, exc)
+            continue
+        if not ideas:
+            last_err = PipelineError("Grok не вернул идей по теме.")
+            continue
+        ranked = sorted(
+            ideas,
+            key=lambda x: (
+                len(set(x.get("tokens") or []) & topic_toks),
+                float(x.get("score") or 0),
+            ),
+            reverse=True,
+        )
+        best = ranked[0]
+        log.info(
+            "expanded topic %r → title=%r hook=%r",
+            topic,
+            best.get("title"),
+            best.get("hook"),
+        )
+        return best
+    raise PipelineError(
+        "Не получилось развернуть тему в идею. Напиши другими словами.",
+        str(last_err or ""),
+    )
+
+
 async def _grok_raw(session: aiohttp.ClientSession, user_content: str) -> str:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)

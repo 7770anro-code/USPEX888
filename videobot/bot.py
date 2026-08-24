@@ -133,7 +133,7 @@ def photo_start_blocked(photo_file_id: str | None, consent_verified: bool) -> st
 
 HOW_IT_WORKS = (
     "Как это работает — совсем просто:\n\n"
-    "1) Тема, готовый текст или пресет.\n"
+    "1) Тема (хватит 2–3 слов — хук и сценарий соберу сам), готовый текст или пресет.\n"
     "2) Можно своё фото — лицо в ролике будет как на фото.\n"
     "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
@@ -969,8 +969,9 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
         await _save_job(state, job)
         await state.set_state(Flow.quick_idea)
         await msg.answer(
-            "⚡️ Напиши идею одним сообщением.\n"
-            "Например: «утренний кофе на балконе, город просыпается»."
+            "⚡️ Напиши тему — хватит 2–3 слов.\n"
+            "Например: «лестница микро» или «утренний кофе».\n"
+            "Заголовок, хук, сюжет, сцены и подпись придумаю сам."
         )
         return
     if data == "menu:preset":
@@ -1026,15 +1027,15 @@ async def on_preset_pick(query: CallbackQuery, state: FSMContext) -> None:
     p = PRESETS[pid]
     if query.message:
         await query.message.answer(
-            f"Пресет «{p['label']}». Напиши тему одним сообщением.\n"
-            "Я сам соберу хук, сцены, голос и финальный призыв."
+            f"Пресет «{p['label']}». Напиши тему — хватит 2–3 слов.\n"
+            "Заголовок, хук, сюжет и сцены соберу сам."
         )
 
 
 async def on_quick_idea(message: Message, state: FSMContext) -> None:
     idea = (message.text or "").strip()
-    if len(idea) < 8:
-        await message.answer("Напиши чуть больше — хотя бы одно предложение.")
+    if len(idea) < 3:
+        await message.answer("Напиши тему: 2–3 слова достаточно, остальное придумаю сам.")
         return
     job = await _job(state)
     job["idea"] = idea
@@ -1047,8 +1048,8 @@ async def on_quick_idea(message: Message, state: FSMContext) -> None:
 
 async def on_preset_topic(message: Message, state: FSMContext) -> None:
     idea = (message.text or "").strip()
-    if len(idea) < 8:
-        await message.answer("Напиши тему чуть подробнее.")
+    if len(idea) < 3:
+        await message.answer("Напиши тему чуть конкретнее — хватит 2–3 слов.")
         return
     job = await _job(state)
     if not job.get("preset_id"):

@@ -12,6 +12,7 @@ import pipeline as pipeline_mod
 from night_accounts import Account
 from night_circuit import ELEVEN, ELEVEN_GATE, RUNWAY, RUNWAY_GATE, CircuitOpen
 from presets import camera_prompt, estimate_cost, motion_prompt, voice_settings_payload
+from night_ideas import script_brief_from_idea
 from pipeline import PipelineError, build_video, is_runway_safety_fail, is_runway_person_moderation
 
 log = logging.getLogger("videobot.night")
@@ -48,15 +49,7 @@ async def render_idea(
     await RUNWAY_GATE.wait()
     await ELEVEN_GATE.wait()
     hook = str(idea.get("hook") or idea.get("title") or "").strip()
-    brief = (
-        "Только синтетические сцены, без реальных людей и узнаваемых лиц. "
-        f"Тип: {idea.get('kind')}. "
-        f"Хук первой секунды (narration сцены 1 обязана начинаться с этой фразы "
-        f"или её прямого усиления, не с нейтрального описания): {hook}. "
-        f"Сюжет: {idea.get('plot') or ''}. "
-        "Каждая сцена — конкретная ситуация, конфликт или вопрос зрителю, не общая метафора. "
-        "Призыв к действию не только в финале."
-    )
+    brief = script_brief_from_idea(idea)
     pipeline_mod.CANCEL_ON_TIMEOUT = False
     try:
         video, script = await build_video(

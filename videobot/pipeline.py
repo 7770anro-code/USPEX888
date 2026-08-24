@@ -279,6 +279,7 @@ SPEECH_CHARS_PER_SEC = 13.0
 SCENE_NARRATION_MIN_WORDS = 18
 SCENE_NARRATION_MAX_WORDS = 32
 SCRIPT_QUALITY_RETRIES = 2
+TOPIC_EXPAND_MAX_WORDS = 16
 SCRIPT_TOO_LONG_MSG = (
     "Текст слишком длинный: озвучка не влезет в 6 клипов по 10 секунд "
     "даже с ускорением, последние слова обрежутся. "
@@ -294,6 +295,14 @@ def estimate_speech_sec(text: str) -> float:
 
 def count_narration_words(text: str) -> int:
     return len(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text or "", flags=re.U))
+
+
+def is_short_topic(text: str) -> bool:
+    """2–3 слова или короткая фраза — ещё не сюжет, нужен этап IDEA_SYSTEM."""
+    blob = (text or "").strip()
+    if not blob:
+        return False
+    return count_narration_words(blob) <= TOPIC_EXPAND_MAX_WORDS
 
 
 def _norm_phrase(text: str) -> str:
@@ -497,6 +506,9 @@ def ratio_wh(ratio: str) -> tuple[int, int]:
 
 def format_script(script: dict[str, Any]) -> str:
     lines = [f"🎬 {script.get('title') or 'Ролик'}"]
+    hook = (script.get("hook") or "").strip()
+    if hook:
+        lines.append(f"🪝 Хук: {hook}")
     lock = (script.get("continuity") or "").strip()
     if lock:
         lines.append("")
@@ -504,6 +516,10 @@ def format_script(script: dict[str, Any]) -> str:
     lines.append("")
     for i, scene in enumerate(script.get("scenes") or [], 1):
         lines.append(f"{i}. {scene.get('narration') or ''}")
+    cap = (script.get("caption") or "").strip()
+    if cap:
+        lines.append("")
+        lines.append(cap[:400])
     return "\n".join(lines).strip()
 
 
@@ -1566,6 +1582,21 @@ async def build_video(
         ) or (
             isinstance(reference_image, str) and reference_image.startswith("data:")
         )
+        packed: dict[str, Any] | None = None
+        if (
+            not user_script
+            and not photo_lock
+            and not (hook or "").strip()
+            and is_short_topic(idea)
+        ):
+            from night_ideas import expand_topic_to_idea, script_brief_from_idea
+
+            await report("Разворачиваю тему в идею…", stage=live.STAGE_SCRIPT)
+            packed = await expand_topic_to_idea(session, idea)
+            hook = str(packed.get("hook") or packed.get("title") or "").strip()
+            extra_brief = script_brief_from_idea(packed, extra=extra_brief)
+            idea = str(packed.get("plot") or packed.get("title") or idea)
+            planned = max(planned, 4)
         script = await grok_script(
             session,
             idea,
@@ -1577,6 +1608,12 @@ async def build_video(
             hook=hook,
         )
         script = enforce_speech_budget(script, user_script=user_script)
+        if packed:
+            if packed.get("title"):
+                script["title"] = packed["title"]
+            script["hook"] = hook
+            if packed.get("caption"):
+                script["caption"] = packed["caption"]
         scenes = script["scenes"]
         continuity = script.get("continuity") or ""
         script["ratio"] = ratio
