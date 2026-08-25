@@ -123,7 +123,7 @@ def vibe_style(text: str) -> str:
 
 
 def scenes_for_vibe(brief: str) -> int:
-    """Ночной контур: 4 сцены ≈ 30 сек. Явная длина в тексте → 4–6."""
+    """Авто-вайб: по умолчанию 6 коротких сцен ≈ 30 сек. Явная длина → 4–6 × ~5 сек."""
     text = (brief or "").lower()
     explicit = bool(
         re.search(r"\d{1,3}\s*-\s*\d{1,3}\s*(?:сек|s\b)?", text)
@@ -132,10 +132,10 @@ def scenes_for_vibe(brief: str) -> int:
     lo, hi = parse_target_range(brief)
     mid = (lo + hi) / 2.0
     if not explicit:
+        return 6
+    if mid <= 22:
         return 4
-    if mid <= 35:
-        return 4
-    if mid <= 50:
+    if mid <= 27:
         return 5
     return 6
 

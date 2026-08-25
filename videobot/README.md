@@ -1,16 +1,17 @@
 # VideoBot
 
-Отдельный Telegram-бот: **идея / пресет / свой текст → вертикальный ролик 30–60 секунд (TikTok 9:16)**.
+Отдельный Telegram-бот: **идея / пресет / свой текст → вертикальный ролик 20–60 секунд (TikTok 9:16)**.
 
 Не связан с USPEX/Vector. На сервере: `/opt/videobot`, unit `videobot.service`.
 
 ## Пайплайн
 
-1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф.
+1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф. «⚡️ Видео за 1 клик» и авто-вайб: 6 коротких сцен, речь 12–18 слов, клипы ~5 сек, итого 20–30 сек.
 2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 голос кнопками + клон из SQLite. Подача и скорость — `voice_settings`.
 3. **Runway** `https://api.dev.runwayml.com`, `X-Runway-Version: 2024-11-06`.
    - Вертикаль `720:1280`. Клип 5 или 10 сек.
    - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`). Veo / Seedance 2.5 / Gemini на том же ключе не в UI по умолчанию. При необходимости `RUNWAY_MODEL` (`veo3.1_fast`, `seedance2_5`) / `RUNWAY_STILL_MODEL`. Seedance I2V: `audio=true` + тот же first-frame still на каждую сцену (last-frame chaining падает INPUT_VALIDATION). Photoreal-лицо ByteDance режет SAFETY.
+   - Своё фото: если задан `GEMINI_API_KEY` (Google AI Studio, модель `gemini-2.5-flash-image` / Nano Banana), кадр сначала чистится там, и в Runway I2V идёт уже этот still — меньше искажений лица. Без ключа фото идёт в Runway как есть. Это **не** Runway `gemini_image3_pro`.
    - В каждый visual: `same character as reference image, do not alter face, outfit, or visual style`. First frame / last-frame chaining как раньше; gen4.5 и Seedance I2V не смешивают first-frame с отдельным character reference.
    - В подписи готового ролика — фактическая модель на каждый кадр (видно, если сцена ушла в `gen4_turbo`).
    - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
@@ -22,8 +23,8 @@
 
 ## Режимы (/start)
 
-- **Видео за 1 клик** — короткая тема (хук/сценарий/камера сами) → опционально своё фото (**та же кнопка согласия** `consent:yes`) и голос (можно пропустить — Сара) → настройки → оценка стоимости.
-- **Своё фото + текст + голос** — сценарий, фото, **та же кнопка согласия** (`consent:yes`), голос, стоимость.
+- **Видео за 1 клик** — короткая тема (хук/сценарий/камера сами) → опционально своё фото (**та же кнопка согласия** `consent:yes`) и голос (можно пропустить — Сара) → настройки → оценка стоимости. 6 коротких клипов, ~20–30 сек.
+- **Своё фото + текст + голос** — сценарий, фото, **та же кнопка согласия** (`consent:yes`), голос, стоимость. Своё фото тоже прогоняется через Nano Banana, если есть `GEMINI_API_KEY`.
 - **Оживить фото** — Act Two (`model=act_two`): фото + короткое видео мимики. Согласие на фото — **та же кнопка**, что в custom-режиме (хард-константа).
 - **Клонировать мой голос** — отдельное согласие (не фото) → запись/файл → `POST /v1/voices/add` → `voice_id` в SQLite по `user_id`. Кнопка **«Удалить мой голос»**.
 - **Нарезка и монтаж** (`/edit`): **ручной** — таймкоды/порядок и ffmpeg; **авто** — описание → план клипов через xAI API (не браузер grok.com) → ffmpeg. Runway/ElevenLabs не вызываются.

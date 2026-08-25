@@ -144,8 +144,10 @@ def resume_progress(work_dir: Path, n_scenes: int | None = None) -> dict[str, An
     tts = sum(1 for i in range(n) if file_ready(work_dir / f"n{i}.mp3", min_bytes=MP3_MIN_BYTES))
     clips = sum(1 for i in range(n) if file_ready(work_dir / f"c{i}.mp4", min_bytes=MP4_MIN_BYTES))
     muxed = sum(1 for i in range(n) if file_ready(work_dir / f"m{i}.mp4", min_bytes=MP4_MIN_BYTES))
-    still = file_ready(work_dir / "bible_still.png", min_bytes=IMAGE_MIN_BYTES) or file_ready(
-        work_dir / "user_photo.jpg", min_bytes=IMAGE_MIN_BYTES
+    still = (
+        file_ready(work_dir / "bible_still.png", min_bytes=IMAGE_MIN_BYTES)
+        or file_ready(work_dir / "banana_still.png", min_bytes=IMAGE_MIN_BYTES)
+        or file_ready(work_dir / "user_photo.jpg", min_bytes=IMAGE_MIN_BYTES)
     )
     return {
         "n_scenes": n,
@@ -214,4 +216,5 @@ def run_kwargs_from_checkpoint(work_dir: Path) -> dict[str, Any] | None:
         "revisions": revisions,
         "preset_brief": str(run.get("preset_brief") or ""),
         "kind": str(run.get("kind") or "motivational"),
+        "dynamic_pacing": bool(run.get("dynamic_pacing")),
     }

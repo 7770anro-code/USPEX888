@@ -31,6 +31,7 @@ import config
 from pipeline import (
     PipelineError,
     RUNWAY_CREDITS_MSG,
+    DYNAMIC_SCENE_COUNT,
     build_video,
     compact_runway_models,
     ensure_ffmpeg,
@@ -442,6 +443,7 @@ async def on_resume_callback(query: CallbackQuery, state: FSMContext) -> None:
                 revisions=revisions if isinstance(revisions, list) else None,
                 preset_brief=str(pending.get("preset_brief") or ""),
                 kind=str(pending.get("kind") or "motivational"),
+                dynamic_pacing=bool(pending.get("dynamic_pacing")),
                 wipe=True,
             )
             return
@@ -615,8 +617,10 @@ def cost_text(job: dict[str, Any]) -> str:
     idea = (job.get("idea") or "").strip()
     n = int(job.get("n_scenes") or target_scene_count(idea) or 5)
     need_still = not job.get("photo_file_id")
+    clip_sec = 5 if job.get("dynamic_pacing") else 10
     est = estimate_cost(
         n_scenes=n,
+        clip_sec=clip_sec,
         quality=str(job.get("quality") or "optimal"),
         text=idea,
         need_still=need_still,
@@ -962,6 +966,7 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
                 "watermark": False,
                 "hook": "",
                 "kind": "motivational",
+                "dynamic_pacing": True,
             },
         )
         await message.answer(
@@ -969,10 +974,10 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
             reply_markup=credits_pause_kb(job_key_manual(message.chat.id)),
         )
         return
-    cost = estimate_cost(n_scenes=n, quality=quality, text=brief, need_still=True)
+    cost = estimate_cost(n_scenes=n, clip_sec=5, quality=quality, text=brief, need_still=True)
     await message.answer(
         "Снимаю оригинальный синтетический ролик, интернет не ищу, чужие клипы не качаю.\n"
-        f"≈{n} сцен, цель ~30 сек, качество «Оптимально». "
+        f"≈{n} коротких сцен (~5 сек), цель 20–30 сек, качество «Оптимально». "
         f"Оценка Runway ≈{cost.get('runway')} кр.\n"
         "Субтитры — текст озвучки (ffmpeg drawtext)."
     )
@@ -994,6 +999,7 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
         style=vibe_style(brief),
         watermark=False,
         kind="motivational",
+        dynamic_pacing=True,
     )
 
 
@@ -1408,7 +1414,8 @@ async def on_quick_idea(message: Message, state: FSMContext) -> None:
         return
     job = await _job(state)
     job["idea"] = idea
-    job["n_scenes"] = target_scene_count(idea)
+    job["n_scenes"] = DYNAMIC_SCENE_COUNT
+    job["dynamic_pacing"] = True
     job["user_script"] = False
     job["photo_file_id"] = None
     job["consent_verified"] = False
@@ -1779,6 +1786,7 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
         quality=str(job.get("quality") or "optimal"),
         style=str(job.get("style") or "cinematic"),
         watermark=bool(job.get("watermark")),
+        dynamic_pacing=bool(job.get("dynamic_pacing")),
     )
     if credits_paused(resume_work_dir(msg.chat.id)):
         save_checkpoint(
@@ -1862,6 +1870,7 @@ async def _run_job(
     preset_brief: str = "",
     kind: str = "motivational",
     wipe: bool = False,
+    dynamic_pacing: bool = False,
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -1911,6 +1920,7 @@ async def _run_job(
             "revisions": list(revisions or []),
             "preset_brief": preset_brief or "",
             "kind": kind or "motivational",
+            "dynamic_pacing": bool(dynamic_pacing),
         },
     )
     try:
@@ -1951,6 +1961,7 @@ async def _run_job(
                     quality=quality,
                     watermark=watermark,
                     hook=hook,
+                    dynamic_pacing=dynamic_pacing,
                 )
             preview = format_script(script)
             try:
@@ -1963,6 +1974,8 @@ async def _run_job(
             models_line = compact_runway_models(script.get("runway_models") if isinstance(script.get("runway_models"), list) else [])
             if still_name:
                 caption += f"\nпервый кадр: {still_name}"
+            elif script.get("nano_banana"):
+                caption += "\nпервый кадр: Nano Banana → Runway"
             if models_line:
                 caption += f"\n{models_line}"
             title = str(script.get("title") or "video")
@@ -1989,6 +2002,7 @@ async def _run_job(
                     "quality": quality,
                     "style": style,
                     "watermark": bool(watermark),
+                    "dynamic_pacing": bool(dynamic_pacing),
                 },
                 status="draft",
             )
@@ -2608,6 +2622,7 @@ async def on_revise_notes(message: Message, state: FSMContext) -> None:
         revisions=notes,
         preset_brief=str(job.get("preset_brief") or ""),
         kind=str(job.get("kind") or "motivational"),
+        dynamic_pacing=bool(job.get("dynamic_pacing")),
     )
 
 

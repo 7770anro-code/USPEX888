@@ -123,6 +123,9 @@ def test_runway_poll_delay_min() -> None:
 def test_pick_clip_duration() -> None:
     assert pick_clip_duration(3.0) == 5
     assert pick_clip_duration(8.0) == 10
+    assert pick_clip_duration(8.0, prefer_short=True) == 5
+    assert pick_clip_duration(9.2, prefer_short=True) == 5
+    assert pick_clip_duration(9.3, prefer_short=True) == 10
 
 
 def test_ratio_wh() -> None:
@@ -391,7 +394,8 @@ def test_night_script_quality_and_hook() -> None:
     assert "photo_lock" in src
     assert "temperature=temp" in src
     assert "0.7" in src
-    assert "SCENE_NARRATION_MAX_WORDS" in src
+    assert "narration_word_limits" in src
+    assert "dynamic_pacing" in src
     from night_ideas import _grok_raw
 
     assert "xai_creative_models" in inspect.getsource(_grok_raw)
@@ -613,6 +617,8 @@ def test_quick_optional_photo_voice() -> None:
     assert "photo_skip_kb" in q
     assert "Flow.tune" not in q
     assert "хук" in q.lower() or "Хук" in q
+    assert "DYNAMIC_SCENE_COUNT" in q
+    assert "dynamic_pacing" in q
 
     custom = inspect.getsource(on_custom_script)
     from bot import main, on_menu
@@ -1492,8 +1498,8 @@ def test_edit_auto_synth_vibe_no_download() -> None:
     assert "скачива" in brief.lower()
     assert "ремейка" in brief.lower() or "ремейк" in VIBE_SYNTH_LOCK.lower()
     assert "instagram" not in brief.lower()
-    assert scenes_for_vibe("ночной вайб") == 4
-    assert scenes_for_vibe("динамичный 30-45 сек") == 5
+    assert scenes_for_vibe("ночной вайб") == 6
+    assert scenes_for_vibe("динамичный 30-45 сек") == 6
     assert scenes_for_vibe("ролик 20 сек") == 4
     assert scenes_for_vibe("нарезка 55 секунд") == 6
     assert vibe_style("мульт про чайник") == "cartoon"
@@ -1824,6 +1830,139 @@ def test_serial_reveal_show() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_nano_banana_and_dynamic_pacing() -> None:
+    import asyncio
+    import base64
+    import inspect
+    from pathlib import Path
+
+    import config
+    from bot import _run_synth_vibe, cost_text, on_quick_idea
+    from pipeline import (
+        DYNAMIC_SCENE_COUNT,
+        SCENE_NARRATION_MAX_WORDS_DYNAMIC,
+        SCENE_NARRATION_MIN_WORDS_DYNAMIC,
+        build_video,
+        enhance_reference_with_nano_banana,
+        extract_gemini_inline_image,
+        narration_word_limits,
+        nano_banana_prompt,
+        script_quality_issues,
+    )
+    from presets import default_job, estimate_cost
+
+    assert DYNAMIC_SCENE_COUNT == 6
+    assert narration_word_limits() == (18, 28)
+    assert narration_word_limits(dynamic_pacing=True) == (
+        SCENE_NARRATION_MIN_WORDS_DYNAMIC,
+        SCENE_NARRATION_MAX_WORDS_DYNAMIC,
+    )
+    quick = default_job(mode="quick")
+    assert quick["n_scenes"] == 6
+    assert quick["dynamic_pacing"] is True
+    custom = default_job(mode="custom")
+    assert custom["dynamic_pacing"] is False
+    assert custom["n_scenes"] == 5
+
+    blob = b"\x89PNG" + b"x" * 200
+    encoded = base64.b64encode(blob).decode("ascii")
+    camel = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "ok"},
+                        {"inlineData": {"mimeType": "image/png", "data": encoded}},
+                    ]
+                }
+            }
+        ]
+    }
+    assert extract_gemini_inline_image(camel) == blob
+    snake = {"candidates": [{"content": {"parts": [{"inline_data": {"data": encoded}}]}}]}
+    assert extract_gemini_inline_image(snake) == blob
+    assert extract_gemini_inline_image({}) is None
+    prompt = nano_banana_prompt("punch-in, looking at camera")
+    assert "SAME person" in prompt
+    assert "punch-in" in prompt
+    assert "9:16" in prompt
+
+    long_nar = " ".join(f"слово{i}" for i in range(22))
+    too_long = {
+        "title": "x",
+        "scenes": [
+            {"narration": long_nar, "visual_prompt": "punch-in handheld drive"} for _ in range(6)
+        ],
+    }
+    issues = script_quality_issues(too_long, n_scenes=6, dynamic_pacing=True, photo_lock=True)
+    assert "длинн" in issues.lower() or "максимум" in issues.lower()
+
+    few = {
+        "title": "x",
+        "scenes": [
+            {"narration": " ".join(f"слово{i}" for i in range(14)), "visual_prompt": "punch-in"}
+            for _ in range(3)
+        ],
+    }
+    few_issues = script_quality_issues(few, n_scenes=6, dynamic_pacing=True, photo_lock=True)
+    assert "мало сцен" in few_issues.lower()
+
+    env = Path(__file__).with_name(".env.example").read_text(encoding="utf-8")
+    assert "GEMINI_API_KEY=" in env
+    assert "aistudio.google.com/apikey" in env
+    assert "GEMINI_API_KEY" not in inspect.getsource(config.missing_secrets)
+    assert "gemini-2.5-flash-image" in Path(__file__).with_name("config.py").read_text(
+        encoding="utf-8"
+    )
+
+    banana_src = inspect.getsource(enhance_reference_with_nano_banana)
+    from pipeline import GEMINI_GENERATE_URL
+
+    assert "generativelanguage.googleapis.com" in GEMINI_GENERATE_URL
+    assert "x-goog-api-key" in banana_src
+    assert "google-genai" not in banana_src
+    assert "GEMINI_GENERATE_URL" in banana_src
+    build_src = inspect.getsource(build_video)
+    assert "enhance_reference_with_nano_banana" in build_src
+    assert "banana_still" in build_src
+    assert "prefer_short=dynamic_pacing" in build_src
+
+    night_src = Path(__file__).with_name("night_runner.py").read_text(encoding="utf-8")
+    assert "n_scenes = 4" in night_src
+    serial_src = Path(__file__).with_name("serial_render.py").read_text(encoding="utf-8")
+    assert "dynamic_pacing=True" not in serial_src
+
+    q = inspect.getsource(on_quick_idea)
+    assert "DYNAMIC_SCENE_COUNT" in q
+    assert "dynamic_pacing" in q
+    vibe = inspect.getsource(_run_synth_vibe)
+    assert "dynamic_pacing=True" in vibe
+    assert "clip_sec=5" in vibe
+    assert "photo_file_id=None" in vibe
+
+    text = cost_text(
+        {"n_scenes": 6, "quality": "optimal", "idea": "кофе", "dynamic_pacing": True}
+    )
+    assert "6 × 5 сек" in text
+    est = estimate_cost(n_scenes=6, clip_sec=5, quality="optimal", text="кофе", need_still=True)
+    assert est["runway"] == 6 * 5 * 12 + 5
+
+    old_key = config.GEMINI_API_KEY
+    config.GEMINI_API_KEY = ""
+
+    async def _skip() -> object:
+        return await enhance_reference_with_nano_banana(
+            None,  # type: ignore[arg-type]
+            Path("/tmp/missing-photo.jpg"),
+            Path("/tmp/banana_out.png"),
+        )
+
+    try:
+        assert asyncio.run(_skip()) is None
+    finally:
+        config.GEMINI_API_KEY = old_key
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -1870,4 +2009,5 @@ if __name__ == "__main__":
     test_upscale_result_uses_video_upscale()
     test_look_and_runway_models()
     test_serial_reveal_show()
+    test_nano_banana_and_dynamic_pacing()
     print("ok")

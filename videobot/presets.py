@@ -231,7 +231,7 @@ def default_job(*, mode: str) -> dict[str, Any]:
         "preset_id": "",
         "idea": "",
         "user_script": mode == "custom",
-        "n_scenes": 5,
+        "n_scenes": 6 if mode == "quick" else 5,
         "style": "cinematic",
         "voice_idx": 1,
         "delivery": "sure",
@@ -243,6 +243,7 @@ def default_job(*, mode: str) -> dict[str, Any]:
         "photo_file_id": None,
         "consent_verified": False,
         "watermark": False,
+        "dynamic_pacing": mode == "quick",
     }
 
 

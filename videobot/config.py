@@ -69,6 +69,10 @@ XAI_API_KEY_NEW, XAI_API_KEY_ERROR = _load_xai_api_key()
 ELEVENLABS_API_KEY = _clean("ELEVENLABS_API_KEY")
 RUNWAY_API_KEY = _clean("RUNWAY_API_KEY")
 VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
+# Google AI Studio — Nano Banana (gemini-2.5-flash-image). Не Runway GEMINI.
+# Без ключа своё фото идёт в I2V как есть. Не входит в missing_secrets().
+GEMINI_API_KEY = _clean("GEMINI_API_KEY")
+GEMINI_IMAGE_MODEL = _clean("GEMINI_IMAGE_MODEL") or "gemini-2.5-flash-image"
 
 XAI_MODEL = _clean("XAI_MODEL") or "grok-4.5"
 XAI_FALLBACK_MODEL = _clean("XAI_FALLBACK_MODEL") or "grok-4-1-fast-non-reasoning"

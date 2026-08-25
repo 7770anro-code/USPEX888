@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import random
@@ -322,10 +323,19 @@ def target_scene_count(text: str) -> int:
 # 10с клип + atempo ≤ ~1.8, чтобы -shortest не резал хвост речи (лимит ffmpeg 2.0).
 CLIP_SPEECH_BUDGET_SEC = 18.0
 MAX_SCENES = 6
+# 1-клик / вайб: 6 коротких клипов × 5 сек ≈ 30 сек, не 4×10.
+DYNAMIC_SCENE_COUNT = 6
 SPEECH_WORDS_PER_SEC = 2.2
 SPEECH_CHARS_PER_SEC = 13.0
 SCENE_NARRATION_MIN_WORDS = 18
 SCENE_NARRATION_MAX_WORDS = 28
+# Динамичный монтаж: речь должна влезать в 5с клип при atempo ≤ 1.8 (~9с бюджета).
+SCENE_NARRATION_MIN_WORDS_DYNAMIC = 12
+SCENE_NARRATION_MAX_WORDS_DYNAMIC = 18
+GEMINI_GENERATE_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+NANO_BANANA_MIN_BYTES = 1000
 SCRIPT_QUALITY_RETRIES = 2
 VISUAL_FALLBACK_PHOTO = "slow subtle push-in, minimal body movement"
 VISUAL_FALLBACK_SYNTH = (
@@ -355,6 +365,12 @@ def estimate_speech_sec(text: str) -> float:
 
 def count_narration_words(text: str) -> int:
     return len(re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text or "", flags=re.U))
+
+
+def narration_word_limits(*, dynamic_pacing: bool = False) -> tuple[int, int]:
+    if dynamic_pacing:
+        return SCENE_NARRATION_MIN_WORDS_DYNAMIC, SCENE_NARRATION_MAX_WORDS_DYNAMIC
+    return SCENE_NARRATION_MIN_WORDS, SCENE_NARRATION_MAX_WORDS
 
 
 def is_short_topic(text: str) -> bool:
@@ -428,11 +444,14 @@ def script_quality_issues(
     hook: str = "",
     n_scenes: int = 4,
     photo_lock: bool = False,
+    dynamic_pacing: bool = False,
 ) -> str:
     """Пусто = ок. Иначе текст для переспроса Grok. Кастомный user_script сюда не пускаем."""
     scenes = list(script.get("scenes") or [])
     issues: list[str] = []
-    need = min(4, int(n_scenes or 4))
+    planned = max(1, int(n_scenes or 4))
+    need = max(4, min(MAX_SCENES, planned)) if dynamic_pacing else min(4, planned)
+    min_w, max_w = narration_word_limits(dynamic_pacing=dynamic_pacing)
     if len(scenes) < need:
         issues.append(f"Мало сцен: {len(scenes)}, нужно минимум {need}.")
     short: list[str] = []
@@ -441,21 +460,21 @@ def script_quality_issues(
     for i, scene in enumerate(scenes, 1):
         nar = str(scene.get("narration") or "")
         n = count_narration_words(nar)
-        if n < SCENE_NARRATION_MIN_WORDS:
+        if n < min_w:
             short.append(f"сцена {i}: {n} слов")
-        elif n > SCENE_NARRATION_MAX_WORDS:
+        elif n > max_w:
             long.append(f"сцена {i}: {n} слов")
         if not photo_lock and visual_is_soft_only(str(scene.get("visual_prompt") or "")):
             soft.append(f"сцена {i}")
     if short:
         issues.append(
             "Narration слишком короткая (минимум "
-            f"{SCENE_NARRATION_MIN_WORDS} слов в КАЖДОЙ сцене): " + "; ".join(short)
+            f"{min_w} слов в КАЖДОЙ сцене): " + "; ".join(short)
         )
     if long:
         issues.append(
             "Narration слишком длинная (максимум "
-            f"{SCENE_NARRATION_MAX_WORDS} слов в КАЖДОЙ сцене): " + "; ".join(long)
+            f"{max_w} слов в КАЖДОЙ сцене): " + "; ".join(long)
         )
     if hook and scenes:
         first = str(scenes[0].get("narration") or "")
@@ -511,9 +530,10 @@ def enforce_speech_budget(
     *,
     user_script: bool,
     photo_lock: bool = False,
+    dynamic_pacing: bool = False,
 ) -> dict[str, Any]:
     """Режет длинные сцены на доп. клипы; в кастомном режиме не молча обрезает речь."""
-    budget = max_speech_sec_for_clip(10)
+    budget = max_speech_sec_for_clip(5 if dynamic_pacing else 10)
     visual_fallback = visual_fallback_prompt(photo_lock=photo_lock or user_script)
     out: list[dict[str, str]] = []
     for scene in script.get("scenes") or []:
@@ -607,8 +627,10 @@ def fallback_split_script(text: str, n: int = 5) -> dict[str, Any]:
     }
 
 
-def pick_clip_duration(audio_sec: float) -> int:
-    if audio_sec <= 6.5:
+def pick_clip_duration(audio_sec: float, *, prefer_short: bool = False) -> int:
+    """5 или 10 сек (лимит Runway). prefer_short — чаще 5с при той же речи."""
+    limit = 9.2 if prefer_short else 6.5
+    if audio_sec <= limit:
         return 5
     return 10
 
@@ -842,6 +864,7 @@ async def grok_script(
     photo_lock: bool = False,
     hook: str = "",
     script_system: str | None = None,
+    dynamic_pacing: bool = False,
 ) -> dict[str, Any]:
     if config.XAI_API_KEY_ERROR:
         raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
@@ -850,11 +873,17 @@ async def grok_script(
     style_key = style if style in STYLES else "cinematic"
     n_scenes = max(4, min(MAX_SCENES, int(n_scenes or 5)))
     hook = (hook or "").strip()
+    min_w, max_w = narration_word_limits(dynamic_pacing=dynamic_pacing)
     quality_rules = (
-        f"Каждая narration СТРОГО {SCENE_NARRATION_MIN_WORDS}–{SCENE_NARRATION_MAX_WORDS} русских слов. "
+        f"Каждая narration СТРОГО {min_w}–{max_w} русских слов. "
         "Каждая сцена — конкретная ситуация, конфликт или прямой вопрос зрителю, не голая метафора. "
         "Призыв к действию не только в последней сцене: минимум ещё в одной из сцен 1–3."
     )
+    if dynamic_pacing:
+        quality_rules += (
+            f" Динамичный монтаж: ровно {n_scenes} коротких сцен, итого 20–30 секунд. "
+            "Не растягивай речь — куски короче, склеек больше, общая длина не растёт."
+        )
     if not photo_lock:
         quality_rules += (
             " Камера энергичная: punch-in / whip pan / crash zoom / handheld drive. "
@@ -920,7 +949,11 @@ async def grok_script(
                 continue
             if not user_script:
                 issues = script_quality_issues(
-                    script, hook=hook, n_scenes=n_scenes, photo_lock=photo_lock
+                    script,
+                    hook=hook,
+                    n_scenes=n_scenes,
+                    photo_lock=photo_lock,
+                    dynamic_pacing=dynamic_pacing,
                 )
                 if issues:
                     quality_note = issues
@@ -1491,7 +1524,8 @@ def text_to_image_payload(prompt: str, ratio: str, model: str | None = None) -> 
     docs.dev.runwayml.com (2024-11-06): у gen4_image_turbo поле referenceImages
     обязательно, min 1 / max 3, элемент {uri, tag?}. Пустой массив не принимают.
     У gen4_image referenceImages необязателен — его не шлём, если референса нет.
-    gemini_image3_pro / gemini_image3.1_flash — Nano Banana, свои ratio, без contentModeration.
+    gemini_image3_pro / gemini_image3.1_flash — still через Runway (не Google AI Studio
+    Nano Banana / GEMINI_API_KEY). Свои ratio, без contentModeration.
     """
     name = (model or "gen4_image").strip() or "gen4_image"
     if name in RUNWAY_GEMINI_IMAGE:
@@ -1769,10 +1803,133 @@ async def runway_clip(
     )
 
 
+def image_mime_type(path: Path, head: bytes = b"") -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".png" or head.startswith(b"\x89PNG"):
+        return "image/png"
+    if suffix == ".webp" or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+def nano_banana_prompt(scene_visual: str = "") -> str:
+    scene = re.sub(r"\s+", " ", (scene_visual or "").strip())[:400]
+    scene = scene or "medium shot, looking toward camera, cinematic lighting"
+    return (
+        "Edit this photo into a clean photorealistic 9:16 vertical cinematic still "
+        "of the SAME person. Preserve the exact facial identity, age, hair, skin tone, "
+        "distinctive features, and clothing. Improve lighting, sharpness, and natural skin. "
+        "Remove noise, compression artifacts, and facial distortion. "
+        "Do not change who they are. No extra people, no text, no watermark, no logo. "
+        f"Framing and scene: {scene}."
+    )
+
+
+def extract_gemini_inline_image(payload: dict[str, Any]) -> bytes | None:
+    """Достать сырую картинку из generateContent (camelCase или snake_case)."""
+    cands = payload.get("candidates") if isinstance(payload, dict) else None
+    if not isinstance(cands, list) or not cands:
+        return None
+    first = cands[0] if isinstance(cands[0], dict) else {}
+    parts = ((first.get("content") or {}) if isinstance(first, dict) else {}).get("parts") or []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        inline = part.get("inlineData") or part.get("inline_data") or {}
+        if not isinstance(inline, dict):
+            continue
+        data = inline.get("data")
+        if not data:
+            continue
+        try:
+            raw = base64.b64decode(data)
+        except Exception:
+            continue
+        if len(raw) >= 80:
+            return raw
+    return None
+
+
+async def enhance_reference_with_nano_banana(
+    session: aiohttp.ClientSession,
+    image_path: Path,
+    dest: Path,
+    *,
+    scene_visual: str = "",
+) -> Path | None:
+    """Google AI Studio Gemini 2.5 Flash Image. Без ключа / при ошибке — None (фото как есть)."""
+    key = (config.GEMINI_API_KEY or "").strip()
+    if not key or not image_path.is_file():
+        return None
+    try:
+        raw_in = image_path.read_bytes()
+    except OSError as exc:
+        log.warning("nano banana read failed: %s", exc)
+        return None
+    if len(raw_in) < 80:
+        return None
+    if len(raw_in) > 6_500_000:
+        log.warning("nano banana skip: photo too large (%s bytes)", len(raw_in))
+        return None
+    model = (config.GEMINI_IMAGE_MODEL or "gemini-2.5-flash-image").strip()
+    url = GEMINI_GENERATE_URL.format(model=model)
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": nano_banana_prompt(scene_visual)},
+                    {
+                        "inlineData": {
+                            "mimeType": image_mime_type(image_path, raw_in[:12]),
+                            "data": base64.b64encode(raw_in).decode("ascii"),
+                        }
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {"aspectRatio": "9:16"},
+        },
+    }
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+    tries = max(1, min(3, int(config.HTTP_RETRIES or 4)))
+    last_err = ""
+    req_timeout = aiohttp.ClientTimeout(total=120, sock_connect=30, sock_read=90)
+    for attempt in range(tries):
+        try:
+            async with session.post(
+                url, json=payload, headers=headers, timeout=req_timeout
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                    last_err = f"HTTP {resp.status}"
+                    await sleep_backoff(attempt)
+                    continue
+                if resp.status >= 400:
+                    log.warning("nano banana HTTP %s: %s", resp.status, str(data)[:400])
+                    return None
+                blob = extract_gemini_inline_image(data if isinstance(data, dict) else {})
+                if not blob:
+                    log.warning("nano banana: no image in response %s", str(data)[:300])
+                    return None
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(blob)
+                log.info("nano banana saved %s bytes=%s", dest.name, len(blob))
+                return dest
+        except Exception as exc:
+            last_err = f"{type(exc).__name__}: {exc}"
+            log.warning("nano banana attempt %s: %s", attempt + 1, last_err)
+            if attempt < tries - 1:
+                await sleep_backoff(attempt)
+                continue
+    log.warning("nano banana failed: %s", last_err)
+    return None
+
+
 async def file_to_data_uri(path: Path, dest_jpeg: Path | None = None) -> str:
     """JPEG data URI для Runway promptImage (лимит ~5 МБ)."""
-    import base64
-
     jpeg = dest_jpeg or path.with_suffix(".ref.jpg")
     await _run_ffmpeg(
         [
@@ -2054,6 +2211,7 @@ async def build_video(
     hook: str = "",
     script_system: str | None = None,
     photo_lock: bool | None = None,
+    dynamic_pacing: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
     import live_status as live
@@ -2079,6 +2237,7 @@ async def build_video(
         await _notify(progress, text)
 
     from resume_job import (
+        IMAGE_MIN_BYTES,
         MP4_MIN_BYTES,
         file_ready,
         load_checkpoint,
@@ -2128,9 +2287,13 @@ async def build_video(
                 photo_lock=photo_lock,
                 hook=hook,
                 script_system=script_system,
+                dynamic_pacing=dynamic_pacing,
             )
             script = enforce_speech_budget(
-                script, user_script=user_script, photo_lock=photo_lock
+                script,
+                user_script=user_script,
+                photo_lock=photo_lock,
+                dynamic_pacing=dynamic_pacing,
             )
             if packed:
                 if packed.get("title"):
@@ -2161,10 +2324,33 @@ async def build_video(
             job_seed = random.randint(0, 2_147_483_647)
         save_checkpoint(work_dir, job_seed=job_seed, n_scenes=total, credits_paused=False)
         still_png = work_dir / "bible_still.png"
+        banana_png = work_dir / "banana_still.png"
         anchor_image: str | None = None
         if isinstance(reference_image, Path) and reference_image.exists():
             await report("Готовлю фото как первый кадр…", stage=live.STAGE_STILL)
-            anchor_image = await file_to_data_uri(reference_image, work_dir / "user_ref.jpg")
+            source = reference_image
+            if file_ready(banana_png, min_bytes=max(IMAGE_MIN_BYTES, NANO_BANANA_MIN_BYTES)):
+                log.info("resume banana still %s", banana_png.name)
+                source = banana_png
+                script["nano_banana"] = True
+            else:
+                first_visual = ""
+                if scenes:
+                    first_visual = str(scenes[0].get("visual_prompt") or "")
+                if (config.GEMINI_API_KEY or "").strip():
+                    await report("Чищу кадр через Nano Banana…", stage=live.STAGE_STILL)
+                enhanced = await enhance_reference_with_nano_banana(
+                    session,
+                    reference_image,
+                    banana_png,
+                    scene_visual=first_visual,
+                )
+                if enhanced and enhanced.is_file():
+                    source = enhanced
+                    script["nano_banana"] = True
+                else:
+                    script["nano_banana"] = False
+            anchor_image = await file_to_data_uri(source, work_dir / "user_ref.jpg")
         elif isinstance(reference_image, str) and reference_image.startswith(("data:", "http")):
             anchor_image = reference_image
         elif file_ready(still_png, min_bytes=1000):
@@ -2257,7 +2443,9 @@ async def build_video(
                 clip = clip_path
             else:
                 audio_sec = await media_duration(audio)
-                clip_sec = pick_clip_duration(audio_sec or 10.0)
+                clip_sec = pick_clip_duration(
+                    audio_sec or 10.0, prefer_short=dynamic_pacing
+                )
                 await report(
                     f"Сцена {n} из {total} рендерится в Runway",
                     stage=live.STAGE_RUNWAY,
