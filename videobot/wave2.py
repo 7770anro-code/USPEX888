@@ -402,7 +402,12 @@ async def speech_to_speech(
 
 
 async def delete_eleven_voice(session: aiohttp.ClientSession, voice_id: str) -> None:
-    url = ELEVEN_DELETE_VOICE_URL.format(voice_id=voice_id)
+    from fal_models import is_minimax_voice
+
+    vid = (voice_id or "").strip()
+    if not vid or is_minimax_voice(vid):
+        return
+    url = ELEVEN_DELETE_VOICE_URL.format(voice_id=vid)
     try:
         async with session.delete(
             url,

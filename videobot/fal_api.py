@@ -60,7 +60,7 @@ def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
 
 
 def extract_fal_media_url(data: dict[str, Any]) -> str:
-    """Достать URL видео/картинки из типичных схем fal."""
+    """Достать URL видео/картинки/аудио из типичных схем fal."""
     if not isinstance(data, dict):
         return ""
     video = data.get("video")
@@ -70,6 +70,13 @@ def extract_fal_media_url(data: dict[str, Any]) -> str:
         return video
     if isinstance(data.get("video_url"), str) and data["video_url"].startswith("http"):
         return data["video_url"]
+    audio = data.get("audio")
+    if isinstance(audio, dict) and isinstance(audio.get("url"), str):
+        return audio["url"]
+    if isinstance(audio, str) and audio.startswith("http"):
+        return audio
+    if isinstance(data.get("audio_url"), str) and data["audio_url"].startswith("http"):
+        return data["audio_url"]
     image = data.get("image")
     if isinstance(image, dict) and isinstance(image.get("url"), str):
         return image["url"]
@@ -90,6 +97,39 @@ def extract_fal_media_url(data: dict[str, Any]) -> str:
         if isinstance(item, str) and item.startswith("http"):
             return item
     return ""
+
+
+def extract_fal_voice_id(data: dict[str, Any]) -> str:
+    """custom_voice_id из MiniMax clone."""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("custom_voice_id", "voice_id", "customVoiceId"):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    nested = data.get("output")
+    if isinstance(nested, dict):
+        return extract_fal_voice_id(nested)
+    return ""
+
+
+def live_fal_id(model_id: str, request_id: str) -> str:
+    return f"fal:{model_id}:{request_id}"
+
+
+def parse_live_fal_id(task_id: str) -> tuple[str, str] | None:
+    raw = (task_id or "").strip()
+    if not raw.startswith("fal:"):
+        return None
+    rest = raw[4:]
+    model_id, sep, rid = rest.rpartition(":")
+    if not sep or not model_id or not rid:
+        return None
+    return model_id, rid
+
+
+def is_fal_live_id(task_id: str) -> bool:
+    return parse_live_fal_id(task_id) is not None
 
 
 def _encode_model(model_id: str) -> str:
@@ -210,6 +250,65 @@ async def fal_poll(
     )
 
 
+async def fal_peek_status(
+    session: aiohttp.ClientSession,
+    model_id: str,
+    request_id: str,
+    *,
+    used_image: bool = False,
+) -> dict[str, Any]:
+    """Один GET /status — без ожидания COMPLETED. Для кнопки «Обновить статус»."""
+    rid = (request_id or "").strip()
+    if not rid:
+        raise PipelineError("Нет fal request_id — опрашивать нечего.")
+    encoded = _encode_model(model_id)
+    status_url = f"{FAL_QUEUE}/{encoded}/requests/{rid}/status"
+    async with session.get(
+        status_url + "?logs=0",
+        headers=fal_headers(),
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as resp:
+        raw = await resp.text()
+        if resp.status >= 400:
+            err = fal_fail_error(_clip(f"HTTP {resp.status}: {raw}"), used_image=used_image)
+            err.status = resp.status
+            raise err
+        data = json.loads(raw) if raw else {}
+    if not isinstance(data, dict):
+        return {}
+    status_u = str(data.get("status") or "").upper()
+    if status_u in FAL_DONE:
+        result = await fal_fetch_result(session, model_id, rid, used_image=used_image)
+        merged = dict(data)
+        if isinstance(result, dict):
+            merged.update(result)
+        return merged
+    return data
+
+
+async def fal_fetch_result(
+    session: aiohttp.ClientSession,
+    model_id: str,
+    request_id: str,
+    *,
+    used_image: bool = False,
+) -> dict[str, Any]:
+    encoded = _encode_model(model_id)
+    result_url = f"{FAL_QUEUE}/{encoded}/requests/{request_id}"
+    async with session.get(
+        result_url,
+        headers=fal_headers(),
+        timeout=aiohttp.ClientTimeout(total=60),
+    ) as resp:
+        raw = await resp.text()
+        if resp.status >= 400:
+            raise fal_fail_error(_clip(f"HTTP {resp.status}: {raw}"), used_image=used_image)
+        result = json.loads(raw) if raw else {}
+    if not isinstance(result, dict):
+        raise PipelineError("fal.ai вернул не JSON результата.", _clip(raw, 240))
+    return result
+
+
 async def asyncio_sleep() -> None:
     import asyncio
 
@@ -250,6 +349,12 @@ async def fal_run(
         except OSError:
             log.warning("не записал fal request_id рядом с %s", dest_id.name if dest_id else "")
     log.info("fal submitted model=%s request_id=%s", model_id, rid)
+    try:
+        from live_status import note_runway_task
+
+        note_runway_task(live_fal_id(model_id, rid), kind=model_id)
+    except Exception:
+        pass
     return await fal_poll(session, model_id, rid, used_image=used_image)
 
 

@@ -68,6 +68,7 @@ from live_status import (
     job_key_manual,
     job_scope,
     live_kb,
+    note_fal_poll,
     parse_callback_key,
     set_message,
     start_job,
@@ -119,7 +120,6 @@ from resume_job import (
 from wave2 import (
     CLONE_CONSENT_MSG,
     act_two_payload,
-    clone_voice,
     create_designed_voice,
     delete_eleven_voice,
     design_voice_previews,
@@ -168,8 +168,8 @@ HOW_IT_WORKS = (
     "авто «описать вайб» — оригинальная синтетика тем же пайплайном, что ночь "
     "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Kling/Seedance), чужие ролики не скачиваю.\n"
     "8) Мультсериал «Гибриды» (владелец): reveal-формат, серии продолжают сюжет, слот NIGHT_ACC4, пост да/нет в /night.\n"
-    "9) Студия (Mini App): 1-клик, апскейл Topaz, примерка одежды, клон голоса. "
-    "Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
+    "9) Меню Mini App: «🎬 Открыть меню» — шесть категорий (создать / монтаж / улучшить / "
+    "примерка / мой голос / мои видео). Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -235,10 +235,10 @@ def _voices_kb(
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    studio_btn = InlineKeyboardButton(text="🖥 Студия", callback_data="menu:studio")
+    studio_btn = InlineKeyboardButton(text="🎬 Открыть меню", callback_data="menu:studio")
     if config.WEBAPP_PUBLIC_URL:
         studio_btn = InlineKeyboardButton(
-            text="🖥 Студия",
+            text="🎬 Открыть меню",
             web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
         )
     return InlineKeyboardMarkup(
@@ -348,7 +348,7 @@ def result_kb(*, can_finalize: bool = True) -> InlineKeyboardMarkup:
 
 
 async def compose_live_text(job_key: str) -> tuple[str, bool]:
-    """Текст статуса. GET Runway только по сохранённому task_id, с паузой ≥5 с."""
+    """Текст статуса. GET fal/Runway только по сохранённому task_id, с паузой ≥5 с."""
     snap = get_job(job_key)
     stale = False
     tid = str((snap or {}).get("runway_task_id") or "").strip()
@@ -357,9 +357,17 @@ async def compose_live_text(job_key: str) -> tuple[str, bool]:
             try:
                 timeout = aiohttp.ClientTimeout(total=30)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    await fetch_runway_task(session, tid)
+                    from fal_api import is_fal_live_id
+
+                    if is_fal_live_id(tid) and config.FAL_KEY:
+                        from providers.fal_client import FalClient
+
+                        status = await FalClient(session).poll_status(tid)
+                        note_fal_poll(tid, status)
+                    else:
+                        await fetch_runway_task(session, tid)
             except Exception:
-                log.warning("live status Runway GET failed job=%s", job_key)
+                log.warning("live status GET failed job=%s", job_key)
             snap = get_job(job_key)
         else:
             stale = True
@@ -1022,6 +1030,7 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
         watermark=False,
         kind="motivational",
         dynamic_pacing=True,
+        route_mode="montage_generate",
     )
 
 
@@ -1305,13 +1314,13 @@ async def _open_studio(msg: Message, state: FSMContext) -> None:
     await state.clear()
     if config.WEBAPP_PUBLIC_URL:
         await msg.answer(
-            "Студия — Mini App: 1-клик, Topaz, примерка одежды, клон голоса. "
+            "Меню внутри Telegram: создать видео, монтаж, 4K/слоу-мо, примерка, клон голоса, история. "
             "Результат приходит в этот чат.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="Открыть Студию",
+                            text="🎬 Открыть меню",
                             web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
                         )
                     ],
@@ -1866,6 +1875,9 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
         style=str(job.get("style") or "cinematic"),
         watermark=bool(job.get("watermark")),
         dynamic_pacing=bool(job.get("dynamic_pacing")),
+        route_mode="real_photo"
+        if job.get("photo_file_id") and job.get("consent_verified")
+        else "synthetic_multi_scene",
     )
     if credits_paused(resume_work_dir(msg.chat.id)):
         save_checkpoint(
@@ -1950,6 +1962,7 @@ async def _run_job(
     kind: str = "motivational",
     wipe: bool = False,
     dynamic_pacing: bool = False,
+    route_mode: str | None = None,
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -2041,6 +2054,8 @@ async def _run_job(
                     watermark=watermark,
                     hook=hook,
                     dynamic_pacing=dynamic_pacing,
+                    route_mode=route_mode
+                    or ("real_photo" if photo_path else "synthetic_multi_scene"),
                 )
             preview = format_script(script)
             try:
@@ -2343,17 +2358,19 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
     work = _w2_work(message)
     status = await message.answer("⏳ Клонирую голос…")
     try:
+        from studio import clone_user_audio
+
         src = await _tg_download(message.bot, file_id, work / f"clone.{ext}")
         old = get_cloned_voice(message.chat.id)
         async with aiohttp.ClientSession() as session:
-            voice_id = await clone_voice(session, src, name="Мой голос")
+            voice_id = await clone_user_audio(session, src, name="Мой голос")
             if old and old.get("id") and old["id"] != voice_id:
                 await delete_eleven_voice(session, old["id"])
         set_cloned_voice(message.chat.id, voice_id, "Мой голос")
         await state.clear()
         await status.edit_text("Голос склонирован и сохранён.")
         await message.answer(
-            "Клон привязан к вашему аккаунту. Он появится в списке голосов. "
+            "Клон MiniMax привязан к аккаунту. Выбери «Мой голос» в списке вместо пресета ElevenLabs. "
             "Удалить можно кнопкой ниже.",
             reply_markup=clone_done_kb(),
         )
@@ -2971,7 +2988,7 @@ async def main() -> None:
         try:
             await bot.set_chat_menu_button(
                 menu_button=MenuButtonWebApp(
-                    text="Студия",
+                    text="Открыть меню",
                     web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
                 )
             )

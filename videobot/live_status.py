@@ -32,9 +32,9 @@ STAGE_FAILED = "failed"
 
 _STAGE_TITLE = {
     STAGE_SCRIPT: "Сценарий (Grok)",
-    STAGE_STILL: "Первый кадр в Runway",
-    STAGE_TTS: "Озвучка ElevenLabs",
-    STAGE_RUNWAY: "Видео в Runway",
+    STAGE_STILL: "Первый кадр",
+    STAGE_TTS: "Озвучка",
+    STAGE_RUNWAY: "Видео (Kling / Seedance)",
     STAGE_MUX: "Сборка финального файла ffmpeg",
     STAGE_DONE: "Готово",
     STAGE_FAILED: "Ошибка",
@@ -284,10 +284,17 @@ def format_status(snap: dict[str, Any] | None, *, stale_runway: bool = False) ->
         lines.append(runway_line)
     if not snap.get("done"):
         lines.append("")
-        lines.append(
-            "Кнопка спрашивает GET /v1/tasks/{id} по уже сохранённому task_id. "
-            "Новую задачу Runway не создаёт, кредиты не тратит."
-        )
+        tid = str(snap.get("runway_task_id") or "")
+        if tid.startswith("fal:"):
+            lines.append(
+                "Кнопка спрашивает статус fal.ai по уже сохранённому request_id. "
+                "Новую задачу не создаёт, кредиты не тратит."
+            )
+        else:
+            lines.append(
+                "Кнопка спрашивает GET /v1/tasks/{id} по уже сохранённому task_id. "
+                "Новую задачу Runway не создаёт, кредиты не тратит."
+            )
     return "\n".join(lines).strip()
 
 
@@ -303,27 +310,66 @@ def _runway_line(snap: dict[str, Any], *, stale: bool = False) -> str:
     status = str(snap.get("runway_status") or "").upper()
     if not status and not snap.get("runway_task_id"):
         return ""
-    bits = ["Runway:"]
+    tid = str(snap.get("runway_task_id") or "")
+    vendor = "fal.ai:" if tid.startswith("fal:") else "Runway:"
+    bits = [vendor]
     if status:
         human = {
             "PENDING": "в очереди",
             "THROTTLED": "ждёт слот (THROTTLED, это не новая задача)",
             "RUNNING": "рендерит",
             "SUCCEEDED": "клип готов",
+            "COMPLETED": "клип готов",
             "FAILED": "задача FAILED",
             "CANCELLED": "отменено",
             "CANCELED": "отменено",
+            "IN_QUEUE": "в очереди",
+            "IN_PROGRESS": "рендерит",
         }.get(status, status)
         bits.append(human)
     progress = snap.get("runway_progress")
-    if progress is not None and status == "RUNNING":
+    running = status in ("RUNNING", "IN_PROGRESS")
+    if progress is not None and running:
         bits.append(f"{int(round(float(progress) * 100))}% этого клипа")
     frame = snap.get("runway_frame")
     if frame is not None:
         bits.append(f"кадр {int(frame)}")
     if stale:
-        bits.append("(повторный GET слишком частый — Runway просит ≥5 с, показал сохранённое)")
+        if tid.startswith("fal:"):
+            bits.append("(повторный GET слишком частый — показал сохранённое)")
+        else:
+            bits.append("(повторный GET слишком частый — Runway просит ≥5 с, показал сохранённое)")
     return " ".join(bits)
+
+
+def note_fal_poll(task_id: str, status: Any) -> None:
+    """Нормализовать poll_status() провайдера в те же поля, что и Runway GET."""
+    tid = (task_id or "").strip()
+    if not tid:
+        return
+    percent = getattr(status, "percent", None)
+    progress = None
+    try:
+        if percent is not None:
+            progress = max(0.0, min(1.0, float(percent) / 100.0))
+    except (TypeError, ValueError):
+        progress = None
+    state = str(getattr(status, "state", "") or "").lower()
+    mapped = "RUNNING"
+    if getattr(status, "done", False) or state in ("done", "completed", "succeeded"):
+        mapped = "SUCCEEDED"
+        progress = 1.0
+    elif getattr(status, "failed", False) or state in ("failed", "error"):
+        mapped = "FAILED"
+        progress = None
+    elif state in ("pending", "queued", "in_queue"):
+        mapped = "PENDING"
+    update_job(
+        runway_task_id=tid,
+        runway_status=mapped,
+        runway_progress=progress,
+        runway_kind=str(getattr(status, "stage", "") or getattr(status, "model", "") or ""),
+    )
 
 
 def reset_for_tests() -> None:

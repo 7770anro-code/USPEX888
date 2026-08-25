@@ -43,32 +43,57 @@ h1 {
   margin: 0 0 0.4rem;
   letter-spacing: -0.03em;
 }
+h2 {
+  font-weight: 600;
+  font-size: 1.45rem;
+  margin: 0.35rem 0 0.45rem;
+}
 .lede, .hint {
   color: var(--muted);
   line-height: 1.45;
   margin: 0 0 0.9rem;
   font-size: 0.95rem;
 }
-.tabs {
+.home {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0.35rem;
-  margin-bottom: 1rem;
+  gap: 0.55rem;
 }
-.tab {
+.home.is-off { display: none; }
+.card {
   appearance: none;
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 2.2rem 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 0.7rem;
+  row-gap: 0.12rem;
+  background: var(--panel);
   border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-  padding: 0.55rem 0.2rem;
-  border-radius: 999px;
-  font: 600 0.72rem/1 ui-sans-serif, system-ui, sans-serif;
-  letter-spacing: 0.02em;
+  border-radius: 1rem;
+  padding: 0.85rem 0.95rem;
+  color: inherit;
 }
-.tab.is-on {
-  background: var(--accent);
-  color: var(--accent-ink);
-  border-color: var(--accent);
+.card .ico {
+  grid-row: 1 / span 2;
+  font-size: 1.35rem;
+  line-height: 1.2;
+  align-self: center;
+}
+.card .ttl {
+  font: 650 1.02rem/1.2 ui-sans-serif, system-ui, sans-serif;
+}
+.card .sub {
+  color: var(--muted);
+  font: 0.82rem/1.35 ui-sans-serif, system-ui, sans-serif;
+}
+.back {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 0;
+  font: 600 0.88rem/1.2 ui-sans-serif, system-ui, sans-serif;
 }
 .panel {
   display: none;
@@ -122,6 +147,10 @@ legend {
   color: var(--ink);
   font-size: 0.88rem;
 }
+.row-btns {
+  display: grid;
+  gap: 0.45rem;
+}
 .go {
   width: 100%;
   margin-top: 0.2rem;
@@ -132,6 +161,11 @@ legend {
   font: 650 1rem/1.2 ui-sans-serif, system-ui, sans-serif;
   padding: 0.85rem 1rem;
   border-radius: 0.9rem;
+}
+.go.alt {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
 }
 .go:disabled { opacity: 0.55; }
 .status {
@@ -147,3 +181,15 @@ legend {
 }
 .status.err { border-color: var(--danger); color: #f3c7bb; }
 .status.ok { border-color: var(--ok); }
+.tip {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: 0 auto;
+  max-width: 28rem;
+  padding: 0.65rem 1rem;
+  background: #2a1c0e;
+  color: var(--ink);
+  font: 0.85rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  border-bottom: 1px solid var(--line);
+}

@@ -70,7 +70,8 @@ ELEVENLABS_API_KEY = _clean("ELEVENLABS_API_KEY")
 RUNWAY_API_KEY = _clean("RUNWAY_API_KEY")
 VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
 # fal.ai — Kling 3.0 + Seedance 2.5 + Topaz + примерка. Ключ: https://fal.ai/dashboard/keys
-FAL_KEY = _clean("FAL_KEY")
+# Бриф: Authorization: Key $FAL_API_KEY. Принимаем и FAL_KEY (как в кабинете fal).
+FAL_KEY = _clean("FAL_KEY") or _clean("FAL_API_KEY")
 VIDEO_PROVIDER = (_clean("VIDEO_PROVIDER") or "fal").strip().lower()
 FAL_VIDEO_MODEL = _clean("FAL_VIDEO_MODEL")
 FAL_POLL_SEC = float(_clean("FAL_POLL_SEC") or "4")

@@ -69,6 +69,7 @@ async def render_idea(
             quality=account.quality,
             watermark=False,
             hook=hook,
+            route_mode="night_pipeline",
         )
         RUNWAY.ok()
         ELEVEN.ok()

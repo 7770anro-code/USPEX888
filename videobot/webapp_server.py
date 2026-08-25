@@ -74,6 +74,22 @@ async def handle_quick(request: web.Request) -> web.Response:
     )
 
 
+async def handle_vibe(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    vibe = str(form.get("vibe") or form.get("idea") or "").strip()
+    if len(vibe) < 3:
+        return json_error("Напиши вайб или тему: хотя бы 2–3 слова.")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "vibe", vibe))
+    return web.json_response(
+        {"ok": True, "message": "Снимаю вайб. Результат придёт в чат.", "close": True}
+    )
+
+
 async def handle_upscale(request: web.Request) -> web.Response:
     form = await request.post()
     try:
@@ -87,6 +103,38 @@ async def handle_upscale(request: web.Request) -> web.Response:
     asyncio.create_task(_run_safe(bot, user["id"], "upscale", data, filename, mime))
     return web.json_response(
         {"ok": True, "message": "Topaz в работе. Файл придёт в чат с ботом.", "close": True}
+    )
+
+
+async def handle_interpolate(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    data, filename, mime = await _read_file_field(form, "file")
+    if not data:
+        return json_error("Приложи видео для слоу-мо.")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "interpolate", data, filename, mime))
+    return web.json_response(
+        {"ok": True, "message": "Делаю слоу-мо. Файл придёт в чат.", "close": True}
+    )
+
+
+async def handle_restore(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    data, filename, mime = await _read_file_field(form, "file")
+    if not data:
+        return json_error("Приложи фото для реставрации.")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "restore", data, filename, mime))
+    return web.json_response(
+        {"ok": True, "message": "Реставрирую фото. Картинка придёт в чат.", "close": True}
     )
 
 
@@ -121,7 +169,20 @@ async def handle_clone(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     asyncio.create_task(_run_safe(bot, user["id"], "clone", audio, filename, consent))
     return web.json_response(
-        {"ok": True, "message": "Клонирую голос. Напишу в чат, когда будет готово.", "close": True}
+        {"ok": True, "message": "Клонирую голос MiniMax. Напишу в чат, когда будет готово.", "close": True}
+    )
+
+
+async def handle_history(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "history"))
+    return web.json_response(
+        {"ok": True, "message": "Если есть готовый ролик — пришлю в чат.", "close": True}
     )
 
 
@@ -129,9 +190,13 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
     from studio import (
         job_error_text,
         run_studio_clone,
+        run_studio_history,
+        run_studio_interpolate,
         run_studio_quick,
+        run_studio_restore,
         run_studio_tryon,
         run_studio_upscale,
+        run_studio_vibe,
         send_chat_text,
     )
 
@@ -146,15 +211,26 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
                 photo_bytes=photo or None,
                 consent=bool(consent),
             )
+        elif kind == "vibe":
+            (vibe,) = args
+            await run_studio_vibe(bot, user_id, str(vibe))
         elif kind == "upscale":
             data, filename, mime = args
             await run_studio_upscale(bot, user_id, data, str(filename), str(mime))
+        elif kind == "interpolate":
+            data, filename, mime = args
+            await run_studio_interpolate(bot, user_id, data, str(filename), str(mime))
+        elif kind == "restore":
+            data, filename, mime = args
+            await run_studio_restore(bot, user_id, data, str(filename), str(mime))
         elif kind == "tryon":
             person, clothes, consent = args
             await run_studio_tryon(bot, user_id, person, clothes, consent=bool(consent))
         elif kind == "clone":
             audio, filename, consent = args
             await run_studio_clone(bot, user_id, audio, str(filename), consent=bool(consent))
+        elif kind == "history":
+            await run_studio_history(bot, user_id)
     except (PipelineError, Exception) as exc:
         try:
             await send_chat_text(bot, user_id, job_error_text(exc))
@@ -171,9 +247,13 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_get("/app.css", lambda _r: web.FileResponse(WEBAPP_DIR / "app.css"))
     app.router.add_get("/app.js", lambda _r: web.FileResponse(WEBAPP_DIR / "app.js"))
     app.router.add_post("/api/quick", handle_quick)
+    app.router.add_post("/api/vibe", handle_vibe)
     app.router.add_post("/api/upscale", handle_upscale)
+    app.router.add_post("/api/interpolate", handle_interpolate)
+    app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/tryon", handle_tryon)
     app.router.add_post("/api/clone", handle_clone)
+    app.router.add_post("/api/history", handle_history)
     return app
 
 

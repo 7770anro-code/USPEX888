@@ -985,6 +985,10 @@ async def eleven_tts(
     if dest.is_file() and dest.stat().st_size >= 200:
         log.info("ElevenLabs skip existing %s bytes=%s", dest.name, dest.stat().st_size)
         return dest
+    from fal_models import fal_minimax_tts, is_minimax_voice
+
+    if is_minimax_voice(voice_id):
+        return await fal_minimax_tts(session, text, str(voice_id), dest)
     if not config.ELEVENLABS_API_KEY:
         raise PipelineError("Голос сейчас недоступен. Попробуй ещё раз чуть позже.")
     voice_id = voice_id or config.ELEVENLABS_VOICE_ID
@@ -1554,12 +1558,25 @@ async def _text_to_image_url(
     ratio: str,
     dest_hint: Path | None = None,
     model: str | None = None,
+    *,
+    route_mode: str = "synthetic_multi_scene",
 ) -> str:
     """Общий still для цепочки I2V, если пользователь не прислал фото."""
-    if config.video_provider() == "fal":
-        from fal_models import fal_still_url
+    from provider_router import generate_still
 
-        return await fal_still_url(session, prompt, dest_hint)
+    _ = model
+    _ = ratio
+    return await generate_still(session, prompt, dest_hint, route_mode=route_mode)
+
+
+async def _text_to_image_url_native(
+    session: aiohttp.ClientSession,
+    prompt: str,
+    ratio: str,
+    dest_hint: Path | None = None,
+    model: str | None = None,
+) -> str:
+    """Только Runway still — для legacy-провайдера."""
     wanted = (model or "gen4_image").strip() or "gen4_image"
     chain = [wanted]
     if wanted != "gen4_image":
@@ -1670,18 +1687,42 @@ async def runway_clip(
     clip_total: int = 1,
     seed: int | None = None,
     quality: str = "optimal",
+    *,
+    route_mode: str = "synthetic_multi_scene",
+    photo_lock: bool = False,
+    references: list[str] | None = None,
 ) -> Path:
-    if config.video_provider() == "fal":
-        from fal_models import fal_render_clip
+    from provider_router import render_clip
 
-        return await fal_render_clip(
-            session,
-            runway_prompt_text(prompt),
-            int(seconds),
-            dest,
-            prompt_image=prompt_image,
-            quality=quality,
-        )
+    return await render_clip(
+        session,
+        prompt,
+        seconds,
+        dest,
+        prompt_image=prompt_image,
+        quality=quality,
+        clip_index=clip_index,
+        clip_total=clip_total,
+        seed=seed,
+        ratio=ratio,
+        route_mode=route_mode,
+        photo_lock=photo_lock,
+        references=references,
+    )
+
+
+async def _runway_clip_native(
+    session: aiohttp.ClientSession,
+    prompt: str,
+    seconds: int,
+    dest: Path,
+    ratio: str | None = None,
+    prompt_image: str | None = None,
+    clip_index: int = 1,
+    clip_total: int = 1,
+    seed: int | None = None,
+    quality: str = "optimal",
+) -> Path:
     if not config.RUNWAY_API_KEY:
         raise PipelineError("Камера сейчас недоступна. Попробуй ещё раз чуть позже.")
     requested = int(seconds)
@@ -2048,8 +2089,15 @@ async def mux_scene(
     caption: str = "",
     width: int = 720,
     height: int = 1280,
+    session: aiohttp.ClientSession | None = None,
 ) -> Path:
-    vdur = await media_duration(video) or 10.0
+    src_video = video
+    if session is not None and config.FAL_KEY:
+        lip_dest = video.with_name(video.stem + "_lip.mp4")
+        synced = await _maybe_kling_lipsync(session, video, audio, lip_dest)
+        if synced is not None:
+            src_video = synced
+    vdur = await media_duration(src_video) or 10.0
     adur = await media_duration(audio) or vdur
     if vdur > 0.2 and adur > 0.2 and (adur / vdur) > 2.0 + 1e-3:
         raise PipelineError(
@@ -2078,7 +2126,7 @@ async def mux_scene(
             "ffmpeg",
             "-y",
             "-i",
-            str(video),
+            str(src_video),
             "-i",
             str(audio),
             "-filter_complex",
@@ -2104,6 +2152,30 @@ async def mux_scene(
         ]
     )
     return dest
+
+
+async def _maybe_kling_lipsync(
+    session: aiohttp.ClientSession,
+    video: Path,
+    audio: Path,
+    dest: Path,
+) -> Path | None:
+    """ElevenLabs дорожка → Kling lip-sync. При ошибке оставляем ffmpeg mux."""
+    try:
+        vdur = await media_duration(video) or 0.0
+        adur = await media_duration(audio) or 0.0
+        if vdur < 2.0 or vdur > 10.5 or adur < 2.0:
+            return None
+        from fal_api import path_to_fal_url
+        from providers.fal_client import FalClient
+
+        vurl = await path_to_fal_url(session, video)
+        aurl = await path_to_fal_url(session, audio)
+        url = await FalClient(session).lip_sync(vurl, aurl)
+        return await _download(session, url, dest)
+    except Exception as exc:
+        log.warning("kling lipsync skip, ffmpeg mux: %s", exc)
+        return None
 
 
 async def concat_mp4(clips: list[Path], dest: Path, width: int = 720, height: int = 1280) -> Path:
@@ -2230,6 +2302,7 @@ async def build_video(
     script_system: str | None = None,
     photo_lock: bool | None = None,
     dynamic_pacing: bool = False,
+    route_mode: str | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
     import live_status as live
@@ -2274,6 +2347,9 @@ async def build_video(
         )
         if photo_lock is None:
             photo_lock = has_ref
+        mode = (route_mode or "").strip() or (
+            "real_photo" if photo_lock else "synthetic_multi_scene"
+        )
         packed: dict[str, Any] | None = None
         script = load_script(work_dir)
         resumed = script is not None
@@ -2392,6 +2468,7 @@ async def build_video(
                     ratio,
                     work_dir / "bible_still.hint",
                     model=still_model_for_quality(quality),
+                    route_mode=mode,
                 )
                 await _download(session, still_url, still_png)
                 anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
@@ -2414,6 +2491,14 @@ async def build_video(
         muxed: list[Path] = []
         clip_models: list[str] = []
         i2v_model, _t2v_model = video_models_for_quality(quality)
+        from fal_models import is_minimax_voice
+        from provider_router import chain_for
+        from prompt_templates import video_prompt_for
+
+        engines = chain_for(mode)
+        primary_engine = engines[0] if engines else "kling"
+        same_still = "kling" in engines or "seedance" in engines
+        refs = [anchor_image] if anchor_image else []
         for i, scene in enumerate(scenes):
             n = i + 1
             mixed_path = work_dir / f"m{i}.mp4"
@@ -2425,7 +2510,7 @@ async def build_video(
                 tracker.tts_done = max(tracker.tts_done, n)
                 tracker.video_done = n
                 if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
-                    if config.video_provider() == "fal":
+                    if same_still:
                         prompt_image = anchor_image
                     elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                         prompt_image = anchor_image
@@ -2437,7 +2522,13 @@ async def build_video(
                 await report(f"Клип {n} из {total} уже смонтирован", stage=live.STAGE_RUNWAY, scene=n)
                 clip_models.append(read_runway_model(clip_path) or "?")
                 continue
-            await report(f"Озвучка ElevenLabs · сцена {n} из {total}", stage=live.STAGE_TTS, scene=n)
+            await report(
+                f"Озвучка MiniMax · сцена {n} из {total}"
+                if is_minimax_voice(voice_id)
+                else f"Озвучка ElevenLabs · сцена {n} из {total}",
+                stage=live.STAGE_TTS,
+                scene=n,
+            )
             audio = await eleven_tts(
                 session,
                 scene["narration"],
@@ -2451,7 +2542,8 @@ async def build_video(
                 stage=live.STAGE_TTS,
                 scene=n,
             )
-            prompt = compose_runway_prompt(
+            prompt = video_prompt_for(
+                primary_engine,
                 continuity,
                 scene["visual_prompt"],
                 camera,
@@ -2467,7 +2559,7 @@ async def build_video(
                 clip_sec = pick_clip_duration(
                     audio_sec or 10.0, prefer_short=dynamic_pacing
                 )
-                vendor = "fal.ai" if config.video_provider() == "fal" else "Runway"
+                vendor = "fal.ai" if same_still else "Runway"
                 await report(
                     f"Сцена {n} из {total} рендерится в {vendor}",
                     stage=live.STAGE_RUNWAY,
@@ -2485,6 +2577,9 @@ async def build_video(
                         clip_total=total,
                         seed=job_seed,
                         quality=quality,
+                        route_mode=mode,
+                        photo_lock=bool(photo_lock),
+                        references=refs,
                     )
                 except PipelineError:
                     raise
@@ -2493,7 +2588,7 @@ async def build_video(
             # Seedance I2V last-frame JPEG → INPUT_VALIDATION; тот же still
             # на каждую сцену лучше держит персонажа (и это единственный слот).
             if prompt_image and n < total:
-                if config.video_provider() == "fal":
+                if same_still:
                     prompt_image = anchor_image
                 elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                     prompt_image = anchor_image
@@ -2510,6 +2605,7 @@ async def build_video(
                 caption=scene["narration"],
                 width=width,
                 height=height,
+                session=session,
             )
             muxed.append(mixed)
             tracker.video_done = n

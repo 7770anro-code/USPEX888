@@ -42,7 +42,7 @@ FAL_KEY=...                 # https://fal.ai/dashboard/keys  (дефолт ка�
 
 Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). `FAL_KEY` обязателен, пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать и в git не класть.
 
-Mini App слушает `WEBAPP_HOST:WEBAPP_PORT` внутри процесса бота. Telegram откроет её только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Без URL кнопка «Студия» остаётся обычным меню. Пример nginx (не включать без домена и сертификата):
+Mini App слушает `WEBAPP_HOST:WEBAPP_PORT` внутри процесса бота. Telegram откроет её только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
 
 ```
 location /studio/ {
@@ -57,7 +57,7 @@ location /studio/ {
 
 Нехватка кредитов fal.ai — текст в чат, кабинет fal.ai. Старый resume Runway (`{WORK_DIR}/{chat_id}_resume`) жив при `VIDEO_PROVIDER=runway`.
 
-Клон голоса: `POST /v1/voices/add` требует план ElevenLabs с Instant Voice Clone. На тарифе без IVC API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning` — это не баг ключа TTS.
+Клон голоса: MiniMax `fal-ai/minimax/voice-clone` (речь ≥10 сек). Запас ElevenLabs `POST /v1/voices/add` требует план с Instant Voice Clone. На тарифе без IVC API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning` — это не баг ключа TTS.
 
 ## Команды по SSH (один раз, после «ок»)
 

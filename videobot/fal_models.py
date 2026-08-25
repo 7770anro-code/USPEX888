@@ -17,10 +17,17 @@ KLING_I2V_STD = "fal-ai/kling-video/v3/standard/image-to-video"
 KLING_T2V_PRO = "fal-ai/kling-video/v3/pro/text-to-video"
 SEEDANCE_I2V = "bytedance/seedance-2.5/image-to-video"
 SEEDANCE_T2V = "bytedance/seedance-2.5/text-to-video"
+SEEDANCE_REF = "bytedance/seedance-2.5/reference-to-video"
 FLUX_STILL = "fal-ai/flux/schnell"
 TOPAZ_VIDEO = "fal-ai/topaz/upscale/video"
 TOPAZ_IMAGE = "fal-ai/topaz/upscale/image"
-TRYON = "fal-ai/image-apps-v2/virtual-try-on"
+TOPAZ_INTERP = "topaz/interpolate/video"
+TOPAZ_RESTORE = "topaz/restore/image"
+TRYON = "google/virtual-try-on"
+KLING_LIPSYNC = "fal-ai/kling-video/lipsync/audio-to-video"
+MINIMAX_CLONE = "fal-ai/minimax/voice-clone"
+MINIMAX_TTS = "fal-ai/minimax/speech-02-hd"
+MM_VOICE_PREFIX = "mm:"
 
 KLING_DURATIONS = frozenset(range(3, 16))
 
@@ -69,9 +76,11 @@ def kling_i2v_payload(
     seconds: int,
     *,
     end_image_url: str = "",
+    photo_lock: bool = False,
 ) -> dict[str, Any]:
+    text = (prompt or "").strip() or "cinematic motion, photoreal, vertical 9:16"
     body: dict[str, Any] = {
-        "prompt": (prompt or "").strip() or "cinematic motion, photoreal, vertical 9:16",
+        "prompt": text,
         "start_image_url": image_url,
         "duration": kling_duration(seconds),
         "generate_audio": False,
@@ -79,6 +88,11 @@ def kling_i2v_payload(
     }
     if end_image_url:
         body["end_image_url"] = end_image_url
+    # generate_audio и elements вместе Kling не принимает — аудио всегда выкл.
+    if photo_lock and image_url:
+        body["elements"] = [{"frontal_image_url": image_url}]
+        if "@Element1" not in body["prompt"]:
+            body["prompt"] = "@Element1 is the same person, same face and clothes. " + body["prompt"]
     return body
 
 
@@ -86,7 +100,22 @@ def seedance_i2v_payload(prompt: str, image_url: str, seconds: int) -> dict[str,
     return {
         "prompt": (prompt or "").strip() or "cinematic motion, photoreal, vertical 9:16",
         "image_url": image_url,
-        "duration": seedance_duration(seconds),
+        "duration": str(seedance_duration(seconds)),
+        "aspect_ratio": "auto",
+        "resolution": "720p",
+        "generate_audio": False,
+    }
+
+
+def seedance_ref_payload(prompt: str, image_urls: list[str], seconds: int) -> dict[str, Any]:
+    urls = [u for u in (image_urls or []) if u][:9]
+    text = (prompt or "").strip()
+    if "@Image1" not in text:
+        text = "@Image1 is the character plate (face, clothes, location). " + text
+    return {
+        "prompt": text,
+        "image_urls": urls,
+        "duration": str(seedance_duration(seconds)),
         "aspect_ratio": "9:16",
         "resolution": "720p",
         "generate_audio": False,
@@ -106,7 +135,7 @@ def kling_t2v_payload(prompt: str, seconds: int) -> dict[str, Any]:
 def seedance_t2v_payload(prompt: str, seconds: int) -> dict[str, Any]:
     return {
         "prompt": (prompt or "").strip(),
-        "duration": seedance_duration(seconds),
+        "duration": str(seedance_duration(seconds)),
         "aspect_ratio": "9:16",
         "resolution": "720p",
         "generate_audio": False,
@@ -149,9 +178,7 @@ def topaz_image_payload(image_url: str, *, upscale: float = 2.0) -> dict[str, An
 def tryon_payload(person_url: str, clothing_url: str) -> dict[str, Any]:
     return {
         "person_image_url": person_url,
-        "clothing_image_url": clothing_url,
-        "preserve_pose": True,
-        "aspect_ratio": "9:16",
+        "product_image_url": clothing_url,
     }
 
 
@@ -289,4 +316,119 @@ async def fal_virtual_tryon(
     )
     out = await fal_download_media(session, data, dest)
     write_runway_model(dest, TRYON)
+    return out
+
+
+async def fal_interpolate(
+    session: aiohttp.ClientSession,
+    video_url: str,
+    dest: Path,
+    *,
+    slowdown: int = 2,
+) -> Path:
+    data = await fal_run(
+        session,
+        TOPAZ_INTERP,
+        {
+            "video_url": video_url,
+            "model": "Apollo",
+            "target_fps": 60,
+            "slowdown_factor": max(1, min(8, int(slowdown))),
+        },
+        dest_id=dest,
+    )
+    out = await fal_download_media(session, data, dest)
+    write_runway_model(dest, TOPAZ_INTERP)
+    return out
+
+
+async def fal_restore_image(
+    session: aiohttp.ClientSession,
+    image_url: str,
+    dest: Path,
+) -> Path:
+    data = await fal_run(
+        session,
+        TOPAZ_RESTORE,
+        {"image_url": image_url},
+        dest_id=dest,
+    )
+    out = await fal_download_media(session, data, dest)
+    write_runway_model(dest, TOPAZ_RESTORE)
+    return out
+
+
+def is_minimax_voice(voice_id: str | None) -> bool:
+    vid = (voice_id or "").strip()
+    return vid.startswith(MM_VOICE_PREFIX) and len(vid) > len(MM_VOICE_PREFIX)
+
+
+def encode_minimax_voice(custom_id: str) -> str:
+    cid = (custom_id or "").strip()
+    if not cid:
+        return ""
+    if cid.startswith(MM_VOICE_PREFIX):
+        return cid
+    return MM_VOICE_PREFIX + cid
+
+
+def decode_minimax_voice(voice_id: str | None) -> str:
+    vid = (voice_id or "").strip()
+    if vid.startswith(MM_VOICE_PREFIX):
+        return vid[len(MM_VOICE_PREFIX) :].strip()
+    return ""
+
+
+def minimax_tts_payload(text: str, custom_voice_id: str) -> dict[str, Any]:
+    return {
+        "text": (text or "").strip()[:5000],
+        "voice_setting": {
+            "voice_id": custom_voice_id,
+            "speed": 1,
+            "vol": 1,
+            "pitch": 0,
+        },
+        "output_format": "url",
+        "language_boost": "auto",
+    }
+
+
+async def fal_minimax_clone(
+    session: aiohttp.ClientSession,
+    audio_path: Path,
+) -> str:
+    from fal_api import extract_fal_voice_id, path_to_fal_url
+
+    src = Path(audio_path)
+    url = await path_to_fal_url(session, src)
+    data = await fal_run(
+        session,
+        MINIMAX_CLONE,
+        {
+            "audio_url": url,
+            "model": "speech-02-hd",
+            "need_noise_reduction": True,
+        },
+    )
+    custom = extract_fal_voice_id(data)
+    if not custom:
+        raise PipelineError("MiniMax не вернул id клона. Нужна чистая речь 10+ сек.")
+    return encode_minimax_voice(custom)
+
+
+async def fal_minimax_tts(
+    session: aiohttp.ClientSession,
+    text: str,
+    custom_voice_id: str,
+    dest: Path,
+) -> Path:
+    cid = decode_minimax_voice(custom_voice_id) or (custom_voice_id or "").strip()
+    if not cid:
+        raise PipelineError("Нет MiniMax-клона. Сначала запиши голос в «Мой голос».")
+    blob = (text or "").strip()
+    if len(blob) < 1:
+        raise PipelineError("Пустой текст для озвучки.")
+    data = await fal_run(session, MINIMAX_TTS, minimax_tts_payload(blob, cid), dest_id=dest)
+    out = await fal_download_media(session, data, dest)
+    write_runway_model(dest, MINIMAX_TTS)
     return out

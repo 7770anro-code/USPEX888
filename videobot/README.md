@@ -7,13 +7,17 @@
 ## Пайплайн
 
 1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф. «⚡️ Видео за 1 клик» и авто-вайб: 6 коротких сцен, речь 12–18 слов, клипы ~5 сек, итого 20–30 сек.
-2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 голос кнопками + клон из SQLite. Подача и скорость — `voice_settings`.
-3. **fal.ai** (дефолт, `VIDEO_PROVIDER=fal`, ключ `FAL_KEY`) — очередь `https://queue.fal.run`, заголовок `Authorization: Key $FAL_KEY`, без SDK.
-   - Качество в UI: **Быстро** = Seedance 2.5 I2V (`bytedance/seedance-2.5/image-to-video`); **Оптимально** = Kling 3.0 Pro I2V (`fal-ai/kling-video/v3/pro/image-to-video`). Fallback: Kling Standard → Seedance → Kling Pro.
-   - Вертикаль `9:16`. Клип 5 или 10 сек. `generate_audio=false` — TTS клеим сами.
-   - Без фото: still через Flux Schnell (`fal-ai/flux/schnell`), затем тот же first-frame на каждую сцену (как Seedance I2V на Runway: last-frame chaining не используем).
+2. **Озвучка** — ElevenLabs пресеты или клон **MiniMax** (`fal-ai/minimax/voice-clone` → `fal-ai/minimax/speech-02-hd`). Клон выбирается в списке голосов вместо пресета.
+3. **fal.ai** (дефолт, `VIDEO_PROVIDER=fal`, ключ `FAL_KEY` или `FAL_API_KEY`) — очередь `https://queue.fal.run`, заголовок `Authorization: Key $FAL_KEY`, без SDK.
+   - Маршрутизация в `provider_router.ROUTING`: своё фото → Kling → Seedance → legacy Runway; синтетика / ночь / вайб монтажа → Seedance → Kling → legacy Runway. Убрать `"legacy_runway"` из списка — Runway выключается.
+   - Качество в UI: **Быстро** = Seedance 2.5 I2V (`bytedance/seedance-2.5/image-to-video`); **Оптимально** = Kling 3.0 Pro I2V (`fal-ai/kling-video/v3/pro/image-to-video`).
+   - Вертикаль `9:16`. Duration — **строка**. `generate_audio=false` (нативная речь плохо с рус/укр). TTS клеим сами.
+   - Kling Element Reference: `elements=[{frontal_image_url}]` + `@Element1` в промпте (взаимно исключается с `generate_audio`).
+   - Seedance multi-ref: `bytedance/seedance-2.5/reference-to-video`, `@Image1` в промпте (ночь и мультисцен).
+   - Без фото: still через Flux Schnell (`fal-ai/flux/schnell`), затем тот же first-frame на каждую сцену.
    - Своё фото: если задан `GEMINI_API_KEY` (Google AI Studio, `gemini-2.5-flash-image` / Nano Banana), кадр сначала чистится там, и в Kling/Seedance I2V идёт уже этот still. Без ключа фото идёт как есть.
-   - Картинка в I2V — https URL или data URI. Нативный звук модели выключен.
+   - Lip-sync после TTS: `fal-ai/kling-video/lipsync/audio-to-video` (клип 2–10 с). Ошибка → старый ffmpeg mux.
+   - Картинка в I2V — https URL или data URI. Крупное видео — fal storage upload.
    - Нехватка кредитов fal.ai — понятный текст в чат (кабинет fal.ai). Resume через sidecar `*.fal_id`.
    - Запасной путь: `VIDEO_PROVIDER=runway` + `RUNWAY_API_KEY` (старый gen4.5 / gen4_turbo). Без явного флага Runway не обязателен.
 4. **ffmpeg** — `atempo`, склейка 9:16, субтитры, опциональный водяной знак (текст/лого, вкл/выкл).
@@ -25,8 +29,15 @@
 - **Видео за 1 клик** — короткая тема (хук/сценарий/камера сами) → опционально своё фото (**та же кнопка согласия** `consent:yes`) и голос (можно пропустить — Сара) → настройки → оценка стоимости. 6 коротких клипов, ~20–30 сек.
 - **Своё фото + текст + голос** — сценарий, фото, **та же кнопка согласия** (`consent:yes`), голос, стоимость. Своё фото тоже прогоняется через Nano Banana, если есть `GEMINI_API_KEY`.
 - **Оживить фото** — Act Two (`model=act_two` на Runway): фото + короткое видео мимики. Без `RUNWAY_API_KEY` пункт объясняет, что сейчас камера на fal.ai. Согласие на фото — **та же кнопка**, что в custom-режиме.
-- **Клонировать мой голос** — отдельное согласие (не фото) → запись/файл → `POST /v1/voices/add` → `voice_id` в SQLite по `user_id`. Кнопка **«Удалить мой голос»**. То же в Mini App.
-- **Студия** — Telegram Mini App (`webapp/`): 1-клик, апскейл/реставрация Topaz, виртуальная примерка одежды, клон голоса. HMAC `initData`, долгие джобы → результат в чат. Без `WEBAPP_PUBLIC_URL` (HTTPS) кнопки живут в обычном меню.
+- **Клонировать мой голос** — отдельное согласие (не фото) → запись/файл ≥10 с → MiniMax `fal-ai/minimax/voice-clone` (`custom_voice_id` с префиксом `mm:` в SQLite). В списке голосов вместо пресета ElevenLabs. Запас: ElevenLabs IVC, если нет `FAL_KEY`.
+- **Открыть меню** — Telegram Mini App (`webapp/`), шесть категорий:
+  1. 🎬 Создать видео — существующие режимы
+  2. ✂️ Монтаж — существующий (вайб / своё видео в чате)
+  3. ✨ Улучшить — Topaz 4K (`fal-ai/topaz/upscale/*`), слоу-мо (`topaz/interpolate/video`), реставрация фото (`topaz/restore/image`)
+  4. 👗 Примерка — `google/virtual-try-on` (фото человека + одежда), то же согласие `consent:yes`
+  5. 🎙 Мой голос — MiniMax clone
+  6. 📊 Мои видео — последний готовый ролик в чат
+  HMAC `initData`, долгие джобы → результат в чат. Без `WEBAPP_PUBLIC_URL` (HTTPS) кнопка остаётся callback, те же функции в обычном меню.
 - **Нарезка и монтаж** (`/edit`): **ручной** — таймкоды/порядок и ffmpeg; **авто** — описание → план клипов через xAI API (не браузер grok.com) → ffmpeg. fal.ai/Runway/ElevenLabs не вызываются.
 - **Пресеты** — Вирусный TikTok / Реклама товара / Мем / Личный бренд (+ Кино-история). Пользователь пишет только тему.
 
@@ -38,10 +49,10 @@
 
 SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной знак, путь к последнему ролику.
 
-- Instant Voice Clone — согласие отдельно от фото, хранение `voice_id` по `user_id`. Нужен платный план ElevenLabs с IVC (на Free API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning`).
+- Instant Voice Clone — MiniMax на fal.ai (речь 10+ сек), согласие отдельно от фото, хранение `mm:{custom_voice_id}` по `user_id`. Запас ElevenLabs IVC без `FAL_KEY`.
 - Act Two с /start, то же согласие что custom-фото (нужен Runway)
-- Topaz video/image upscale готового файла и любого вложения (fal.ai)
-- Виртуальная примерка одежды (`fal-ai/image-apps-v2/virtual-try-on`), согласие как на фото
+- Topaz video/image upscale, interpolate (слоу-мо), restore готового файла и любого вложения (fal.ai)
+- Виртуальная примерка одежды (`google/virtual-try-on`), согласие как на фото
 - Пресеты задают стиль/темп/голос в бриф Grok
 - Оценка до «Создать»: fal.ai, не выдуманные кредиты Runway
 - Водяной знак ffmpeg вкл/выкл, без Brand Kit
