@@ -20,52 +20,68 @@ MIN_SCENES = 4
 MAX_SCENES = 8
 ELEMENT_RE = re.compile(r"@Element\s*(\d+)|@element_(\d+)", re.I)
 
+LOCKED_GRADE = (
+    "LOCKED GRADE on every shot (Kling and Seedance must match): "
+    "warm sunset amber + cool club backlight, photoreal 9:16 live-action, "
+    "no on-screen text, no logos, no watermark"
+)
 FACE_CAMERA = (
     "slight handheld push-in or handheld shake, shallow depth of field, "
-    "warm sunset amber or cool club backlight, subject looks slightly away or turns toward camera"
+    "same locked warm amber / cool backlight grade, "
+    "subject looks slightly away or turns toward camera"
 )
 WIDE_CAMERA = (
     "more camera movement than a portrait: drone over a hazy city monument with helicopters, "
     "slow push-in; or low-angle lateral tracking of a convoy in fog with headlights; "
     "or rack focus on a radiator grille and lamps; or crowd silhouettes in a backlit hall. "
-    "Face is not the subject."
+    "Face is not the subject. Same locked warm amber / cool backlight grade as the portraits."
+)
+WIDE_SUBJECT_RE = re.compile(
+    r"\b(drone|aerial|cityscape|monument|helicopter|convoy|fog|"
+    r"radiator|grille|headlights?|crowd|silhouette|"
+    r"from behind|back to (the )?camera|over[- ]the[- ]shoulder|"
+    r"glimpsed?|partial(?:ly)?|passing by|traffic)\b",
+    re.I,
+)
+FACE_CLOSE_RE = re.compile(
+    r"\b(close-?up|medium (?:close-?up|shot)|portrait|face|"
+    r"looking (?:at|into) camera|turns toward|shallow DOF|"
+    r"rack(?:s)? focus (?:onto|to) (?:his|her|their )?face)\b",
+    re.I,
 )
 
 SCRIPT_SYSTEM = """Ты режиссёр вертикального Reels 9:16 в стиле «хайповый монтаж / UKRAINIAN CORE».
-Эталон: тёплый закат и контровый клубный свет на лицах друзей, между ними — масштаб страны/ночи/дорог.
+Эталон: тёплый закат и контровый клубный свет. Между портретами друзей — масштаб страны/ночи/дорог.
 Верни ТОЛЬКО JSON без markdown:
 
 {
   "title": "короткий заголовок",
   "hook": "удар первой секунды, 4–8 слов",
   "caption": "подпись для Reels без водяного знака на кадре",
-  "continuity": "English locked grade: warm sunset amber + cool club backlight, 9:16, photoreal live-action, no on-screen text, no logos, no watermark. Do not describe faces here.",
+  "continuity": "English locked grade: warm sunset amber + cool club backlight, 9:16, photoreal live-action, no on-screen text, no logos, no watermark. Do not describe faces here. Same grade on EVERY shot so Kling/Seedance cut is invisible.",
   "scenes": [
     {
       "narration": "озвучка языком пользователя, 12–18 слов",
-      "visual_prompt": "English, 1–2 sentences, camera + action only",
+      "visual_prompt": "English, 1–2 sentences, camera + action + the same locked grade",
       "face_scene": true,
       "element_index": 1
     }
   ]
 }
 
-Правила сцен:
-- Ровно N сцен (N дадут в запросе), диапазон 4–8. Чередуй FACE и WIDE: не две FACE подряд больше одного раза, не все WIDE подряд.
-- face_scene=true (Kling elements, @ElementN): крупный или поясной план КОНКРЕТНОГО друга из фото N.
-  Свет: тёплый закат ИЛИ контровый клубный. Камера: лёгкий наезд или хендхелд-дрожь, неглубокая резкость, фон размыт.
-  Subject смотрит чуть в сторону или доворачивает лицо к камере. Мало движения камеры.
-  Пример visual_prompt: "man steps out of a car at sunset, camera racks focus onto his face, headlight bokeh, warm amber grade, shallow DOF, slight handheld push-in".
-  В visual_prompt укажи @ElementN (N = номер фото 1..P). Не выдумывай лицо — только это фото.
-- face_scene=false (Seedance): лицо НЕ главное. Работает масштаб и движение:
-  дрон над городом (памятник, вертолёты, дымка, медленный наезд);
-  колонна машин в тумане (низкий ракурс, боковой трекинг, фары);
-  крупный план решётки радиатора / фар (рек-фокус);
-  толпа / зал, силуэты в контровом свете.
-  Здесь камеры больше, чем в FACE. element_index = 0. Не ставь узнаваемое лицо в центр кадра.
+Правило face_scene (подлежащее кадра, не «есть ли человек где-то в кадре»):
+- true (Kling @ElementN): подлежащее — конкретный друг крупно/узнаваемо, лицо читается.
+  Камера тише: лёгкий наезд или хендхелд, неглубокая резкость, тёплый закат ИЛИ контровый клубный.
+  Пример: "man steps out of a car at sunset, camera racks focus onto his face, headlight bokeh, warm amber grade, shallow DOF, slight handheld push-in".
+  В visual_prompt — @ElementN (N = номер фото 1..P). Лицо не выдумывать.
+- false (Seedance, безопаснее): подлежащее — город/машины/толпа/предмет; ИЛИ друг виден мельком / со спины / частично / силуэтом.
+  Масштаб и движение: дрон над городом (памятник, вертолёты, дымка, медленный наезд); колонна в тумане (низкий ракурс, боковой трекинг, фары); решётка радиатора/фары (рек-фокус); толпа/зал, силуэты в контровом. Камеры больше, чем в FACE. element_index = 0. Узнаваемое лицо не в центре — Seedance такое не флагает.
+
+Остальное:
+- Ровно N сцен (N в запросе), 4–8. Чередуй FACE и WIDE: не две FACE подряд больше одного раза, не все WIDE подряд.
+- continuity + каждый visual_prompt несут ОДИН тёплый/контровый цветокор. Смена Kling/Seedance не должна читаться по картинке.
 - narration сцены 1 начинается с hook.
-- Без текста на экране, логотипов, знаменитостей, NSFW.
-- Это живое кино, не CGI-пластик. Тег эстетики UKRAINIAN CORE — в настроении (янтарь заката, ночные фары, бетон, дымка), не надписью в кадре.
+- Без текста на экране, логотипов, знаменитостей, NSFW. Живое кино, не CGI. UKRAINIAN CORE — янтарь заката, ночные фары, бетон, дымка; не надпись в кадре.
 """
 
 
@@ -105,6 +121,19 @@ def parse_bool(raw: Any) -> bool:
         return raw
     blob = str(raw or "").strip().lower()
     return blob in ("1", "true", "yes", "on", "face", "face_scene")
+
+
+def decide_face_scene(raw: Any, visual: str, *, omitted: bool) -> bool:
+    """Подлежащее: друг крупно → Kling; город/мельком/спина → Seedance (безопаснее)."""
+    vis = visual or ""
+    wide = bool(WIDE_SUBJECT_RE.search(vis))
+    close = bool(FACE_CLOSE_RE.search(vis) or ELEMENT_RE.search(vis))
+    if omitted:
+        return bool(close and not wide)
+    face = parse_bool(raw)
+    if face and wide and not close:
+        return False
+    return face
 
 
 def clamp_element(raw: Any, n_photos: int, *, face: bool) -> int:
@@ -153,9 +182,12 @@ def parse_autorolik_script(raw: str, *, n_photos: int) -> dict[str, Any]:
         visual = str(scene.get("visual_prompt") or scene.get("visualPrompt") or "").strip()
         if not narration:
             continue
-        face = parse_bool(scene.get("face_scene", scene.get("faceScene")))
-        if "face_scene" not in scene and "faceScene" not in scene:
-            face = i % 2 == 0
+        omitted = "face_scene" not in scene and "faceScene" not in scene
+        face = decide_face_scene(
+            scene.get("face_scene", scene.get("faceScene")),
+            visual,
+            omitted=omitted,
+        )
         idx = clamp_element(
             scene.get("element_index") or scene.get("elementIndex") or visual,
             n_photos,
@@ -163,14 +195,17 @@ def parse_autorolik_script(raw: str, *, n_photos: int) -> dict[str, Any]:
         )
         if not visual:
             visual = (
-                "close-up of @Element1 at sunset, shallow DOF, slight handheld push-in, warm amber"
+                "close-up of @Element1 at sunset, shallow DOF, slight handheld push-in, warm amber grade"
                 if face
-                else "drone over a hazy city monument, slow push-in, helicopters, dusk smoke, 9:16"
+                else "drone over a hazy city monument, slow push-in, helicopters, dusk smoke, locked warm amber grade, 9:16"
             )
         if face:
             token = f"@Element{idx}"
             if not ELEMENT_RE.search(visual):
                 visual = f"{token} {visual}"
+        else:
+            visual = ELEMENT_RE.sub("", visual).strip()
+            idx = 0
         cleaned.append(
             {
                 "narration": narration[:500],
@@ -189,15 +224,13 @@ def parse_autorolik_script(raw: str, *, n_photos: int) -> dict[str, Any]:
     if not any(not s["face_scene"] for s in cleaned) and len(cleaned) >= 2:
         cleaned[1]["face_scene"] = False
         cleaned[1]["element_index"] = 0
+        cleaned[1]["visual_prompt"] = ELEMENT_RE.sub("", cleaned[1]["visual_prompt"]).strip()
     title = str(data.get("title") or "Авторолик").strip()[:80] or "Авторолик"
     hook = str(data.get("hook") or "").strip()[:120]
     caption = str(data.get("caption") or "").strip()[:400]
     continuity = str(data.get("continuity") or "").strip()[:800]
     if not continuity:
-        continuity = (
-            "UKRAINIAN CORE hype montage, warm amber sunset and cool club backlight, "
-            "photoreal 9:16, no on-screen text"
-        )
+        continuity = LOCKED_GRADE
     return {
         "title": title,
         "hook": hook,
@@ -314,6 +347,9 @@ async def grok_autorolik(
     body = (
         f"Фото друзей: {n_photos} шт. Нумерация @Element1…@Element{n_photos}.\n"
         f"Сделай ровно {n_scenes} сцен (можно {MIN_SCENES}–{MAX_SCENES}, но сейчас {n_scenes}).\n"
+        "face_scene: подлежащее = конкретный друг крупно/узнаваемо → true (Kling); "
+        "подлежащее = город/машины/толпа/предмет, или друг мельком/со спины/частично → false (Seedance).\n"
+        f"Один цветокор на все сцены: {LOCKED_GRADE}\n"
         f"Тема / вайб:\n{idea[:1500]}\n"
     )
     if previous:

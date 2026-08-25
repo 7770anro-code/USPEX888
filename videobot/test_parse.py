@@ -2320,6 +2320,9 @@ def test_autorolik_script_and_route() -> None:
         photos_kb,
         route_for_scene,
         scene_camera,
+        SCRIPT_SYSTEM,
+        LOCKED_GRADE,
+        decide_face_scene,
     )
     from pipeline import PipelineError, build_video
     from provider_router import chain_for
@@ -2381,6 +2384,28 @@ def test_autorolik_script_and_route() -> None:
     studio_src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
     assert "run_studio_autorolik" in studio_src
     assert "review_kb" in studio_src
+    assert "подлежащее" in SCRIPT_SYSTEM
+    assert "мельком" in SCRIPT_SYSTEM
+    assert "со спины" in SCRIPT_SYSTEM
+    assert "цветокор" in SCRIPT_SYSTEM
+    assert decide_face_scene(True, "drone over a hazy city monument slow push-in", omitted=False) is False
+    assert decide_face_scene(True, "friend from behind walking into fog", omitted=False) is False
+    assert decide_face_scene(True, "close-up of @Element1 at sunset, shallow DOF", omitted=False) is True
+    mistag = """
+    {"title":"x","hook":"h","scenes":[
+      {"narration":"Дрон над площадью медленно едет в дымке заката.", "visual_prompt":"drone over city monument haze slow push-in", "face_scene": true, "element_index": 1},
+      {"narration":"Друг крупно доворачивает лицо к камере на закате.", "visual_prompt":"close-up rack focus to face shallow DOF", "face_scene": true, "element_index": 1},
+      {"narration":"Колонна машин в тумане режет боковой трекинг фарами.", "visual_prompt":"low angle convoy in fog from behind", "face_scene": true},
+      {"narration":"Толпа силуэтами в контровом свете зала не узнаётся.", "visual_prompt":"crowd silhouettes in a backlit hall", "face_scene": true}
+    ]}
+    """
+    safe = parse_autorolik_script(mistag, n_photos=2)
+    assert safe["scenes"][0]["face_scene"] is False
+    assert "@Element" not in safe["scenes"][0]["visual_prompt"]
+    assert safe["scenes"][1]["face_scene"] is True
+    assert safe["scenes"][2]["face_scene"] is False
+    assert safe["scenes"][3]["face_scene"] is False
+    assert "warm sunset amber" in (safe.get("continuity") or LOCKED_GRADE)
 
 
 if __name__ == "__main__":
