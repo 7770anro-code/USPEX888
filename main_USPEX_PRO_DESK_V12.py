@@ -2664,7 +2664,8 @@ def candidate(sym,prof,exchange_pref,use_news=True):
                                  spread_bps=_spread_bps(m), liquidity=max(0.1,float(getattr(m,"turnover24h",0) or 0)/1e9),
                                  book_dirty=False, sequence_ok=True, comparable=True))
     fv=robust_fair_value(quotes, executable_bybit=px, side=side)
-    gross_bps=float(fv.edge_bps) if fv.edge_bps is not None else float(gap)*100.0
+    uses_executable = fv.edge_bps is not None
+    gross_bps=float(fv.edge_bps) if uses_executable else float(gap)*100.0
     net=estimate_net_edge(
         gross_edge_bps=gross_bps,
         spread_bps=_spread_bps(by_m),
@@ -2672,6 +2673,8 @@ def candidate(sym,prof,exchange_pref,use_news=True):
         taker_fee_bps_roundtrip=2.0*(PAPER_FEE_PCT_PER_SIDE*100.0),
         uncertainty_bps=2.0,
         min_net_bps=2.0 if prof=="easy" else (3.0 if prof in ("medium","ai") else 4.0),
+        # FV edge is vs ask/bid; return-gap fallback is not, so charge full spread then.
+        spread_already_in_gross=uses_executable,
     )
     if not net.ok and fv.edge_bps is not None:
         return net_edge_reject_record(net, side=side, score=score, edge_bps=fv.edge_bps)
