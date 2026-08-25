@@ -1,0 +1,76 @@
+# VideoBot
+
+Отдельный Telegram-бот: **идея / пресет / свой текст → вертикальный ролик 20–60 секунд (TikTok 9:16)**.
+
+Не связан с USPEX/Vector. На сервере: `/opt/videobot`, unit `videobot.service`.
+
+## Пайплайн
+
+1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф. «⚡️ Видео за 1 клик» и авто-вайб: 6 коротких сцен, речь 12–18 слов, клипы ~5 сек, итого 20–30 сек.
+2. **ElevenLabs** — TTS, сырой `audio/mpeg`. 21 голос кнопками + клон из SQLite. Подача и скорость — `voice_settings`.
+3. **Runway** `https://api.dev.runwayml.com`, `X-Runway-Version: 2024-11-06`.
+   - Вертикаль `720:1280`. Клип 5 или 10 сек.
+   - Качество в UI: **Быстро** (`gen4_turbo` I2V) / **Оптимально** (`gen4.5`). Veo / Seedance 2.5 / Gemini на том же ключе не в UI по умолчанию. При необходимости `RUNWAY_MODEL` (`veo3.1_fast`, `seedance2_5`) / `RUNWAY_STILL_MODEL`. Seedance I2V: `audio=true` + тот же first-frame still на каждую сцену (last-frame chaining падает INPUT_VALIDATION). Photoreal-лицо ByteDance режет SAFETY.
+   - Своё фото: если задан `GEMINI_API_KEY` (Google AI Studio, модель `gemini-2.5-flash-image` / Nano Banana), кадр сначала чистится там, и в Runway I2V идёт уже этот still — меньше искажений лица. Без ключа фото идёт в Runway как есть. Это **не** Runway `gemini_image3_pro`.
+   - В каждый visual: `same character as reference image, do not alter face, outfit, or visual style`. First frame / last-frame chaining как раньше; gen4.5 и Seedance I2V не смешивают first-frame с отдельным character reference.
+   - В подписи готового ролика — фактическая модель на каждый кадр (видно, если сцена ушла в `gen4_turbo`).
+   - Одно исходное фото на все клипы, last-frame chaining. `contentModeration.publicFigureThreshold=auto`.
+   - Нехватка кредитов: пауза в `{WORK_DIR}/{chat_id}_resume` (сценарий, озвучка, готовые клипы). Кнопка **«Продолжить съёмку»** — не пересобирает Grok/ElevenLabs. «Обновить статус» только GET task_id, кредиты не тратит.
+   - Опционально Model Router: `RUNWAY_USE_MODEL_ROUTER=1` + `RUNWAY_ROUTER_CONFIG_ID` (slug с [dev.runwayml.com/model-routers](https://dev.runwayml.com/model-routers)). Тогда `POST /v1/generate/video` с `configId` вместо модели; polling тот же `GET /v1/tasks/{id}` + sidecar `.runway_id`. По умолчанию флаг выкл.
+4. **ffmpeg** — `atempo`, склейка 9:16, субтитры, опциональный водяной знак (текст/лого, вкл/выкл).
+5. Перед запуском — оценка кредитов Runway + символы ElevenLabs, кнопки **Создать / Отмена** (и «Изменить»).
+6. Готовый ролик уходит двумя файлами: `answer_video` + `answer_document`. На экране результата — **«Улучшить качество»** (`POST /v1/video_upscale` на `final.mp4`).
+
+## Режимы (/start)
+
+- **Видео за 1 клик** — короткая тема (хук/сценарий/камера сами) → опционально своё фото (**та же кнопка согласия** `consent:yes`) и голос (можно пропустить — Сара) → настройки → оценка стоимости. 6 коротких клипов, ~20–30 сек.
+- **Своё фото + текст + голос** — сценарий, фото, **та же кнопка согласия** (`consent:yes`), голос, стоимость. Своё фото тоже прогоняется через Nano Banana, если есть `GEMINI_API_KEY`.
+- **Оживить фото** — Act Two (`model=act_two`): фото + короткое видео мимики. Согласие на фото — **та же кнопка**, что в custom-режиме (хард-константа).
+- **Клонировать мой голос** — отдельное согласие (не фото) → запись/файл → `POST /v1/voices/add` → `voice_id` в SQLite по `user_id`. Кнопка **«Удалить мой голос»**.
+- **Нарезка и монтаж** (`/edit`): **ручной** — таймкоды/порядок и ffmpeg; **авто** — описание → план клипов через xAI API (не браузер grok.com) → ffmpeg. Runway/ElevenLabs не вызываются.
+- **Пресеты** — Вирусный TikTok / Реклама товара / Мем / Личный бренд (+ Кино-история). Пользователь пишет только тему.
+
+Фото человека: пайплайн **не стартует** без `consent_verified` (`photo_start_blocked` / `CONSENT_REQUIRED_MSG`).
+
+Ошибки API — текстом в чат. Деплой: [DEPLOY.md](DEPLOY.md).
+
+## Волна 2
+
+SQLite `videobot/data/videobot.sqlite3`: клон голоса, водяной знак, путь к последнему ролику.
+
+- Instant Voice Clone — согласие отдельно от фото, хранение `voice_id` по `user_id`. Нужен платный план ElevenLabs с IVC (на Free API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning`).
+- Act Two с /start, то же согласие что custom-фото
+- Magnific video upscale готового `final.mp4` с экрана результата
+- Пресеты задают стиль/темп/голос в бриф Grok
+- Оценка кредитов до «Создать»
+- Водяной знак ffmpeg вкл/выкл, без Brand Kit
+
+В «Ещё возможности»: голос по описанию, Speech-to-Speech, upscale любого файла, Seedance extend.
+
+## Автоконтур «Успех 888»
+
+Крутится **внутри** `videobot.service` как фоновая задача бота, интервал `NIGHT_INTERVAL_MINUTES` (по умолчанию 90 мин). Отдельный `videobot-night.timer` **не нужен и не включать**.
+
+Цикл тика: идеи (Grok) → до `NIGHT_BATCH_PER_TICK` видео (по умолчанию 1) → очередь на постинг с да/нет в Telegram. Дневной потолок — `VIDEOS_PER_NIGHT`. Пока лимит не набран, тики продолжаются весь день.
+
+- Синтетика only: без фото людей, без Act Two, без клона голоса.
+- `VIDEOS_PER_NIGHT` — лимит роликов **за день** (не за тик). Разный голос/темп/стиль на аккаунт, round-robin.
+- State machine в SQLite: `pending → ideas_ready → generating → video_ready → posting → posted | failed` (+ `wait_confirm` / `publish_unknown` / `manual_review`). Файл пишется сразу; следующий тик не переснимает уже готовое. Stale `generating`/`posting` старше `NIGHT_STALE_MINUTES` снимаются с лока.
+- Дедуп идей 21 день (Jaccard, окно 14–30 через `NIGHT_DEDUP_DAYS`) + запрет похожих тем в один день на том же аккаунте.
+- По умолчанию публикация только после да/нет (`/night`, кнопки). Полный автопост позже: `/night_mode auto`.
+- Один файл не уходит на все 3 аккаунта. Denylist реальных людей и опасных тем. Стоп после нескольких moderation/rejection подряд.
+- TikTok: `is_aigc=true`. Timeout → `PUBLISH_UNKNOWN` (resume по publish/container/task ID). Ретраи только 429/5xx/сеть; OAuth/App Review/формат/модерация → `MANUAL_REVIEW`.
+- **Замки:** ручная съёмка и автоконтур в одном процессе сериализует `BUSY` (`asyncio.Lock`). `videobot.lock` (fcntl) оставлен только против второго процесса — CLI `night_runner.py --smoke` или случайно включённый старый timer.
+- `NIGHT_RUNWAY_DAILY_BUDGET=0` — без потолка кредитов; ненулевое значение останавливает тик, когда сумма за день достигнута.
+
+```bash
+python night_runner.py --smoke --no-telegram
+```
+
+Деплой `videobot.service` — только после отдельного «ок» владельца. `videobot-night.timer` не ставить.
+
+## Пока не трогаем
+
+Тарифы и лимиты кредитов **на пользователя** — специально в конце: там реальные деньги, ошибка дороже дня ожидания.
+
+Ещё позже: Dubbing, video-to-video (Aleph 2), Brand Kit, редактор сцен, история проектов.

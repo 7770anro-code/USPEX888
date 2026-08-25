@@ -1,0 +1,10 @@
+[Unit]
+Description=DEPRECATED — do not enable. Auto pipeline now runs inside videobot.service
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
