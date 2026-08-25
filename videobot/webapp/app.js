@@ -15,14 +15,18 @@
   const homeEl = document.getElementById("home");
   const tipEl = document.getElementById("tip");
   const initData = (tg && tg.initData) || "";
+  const TIP_STORE = "vb_onboard_v1";
+  // Один короткий намёк. Первый запуск + первый заход в режим. Не абзацы.
   const TIPS = {
-    create: "Тема — пара слов. Своё фото необязательно.",
-    cut: "Вайб сниму сам. Своё видео режется в чате бота.",
-    improve: "Видео: 4K или слоу-мо. Фото: реставрация.",
-    tryon: "Два фото и галочка согласия — без неё не беру.",
-    voice: "Чистая речь 10+ сек. Согласие отдельно от фото.",
-    mine: "Пришлю последний готовый файл в этот чат.",
+    home: "Нажми карточку. Под ней написано, что она делает.",
+    create: "Напиши тему двумя словами и жми «Снять».",
+    cut: "Напиши вайб. Своё видео режется в чате бота.",
+    improve: "Кинь файл: видео — 4K или слоу-мо, фото — починить.",
+    tryon: "Фото тебя + фото одежды + галочка.",
+    voice: "Голосовое 10+ секунд и галочка.",
+    mine: "Пришлю последний ролик сюда, в чат.",
   };
+  let tipTimer = 0;
 
   function showStatus(text, kind) {
     statusEl.hidden = false;
@@ -30,15 +34,44 @@
     statusEl.textContent = text;
   }
 
-  function showTip(key) {
-    const text = TIPS[key];
-    if (!tipEl || !text) return;
-    tipEl.hidden = false;
-    tipEl.textContent = text;
+  function seenTips() {
+    try {
+      return JSON.parse(localStorage.getItem(TIP_STORE) || "{}") || {};
+    } catch (_e) {
+      return {};
+    }
+  }
+
+  function markTip(key) {
+    const seen = seenTips();
+    seen[key] = 1;
+    try {
+      localStorage.setItem(TIP_STORE, JSON.stringify(seen));
+    } catch (_e) {
+      /* private mode */
+    }
   }
 
   function hideTip() {
+    if (tipTimer) {
+      clearTimeout(tipTimer);
+      tipTimer = 0;
+    }
     if (tipEl) tipEl.hidden = true;
+  }
+
+  function showTipOnce(key) {
+    const text = TIPS[key];
+    if (!tipEl || !text) return;
+    if (seenTips()[key]) {
+      hideTip();
+      return;
+    }
+    tipEl.hidden = false;
+    tipEl.textContent = text;
+    markTip(key);
+    if (tipTimer) clearTimeout(tipTimer);
+    tipTimer = setTimeout(hideTip, 4500);
   }
 
   function showHome() {
@@ -52,8 +85,13 @@
     document.querySelectorAll(".panel").forEach((p) => {
       p.classList.toggle("is-on", p.id === "panel-" + name);
     });
-    showTip(name);
+    showTipOnce(name);
   }
+
+  if (tipEl) {
+    tipEl.addEventListener("click", hideTip);
+  }
+  showTipOnce("home");
 
   document.querySelectorAll("[data-go]").forEach((btn) => {
     btn.addEventListener("click", () => showPanel(btn.dataset.go));

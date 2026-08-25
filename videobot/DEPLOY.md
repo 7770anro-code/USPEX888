@@ -42,7 +42,7 @@ FAL_KEY=...                 # https://fal.ai/dashboard/keys  (дефолт ка�
 
 Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). `FAL_KEY` обязателен, пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать и в git не класть.
 
-Mini App слушает `WEBAPP_HOST:WEBAPP_PORT` внутри процесса бота. Telegram откроет её только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
+Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
 
 ```
 location /studio/ {

@@ -2147,6 +2147,11 @@ def test_fal_kling_and_miniapp() -> None:
     assert "data-go" in js
     assert "/api/interpolate" in js
     assert "/api/history" in js
+    assert "vb_onboard_v1" in js
+    assert 'TIPS' in js or "home:" in js
+    assert "Нажми карточку" in js
+    assert "sendData" not in js
+    assert html.count('class="sub"') == 6
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media
 

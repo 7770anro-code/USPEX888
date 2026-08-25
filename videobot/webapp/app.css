@@ -182,14 +182,30 @@ legend {
 .status.err { border-color: var(--danger); color: #f3c7bb; }
 .status.ok { border-color: var(--ok); }
 .tip {
+  appearance: none;
+  display: block;
+  width: calc(100% - 2.2rem);
+  max-width: 26rem;
   position: sticky;
-  top: 0;
+  top: 0.55rem;
   z-index: 5;
-  margin: 0 auto;
-  max-width: 28rem;
-  padding: 0.65rem 1rem;
+  margin: 0.55rem auto 0;
+  padding: 0.7rem 2.1rem 0.7rem 0.9rem;
   background: #2a1c0e;
   color: var(--ink);
-  font: 0.85rem/1.35 ui-sans-serif, system-ui, sans-serif;
-  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font: 0.88rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  border: 1px solid var(--accent);
+  border-radius: 0.9rem;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
 }
+.tip::after {
+  content: "×";
+  position: absolute;
+  right: 0.7rem;
+  top: 0.55rem;
+  color: var(--muted);
+  font-size: 1.1rem;
+}
+.tip[hidden] { display: none; }
