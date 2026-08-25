@@ -34,6 +34,7 @@ from pipeline import (
     PipelineError,
     RUNWAY_CREDITS_MSG,
     DYNAMIC_SCENE_COUNT,
+    apply_ai_generated_disclosure,
     build_video,
     compact_runway_models,
     ensure_ffmpeg,
@@ -44,6 +45,7 @@ from pipeline import (
     is_runway_credits_fail,
     script_too_long_for_custom,
     target_scene_count,
+    with_ai_generated_caption,
 )
 from presets import (
     CAMERA,
@@ -176,6 +178,7 @@ HOW_IT_WORKS = (
     "примерка / мой голос / мои видео). Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
+    "На роликах с фото человека (и в ночном пайплайне) в углу кадра и в подписи будет «AI generated». "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
 )
 
@@ -2358,6 +2361,8 @@ async def _run_job(
                 caption += "\nпервый кадр: Nano Banana → I2V"
             if models_line:
                 caption += f"\n{models_line}"
+            if script.get("ai_generated"):
+                caption = with_ai_generated_caption(caption)
             title = str(script.get("title") or "video")
             keep = save_last_video(message.chat.id, video_path, title)
             save_last_job(
@@ -2845,9 +2850,20 @@ async def on_w2_act_video(message: Message, state: FSMContext) -> None:
                 dest,
                 used_image=True,
             )
+            dest, marked = await apply_ai_generated_disclosure(
+                dest,
+                work / "act_ai.mp4",
+                {"caption": "Оживлённое фото", "kind": "act_two"},
+                required=True,
+            )
             keep = save_last_video(message.chat.id, dest, "Оживлённое фото")
             clear_last_job(message.chat.id)
-            await _send_video(message, keep, "Оживлённое фото", filename="act_tiktok.mp4")
+            await _send_video(
+                message,
+                keep,
+                with_ai_generated_caption(str(marked.get("caption") or "Оживлённое фото")),
+                filename="act_tiktok.mp4",
+            )
         await state.clear()
         await status.edit_text("Готово.")
         await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb(can_finalize=False))

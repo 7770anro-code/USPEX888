@@ -2384,6 +2384,8 @@ def test_autorolik_script_and_route() -> None:
     studio_src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
     assert "run_studio_autorolik" in studio_src
     assert "review_kb" in studio_src
+    assert "Публичных лиц" in SCRIPT_SYSTEM
+    assert "политики" in SCRIPT_SYSTEM
     assert "подлежащее" in SCRIPT_SYSTEM
     assert "мельком" in SCRIPT_SYSTEM
     assert "со спины" in SCRIPT_SYSTEM
@@ -2406,6 +2408,76 @@ def test_autorolik_script_and_route() -> None:
     assert safe["scenes"][2]["face_scene"] is False
     assert safe["scenes"][3]["face_scene"] is False
     assert "warm sunset amber" in (safe.get("continuity") or LOCKED_GRADE)
+
+
+def test_ai_generated_disclosure() -> None:
+    import asyncio
+    import inspect
+    import tempfile
+    from pathlib import Path
+
+    from pipeline import (
+        AI_GENERATED_LABEL,
+        apply_ai_generated_disclosure,
+        build_video,
+        needs_ai_generated_mark,
+        with_ai_generated_caption,
+        _run_ffmpeg,
+    )
+
+    assert AI_GENERATED_LABEL == "AI generated"
+    assert with_ai_generated_caption("привет") == "привет\nAI generated"
+    assert with_ai_generated_caption("x\nAI generated") == "x\nAI generated"
+    assert needs_ai_generated_mark(photo_lock=True) is True
+    assert needs_ai_generated_mark(element_images=[Path("/tmp/a.jpg")]) is True
+    assert needs_ai_generated_mark(script={"kind": "autorolik"}) is True
+    assert needs_ai_generated_mark(route_mode="night_pipeline") is True
+    assert needs_ai_generated_mark(route_mode="real_photo") is True
+    assert needs_ai_generated_mark(route_mode="synthetic_multi_scene") is False
+    build_src = inspect.getsource(build_video)
+    assert "apply_ai_generated_disclosure" in build_src
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "apply_ai_generated_disclosure" in bot_src
+    assert "with_ai_generated_caption" in bot_src
+    night_src = Path(__file__).with_name("night_runner.py").read_text(encoding="utf-8")
+    assert "with_ai_generated_caption" in night_src
+
+    async def _burn() -> None:
+        tmp = Path(tempfile.mkdtemp())
+        src = tmp / "in.mp4"
+        await _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=720x1280:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(src),
+            ]
+        )
+        out, script = await apply_ai_generated_disclosure(
+            src, tmp / "out.mp4", {"caption": "пост"}, required=True
+        )
+        assert out.is_file() and out.stat().st_size > 1000
+        assert script["caption"] == "пост\nAI generated"
+        assert script["ai_generated"] is True
+        skipped, same = await apply_ai_generated_disclosure(src, tmp / "skip.mp4", {"caption": "x"}, required=False)
+        assert skipped == src
+        assert same.get("ai_generated") is not True
+
+    asyncio.run(_burn())
 
 
 if __name__ == "__main__":
@@ -2457,4 +2529,5 @@ if __name__ == "__main__":
     test_nano_banana_and_dynamic_pacing()
     test_fal_kling_and_miniapp()
     test_autorolik_script_and_route()
+    test_ai_generated_disclosure()
     print("ok")

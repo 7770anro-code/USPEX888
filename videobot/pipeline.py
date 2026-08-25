@@ -2278,6 +2278,55 @@ async def apply_watermark(
     return dest
 
 
+AI_GENERATED_LABEL = "AI generated"
+_AI_PERSON_ROUTES = frozenset(
+    {"real_photo", "autorolik_face", "autorolik_wide", "night_pipeline"}
+)
+
+
+def with_ai_generated_caption(caption: str) -> str:
+    blob = (caption or "").strip()
+    if re.search(r"\bAI generated\b", blob, re.I):
+        return blob
+    if blob:
+        return f"{blob}\n{AI_GENERATED_LABEL}"
+    return AI_GENERATED_LABEL
+
+
+def needs_ai_generated_mark(
+    *,
+    photo_lock: bool = False,
+    element_images: list | None = None,
+    script: dict[str, Any] | None = None,
+    route_mode: str = "",
+) -> bool:
+    """Реальное фото человека или ночной пайплайн — обязательная пометка AIGC."""
+    if photo_lock:
+        return True
+    if element_images:
+        return True
+    if str((script or {}).get("kind") or "") == "autorolik":
+        return True
+    return (route_mode or "").strip() in _AI_PERSON_ROUTES
+
+
+async def apply_ai_generated_disclosure(
+    src: Path,
+    dest: Path,
+    script: dict[str, Any] | None = None,
+    *,
+    required: bool,
+) -> tuple[Path, dict[str, Any]]:
+    """Один постпродакшн-шаг: текст в углу кадра + строка в caption. Его вызывают все режимы."""
+    data = dict(script or {})
+    if not required:
+        return src, data
+    data["caption"] = with_ai_generated_caption(str(data.get("caption") or ""))
+    data["ai_generated"] = True
+    out = await apply_watermark(src, dest, text=AI_GENERATED_LABEL)
+    return out, data
+
+
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
         raise PipelineError("На сервере нет программы склейки видео (ffmpeg).")
@@ -2722,6 +2771,17 @@ async def build_video(
         if watermark:
             await report("Водяной знак", stage=live.STAGE_MUX)
             out = await apply_watermark(out, work_dir / "final_wm.mp4")
+        if needs_ai_generated_mark(
+            photo_lock=bool(photo_lock),
+            element_images=element_images,
+            script=script,
+            route_mode=mode,
+        ):
+            await report("Пометка AI generated…", stage=live.STAGE_MUX)
+            out, script = await apply_ai_generated_disclosure(
+                out, work_dir / "final_ai.mp4", script, required=True
+            )
+            save_script(work_dir, script)
         tracker.mux_done = True
         await report("Файл собран", stage=live.STAGE_MUX)
         return out, script
