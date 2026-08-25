@@ -7,7 +7,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import aiohttp
 
@@ -28,15 +28,17 @@ FAL_DONE = frozenset({"COMPLETED"})
 FAL_FAIL_STATUSES = frozenset({"FAILED", "ERROR", "CANCELLED", "CANCELED"})
 
 
-def fal_headers() -> dict[str, str]:
+def fal_headers(*, json_body: bool = True) -> dict[str, str]:
     key = (config.FAL_KEY or "").strip()
     if not key:
         raise PipelineError("Нет FAL_KEY — видео через fal.ai недоступно. Ключ: https://fal.ai/dashboard/keys")
-    return {
+    headers = {
         "Authorization": f"Key {key}",
-        "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    if json_body:
+        headers["Content-Type"] = "application/json"
+    return headers
 
 
 def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
@@ -136,6 +138,59 @@ def _encode_model(model_id: str) -> str:
     return "/".join(quote(part, safe="-._") for part in (model_id or "").split("/") if part)
 
 
+def _safe_fal_url(url: Any, fallback: str) -> str:
+    """Только HTTPS queue.fal.run — не подставляем чужой host из sidecar/submit."""
+    raw = str(url or "").strip()
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return fallback
+    host = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme == "https"
+        and (host == "queue.fal.run" or host.endswith(".fal.run"))
+        and "/requests/" in (parsed.path or "")
+        and all(c not in raw for c in " \n\r\t")
+    ):
+        return raw.split("#", 1)[0]
+    return fallback
+
+
+def _with_query(url: str, query: str) -> str:
+    if not query:
+        return url
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{query}"
+
+
+def fal_request_urls(
+    model_id: str,
+    request_id: str,
+    submitted: dict[str, Any] | None = None,
+    *,
+    status_url: str | None = None,
+    response_url: str | None = None,
+) -> tuple[str, str]:
+    """status = .../requests/{id}/status, result = .../requests/{id}/response.
+
+    Голый .../requests/{id} на GET даёт HTTP 405: это не result endpoint.
+    """
+    encoded = _encode_model(model_id)
+    rid = (request_id or "").strip()
+    base = f"{FAL_QUEUE}/{encoded}/requests/{rid}"
+    default_status = f"{base}/status"
+    default_response = f"{base}/response"
+    blob = submitted if isinstance(submitted, dict) else {}
+    status = _safe_fal_url(status_url or blob.get("status_url") or default_status, default_status)
+    response = _safe_fal_url(
+        response_url or blob.get("response_url") or default_response, default_response
+    )
+    # submit иногда отдаёт result без /response — GET туда = 405
+    if not urlparse(response).path.rstrip("/").endswith("/response"):
+        response = default_response
+    return status, response
+
+
 async def fal_submit(
     session: aiohttp.ClientSession,
     model_id: str,
@@ -183,20 +238,25 @@ async def fal_poll(
     *,
     used_image: bool = False,
     timeout_sec: float | None = None,
+    status_url: str | None = None,
+    response_url: str | None = None,
 ) -> dict[str, Any]:
     rid = (request_id or "").strip()
     if not rid:
         raise PipelineError("Нет fal request_id — опрашивать нечего.")
-    encoded = _encode_model(model_id)
-    status_url = f"{FAL_QUEUE}/{encoded}/requests/{rid}/status"
-    result_url = f"{FAL_QUEUE}/{encoded}/requests/{rid}"
+    status_url, result_url = fal_request_urls(
+        model_id,
+        rid,
+        status_url=status_url,
+        response_url=response_url,
+    )
     deadline = time.monotonic() + float(timeout_sec or config.FAL_TIMEOUT_SEC)
     last_status = ""
     while time.monotonic() < deadline:
         try:
             async with session.get(
-                status_url + "?logs=0",
-                headers=fal_headers(),
+                _with_query(status_url, "logs=0"),
+                headers=fal_headers(json_body=False),
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 raw = await resp.text()
@@ -227,7 +287,7 @@ async def fal_poll(
         if status_u in FAL_DONE:
             async with session.get(
                 result_url,
-                headers=fal_headers(),
+                headers=fal_headers(json_body=False),
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 raw = await resp.text()
@@ -261,11 +321,10 @@ async def fal_peek_status(
     rid = (request_id or "").strip()
     if not rid:
         raise PipelineError("Нет fal request_id — опрашивать нечего.")
-    encoded = _encode_model(model_id)
-    status_url = f"{FAL_QUEUE}/{encoded}/requests/{rid}/status"
+    status_url, _result_url = fal_request_urls(model_id, rid)
     async with session.get(
-        status_url + "?logs=0",
-        headers=fal_headers(),
+        _with_query(status_url, "logs=0"),
+        headers=fal_headers(json_body=False),
         timeout=aiohttp.ClientTimeout(total=30),
     ) as resp:
         raw = await resp.text()
@@ -278,7 +337,13 @@ async def fal_peek_status(
         return {}
     status_u = str(data.get("status") or "").upper()
     if status_u in FAL_DONE:
-        result = await fal_fetch_result(session, model_id, rid, used_image=used_image)
+        result = await fal_fetch_result(
+            session,
+            model_id,
+            rid,
+            used_image=used_image,
+            response_url=data.get("response_url"),
+        )
         merged = dict(data)
         if isinstance(result, dict):
             merged.update(result)
@@ -292,12 +357,14 @@ async def fal_fetch_result(
     request_id: str,
     *,
     used_image: bool = False,
+    response_url: str | None = None,
 ) -> dict[str, Any]:
-    encoded = _encode_model(model_id)
-    result_url = f"{FAL_QUEUE}/{encoded}/requests/{request_id}"
+    _status_url, result_url = fal_request_urls(
+        model_id, request_id, response_url=response_url
+    )
     async with session.get(
         result_url,
-        headers=fal_headers(),
+        headers=fal_headers(json_body=False),
         timeout=aiohttp.ClientTimeout(total=60),
     ) as resp:
         raw = await resp.text()
@@ -355,7 +422,14 @@ async def fal_run(
         note_runway_task(live_fal_id(model_id, rid), kind=model_id)
     except Exception:
         pass
-    return await fal_poll(session, model_id, rid, used_image=used_image)
+    return await fal_poll(
+        session,
+        model_id,
+        rid,
+        used_image=used_image,
+        status_url=submitted.get("status_url") if isinstance(submitted, dict) else None,
+        response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
+    )
 
 
 async def path_to_fal_url(session: aiohttp.ClientSession, path: Path) -> str:

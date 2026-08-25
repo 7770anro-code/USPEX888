@@ -23,7 +23,8 @@
 XAI_API_KEY_NEW=...
 ELEVENLABS_API_KEY=...
 VIDEOBOT_TELEGRAM_TOKEN=...
-FAL_KEY=...                 # https://fal.ai/dashboard/keys  (дефолт камеры)
+FAL_API_KEY=...             # https://fal.ai/dashboard/keys  (дефолт камеры; читается и как FAL_KEY)
+# FAL_KEY=...               # тот же ключ, другое имя — достаточно одного
 # VIDEO_PROVIDER=fal
 # запасной путь, если явно вернуть старую камеру:
 # VIDEO_PROVIDER=runway
@@ -40,7 +41,7 @@ FAL_KEY=...                 # https://fal.ai/dashboard/keys  (дефолт ка�
 
 `XAI_API_KEY_NEW` в Cursor Secrets может быть обёрткой `XAI_API_KEY=xai-...` (96 символов). Бот сам снимает префикс `XAI_API_KEY=` и проверяет, что внутри ключ длиной 84 с префиксом `xai-`. Чистить секрет вручную не нужно.
 
-Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). `FAL_KEY` обязателен, пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать и в git не класть.
+Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). Нужен `FAL_API_KEY` или `FAL_KEY` (один ключ на Kling и Seedance), пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать, в git и чаты не класть — только в `/opt/videobot/.env` на VPS.
 
 Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
 

@@ -1933,6 +1933,7 @@ def test_nano_banana_and_dynamic_pacing() -> None:
     env = Path(__file__).with_name(".env.example").read_text(encoding="utf-8")
     assert "GEMINI_API_KEY=" in env
     assert "aistudio.google.com/apikey" in env
+    assert "FAL_API_KEY=" in env
     assert "FAL_KEY=" in env
     assert "fal.ai/dashboard/keys" in env
     assert "WEBAPP_PUBLIC_URL=" in env
@@ -2003,7 +2004,15 @@ def test_fal_kling_and_miniapp() -> None:
     from urllib.parse import urlencode
 
     import config
-    from fal_api import FAL_CREDITS_MSG, extract_fal_media_url, fal_fail_error, fal_headers
+    from fal_api import (
+        FAL_CREDITS_MSG,
+        extract_fal_media_url,
+        fal_fail_error,
+        fal_headers,
+        fal_poll,
+        fal_request_urls,
+        fal_run,
+    )
     from fal_models import (
         KLING_I2V_PRO,
         SEEDANCE_I2V,
@@ -2076,6 +2085,36 @@ def test_fal_kling_and_miniapp() -> None:
         headers = fal_headers()
         assert headers["Authorization"] == "Key test-fal-key"
         assert "Bearer" not in headers["Authorization"]
+        get_headers = fal_headers(json_body=False)
+        assert "Content-Type" not in get_headers
+        status_u, response_u = fal_request_urls("fal-ai/flux/schnell", "rid-1")
+        assert status_u.endswith("/requests/rid-1/status")
+        assert response_u.endswith("/requests/rid-1/response")
+        _st, from_submit = fal_request_urls(
+            "fal-ai/flux/schnell",
+            "rid-1",
+            submitted={
+                "status_url": "https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1/status",
+                "response_url": "https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1/response",
+            },
+        )
+        assert from_submit.endswith("/response")
+        _st, stripped = fal_request_urls(
+            "fal-ai/flux/schnell",
+            "rid-1",
+            response_url="https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1",
+        )
+        assert stripped.endswith("/response")
+        _st, rejected = fal_request_urls(
+            "fal-ai/flux/schnell",
+            "rid-1",
+            response_url="https://evil.example/requests/rid-1/response",
+        )
+        assert rejected.startswith("https://queue.fal.run/")
+        assert "/response" in inspect.getsource(fal_request_urls)
+        assert "response_url" in inspect.getsource(fal_poll)
+        assert "response_url" in inspect.getsource(fal_run)
+        assert "json_body=False" in inspect.getsource(fal_poll)
     finally:
         config.FAL_KEY = old_key
 
@@ -2148,6 +2187,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/interpolate" in js
     assert "/api/history" in js
     assert "vb_onboard_v1" in js
+    smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
+    assert "--live" in smoke
+    assert "chain_for(\"real_photo\")" in smoke or "real_photo" in smoke
     assert 'TIPS' in js or "home:" in js
     assert "Нажми карточку" in js
     assert "sendData" not in js
