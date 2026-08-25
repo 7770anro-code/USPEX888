@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-25** (после «ок»: Nano Banana перед Runway + динамичный монтаж 1-клик/вайб): код ветки `cursor/night-pipeline-00ae` снова в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 161342 → 169141, 08:37 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, автоконтур стартовал (45 с → каждые 90 мин). `GEMINI_API_KEY` уже был в прод `.env`.
+
 Выложено **2026-08-24** (после «ок»: авто-сценарий 1-клик = стандарт «Лестница Микро»): код ветки `cursor/night-pipeline-00ae` снова в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 160726 → 161342). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, автоконтур стартовал (45 с → каждые 90 мин).
 
 Выложено **2026-08-24** (после «ок»: опциональные фото+голос в «1 клик»): код ветки `cursor/night-pipeline-00ae` снова в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 157325 → 160726). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, автоконтур стартовал (45 с → каждые 90 мин).
