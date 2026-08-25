@@ -24,7 +24,9 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MenuButtonWebApp,
     Message,
+    WebAppInfo,
 )
 
 import config
@@ -48,13 +50,13 @@ from presets import (
     DELIVERY,
     MOTION,
     PRESETS,
-    QUALITY,
     SPEED,
     apply_preset,
     camera_prompt,
     default_job,
     estimate_cost,
     motion_prompt,
+    quality_catalog,
     voice_settings_payload,
 )
 from joblock import JobLock
@@ -66,6 +68,7 @@ from live_status import (
     job_key_manual,
     job_scope,
     live_kb,
+    note_fal_poll,
     parse_callback_key,
     set_message,
     start_job,
@@ -117,16 +120,13 @@ from resume_job import (
 from wave2 import (
     CLONE_CONSENT_MSG,
     act_two_payload,
-    clone_voice,
     create_designed_voice,
     delete_eleven_voice,
     design_voice_previews,
     extend_video_payload,
-    image_upscale_payload,
     runway_generate_file,
     runway_upload,
     speech_to_speech,
-    video_upscale_payload,
 )
 
 logging.basicConfig(
@@ -161,12 +161,15 @@ HOW_IT_WORKS = (
     "3) «Оживить фото» — фото + короткое видео мимики (Act Two).\n"
     "4) Можно клонировать свой голос — отдельное согласие, не то же, что на фото.\n"
     "5) Подача, скорость, качество, камера, водяной знак — кнопками.\n"
-    "6) Сначала оценка кредитов Runway, потом съёмка. После ролика можно править по кругу "
-    "(«Улучшить качество») и только кнопкой «Готово, это финал» зафиксировать.\n"
+    "6) Камера — Kling 3.0 Pro / Seedance 2.5 на fal.ai (списание в кабинете fal.ai, не кредиты Runway). "
+    "После ролика можно править по кругу («Улучшить качество» / Topaz) и только кнопкой "
+    "«Готово, это финал» зафиксировать.\n"
     "7) «Нарезка и монтаж»: вручную — ffmpeg без кредитов; авто по своему видео — план Grok + ffmpeg, Runway нет; "
     "авто «описать вайб» — оригинальная синтетика тем же пайплайном, что ночь "
-    "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway), чужие ролики не скачиваю.\n"
-    "8) Мультсериал «Гибриды» (владелец): reveal-формат, серии продолжают сюжет, слот NIGHT_ACC4, пост да/нет в /night.\n\n"
+    "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Kling/Seedance), чужие ролики не скачиваю.\n"
+    "8) Мультсериал «Гибриды» (владелец): reveal-формат, серии продолжают сюжет, слот NIGHT_ACC4, пост да/нет в /night.\n"
+    "9) Меню Mini App: «🎬 Открыть меню» — шесть категорий (создать / монтаж / улучшить / "
+    "примерка / мой голос / мои видео). Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
@@ -189,6 +192,8 @@ class Flow(StatesGroup):
     w2_sts_voice = State()
     w2_sts_audio = State()
     w2_upscale = State()
+    tryon_person = State()
+    tryon_clothes = State()
     act_photo = State()
     w2_act_photo = State()
     w2_act_video = State()
@@ -230,6 +235,12 @@ def _voices_kb(
 
 
 def main_menu() -> InlineKeyboardMarkup:
+    studio_btn = InlineKeyboardButton(text="🎬 Открыть меню", callback_data="menu:studio")
+    if config.WEBAPP_PUBLIC_URL:
+        studio_btn = InlineKeyboardButton(
+            text="🎬 Открыть меню",
+            web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
+        )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⚡️ Видео за 1 клик", callback_data="menu:quick")],
@@ -240,6 +251,7 @@ def main_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎯 Пресеты", callback_data="menu:preset")],
             [InlineKeyboardButton(text="✂️ Нарезка и монтаж", callback_data="menu:edit")],
             [InlineKeyboardButton(text="🧰 Ещё возможности", callback_data="menu:more")],
+            [studio_btn],
             [InlineKeyboardButton(text="❓ Как это работает", callback_data="menu:help")],
         ]
     )
@@ -251,6 +263,7 @@ def more_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🧬 Голос по описанию", callback_data="more:design")],
             [InlineKeyboardButton(text="🎤 Переозвучить запись", callback_data="more:sts")],
             [InlineKeyboardButton(text="✨ Увеличить качество любого файла", callback_data="more:upscale")],
+            [InlineKeyboardButton(text="👗 Примерка одежды", callback_data="more:tryon")],
             [InlineKeyboardButton(text="▶️ Продолжить ролик", callback_data="more:extend")],
             [InlineKeyboardButton(text="📺 Мультсериал", callback_data="serial:hub")],
             [InlineKeyboardButton(text="🗑 Удалить все свои голоса", callback_data="more:forget")],
@@ -335,7 +348,7 @@ def result_kb(*, can_finalize: bool = True) -> InlineKeyboardMarkup:
 
 
 async def compose_live_text(job_key: str) -> tuple[str, bool]:
-    """Текст статуса. GET Runway только по сохранённому task_id, с паузой ≥5 с."""
+    """Текст статуса. GET fal/Runway только по сохранённому task_id, с паузой ≥5 с."""
     snap = get_job(job_key)
     stale = False
     tid = str((snap or {}).get("runway_task_id") or "").strip()
@@ -344,9 +357,17 @@ async def compose_live_text(job_key: str) -> tuple[str, bool]:
             try:
                 timeout = aiohttp.ClientTimeout(total=30)
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    await fetch_runway_task(session, tid)
+                    from fal_api import is_fal_live_id
+
+                    if is_fal_live_id(tid) and config.FAL_KEY:
+                        from providers.fal_client import FalClient
+
+                        status = await FalClient(session).poll_status(tid)
+                        note_fal_poll(tid, status)
+                    else:
+                        await fetch_runway_task(session, tid)
             except Exception:
-                log.warning("live status Runway GET failed job=%s", job_key)
+                log.warning("live status GET failed job=%s", job_key)
             snap = get_job(job_key)
         else:
             stale = True
@@ -540,7 +561,7 @@ def tune_kb(job: dict[str, Any]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="Скорость", callback_data="noop:x")])
     rows += _pair_rows([(k, v["label"]) for k, v in SPEED.items()], "speed", job.get("speed") or "norm")
     rows.append([InlineKeyboardButton(text="Качество", callback_data="noop:x")])
-    rows += _pair_rows([(k, v["label"]) for k, v in QUALITY.items()], "qual", job.get("quality") or "optimal")
+    rows += _pair_rows([(k, v["label"]) for k, v in quality_catalog().items()], "qual", job.get("quality") or "optimal")
     rows.append([InlineKeyboardButton(text="Камера", callback_data="noop:x")])
     rows += _pair_rows([(k, v["label"]) for k, v in CAMERA.items()], "cam", job.get("camera") or "push")
     rows.append([InlineKeyboardButton(text="Движение", callback_data="noop:x")])
@@ -604,7 +625,7 @@ def tune_text(job: dict[str, Any]) -> str:
         f"Голос: {job.get('voice_name') or voice['name']}",
         f"Подача: {(DELIVERY.get(job.get('delivery') or '') or DELIVERY['sure'])['label']}",
         f"Скорость: {(SPEED.get(job.get('speed') or '') or SPEED['norm'])['label']}",
-        f"Качество: {(QUALITY.get(job.get('quality') or '') or QUALITY['optimal'])['label']}",
+        f"Качество: {(quality_catalog().get(job.get('quality') or '') or quality_catalog()['optimal'])['label']}",
         f"Камера: {(CAMERA.get(job.get('camera') or '') or CAMERA['push'])['label']}",
         f"Движение: {(MOTION.get(job.get('motion') or '') or MOTION['nat'])['label']}",
         f"Водяной знак: {'вкл' if job.get('watermark') else 'выкл'}",
@@ -625,8 +646,17 @@ def cost_text(job: dict[str, Any]) -> str:
         text=idea,
         need_still=need_still,
     )
+    if config.video_provider() == "fal":
+        lead = (
+            "Перед запуском: списание в кабинете fal.ai, не кредиты Runway. "
+            "Озвучка — ElevenLabs. Кредиты не спишутся, пока не нажмёшь «Создать»:\n\n"
+        )
+    else:
+        lead = (
+            "Примерная стоимость до запуска (кредиты не спишутся, пока не нажмёшь «Создать»):\n\n"
+        )
     return (
-        "Примерная стоимость до запуска (кредиты не спишутся, пока не нажмёшь «Создать»):\n\n"
+        lead
         + est["text"]
         + "\n\nЭто оценка по числу клипов и тарифу качества, не чек провайдера."
     )
@@ -1000,6 +1030,7 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
         watermark=False,
         kind="motivational",
         dynamic_pacing=True,
+        route_mode="montage_generate",
     )
 
 
@@ -1279,7 +1310,54 @@ async def _start_clone_voice(msg: Message, state: FSMContext) -> None:
     await msg.answer(CLONE_CONSENT_MSG, reply_markup=clone_consent_kb())
 
 
+async def _open_studio(msg: Message, state: FSMContext) -> None:
+    await state.clear()
+    if config.WEBAPP_PUBLIC_URL:
+        await msg.answer(
+            "Меню внутри Telegram: создать видео, монтаж, 4K/слоу-мо, примерка, клон голоса, история. "
+            "Результат приходит в этот чат.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🎬 Открыть меню",
+                            web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
+                        )
+                    ],
+                    [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+                ]
+            ),
+        )
+        return
+    await msg.answer(
+        "Mini App откроется, когда задан HTTPS WEBAPP_PUBLIC_URL (nginx → этот бот). "
+        "Пока те же функции кнопками:",
+        reply_markup=more_kb(),
+    )
+
+
+async def _start_tryon(msg: Message, state: FSMContext) -> None:
+    job = await _new_job("tryon", msg.chat.id)
+    job["photo_file_id"] = None
+    job["consent_verified"] = False
+    await _save_job(state, job)
+    await state.set_state(Flow.tryon_person)
+    await msg.answer(
+        "👗 Примерка одежды (fal.ai).\n\n"
+        "Сначала фото человека — то же согласие, что для своего фото в ролике. "
+        "Без кнопки подтверждения я это фото не использую.\n"
+        "Потом отдельным сообщением — фото одежды."
+    )
+
+
 async def _start_act_two(msg: Message, state: FSMContext) -> None:
+    if config.video_provider() == "fal" and not config.RUNWAY_API_KEY:
+        await msg.answer(
+            "«Оживить фото» (Act Two) — это Runway. Сейчас камера на fal.ai (Kling/Seedance). "
+            "Нужен RUNWAY_API_KEY или сними ролик в «1 клик».",
+            reply_markup=main_menu(),
+        )
+        return
     job = await _new_job("act_two", msg.chat.id)
     job["photo_file_id"] = None
     job["consent_verified"] = False
@@ -1381,6 +1459,9 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
             "Две быстрые кнопки в главном меню как были.",
             reply_markup=more_kb(),
         )
+        return
+    if data == "menu:studio":
+        await _open_studio(msg, state)
         return
     if data == "menu:edit":
         await _start_edit(msg, state)
@@ -1575,6 +1656,13 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
                 "по нему оживим фото."
             )
         return
+    if job.get("mode") == "tryon":
+        await state.set_state(Flow.tryon_clothes)
+        if query.message:
+            await query.message.answer(
+                "Теперь фото одежды — вещь целиком, лучше на спокойном фоне."
+            )
+        return
     await _go_voice_step(query.message if isinstance(query.message, Message) else None, state, job, after_consent=True)
 
 
@@ -1696,7 +1784,7 @@ async def on_tune(query: CallbackQuery, state: FSMContext) -> None:
     data = query.data or ""
     kind, _, key = data.partition(":")
     job = await _job(state)
-    catalogs = {"deliv": DELIVERY, "speed": SPEED, "qual": QUALITY, "cam": CAMERA, "mot": MOTION}
+    catalogs = {"deliv": DELIVERY, "speed": SPEED, "qual": quality_catalog(), "cam": CAMERA, "mot": MOTION}
     fields = {"deliv": "delivery", "speed": "speed", "qual": "quality", "cam": "camera", "mot": "motion"}
     try:
         await query.answer()
@@ -1787,6 +1875,9 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
         style=str(job.get("style") or "cinematic"),
         watermark=bool(job.get("watermark")),
         dynamic_pacing=bool(job.get("dynamic_pacing")),
+        route_mode="real_photo"
+        if job.get("photo_file_id") and job.get("consent_verified")
+        else "synthetic_multi_scene",
     )
     if credits_paused(resume_work_dir(msg.chat.id)):
         save_checkpoint(
@@ -1871,6 +1962,7 @@ async def _run_job(
     kind: str = "motivational",
     wipe: bool = False,
     dynamic_pacing: bool = False,
+    route_mode: str | None = None,
 ) -> None:
     blocked = photo_start_blocked(photo_file_id, consent_verified)
     if blocked:
@@ -1962,20 +2054,22 @@ async def _run_job(
                     watermark=watermark,
                     hook=hook,
                     dynamic_pacing=dynamic_pacing,
+                    route_mode=route_mode
+                    or ("real_photo" if photo_path else "synthetic_multi_scene"),
                 )
             preview = format_script(script)
             try:
                 await message.answer(preview[:3500])
             except Exception:
                 pass
-            q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
+            q_label = (quality_catalog().get(quality) or quality_catalog()["optimal"])["label"]
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
             still_name = str(script.get("runway_still_model") or "").strip()
             models_line = compact_runway_models(script.get("runway_models") if isinstance(script.get("runway_models"), list) else [])
             if still_name:
                 caption += f"\nпервый кадр: {still_name}"
             elif script.get("nano_banana"):
-                caption += "\nпервый кадр: Nano Banana → Runway"
+                caption += "\nпервый кадр: Nano Banana → I2V"
             if models_line:
                 caption += f"\n{models_line}"
             title = str(script.get("title") or "video")
@@ -2119,12 +2213,22 @@ async def on_w2_menu(query: CallbackQuery, state: FSMContext) -> None:
         return
     if data == "upscale":
         await state.set_state(Flow.w2_upscale)
-        await msg.answer("Пришли фото или видео до 30 сек — увеличу детализацию.")
+        await msg.answer("Пришли фото или видео до 30 сек — увеличу детализацию (Topaz на fal.ai).")
+        return
+    if data == "tryon":
+        await _start_tryon(msg, state)
         return
     if data == "act":
         await _start_act_two(msg, state)
         return
     if data == "extend":
+        if config.video_provider() == "fal" and not config.RUNWAY_API_KEY:
+            await msg.answer(
+                "Продолжение ролика (extend) — это Runway. Сейчас камера на fal.ai. "
+                "Нужен RUNWAY_API_KEY или сними новый ролик.",
+                reply_markup=more_kb(),
+            )
+            return
         await state.set_state(Flow.w2_extend_video)
         await msg.answer("Пришли вертикальный ролик до 30 сек — продолжу движение тем же кадром.")
         return
@@ -2254,17 +2358,19 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
     work = _w2_work(message)
     status = await message.answer("⏳ Клонирую голос…")
     try:
+        from studio import clone_user_audio
+
         src = await _tg_download(message.bot, file_id, work / f"clone.{ext}")
         old = get_cloned_voice(message.chat.id)
         async with aiohttp.ClientSession() as session:
-            voice_id = await clone_voice(session, src, name="Мой голос")
+            voice_id = await clone_user_audio(session, src, name="Мой голос")
             if old and old.get("id") and old["id"] != voice_id:
                 await delete_eleven_voice(session, old["id"])
         set_cloned_voice(message.chat.id, voice_id, "Мой голос")
         await state.clear()
         await status.edit_text("Голос склонирован и сохранён.")
         await message.answer(
-            "Клон привязан к вашему аккаунту. Он появится в списке голосов. "
+            "Клон MiniMax привязан к аккаунту. Выбери «Мой голос» в списке вместо пресета ElevenLabs. "
             "Удалить можно кнопкой ниже.",
             reply_markup=clone_done_kb(),
         )
@@ -2310,6 +2416,67 @@ async def on_w2_sts_audio(message: Message, state: FSMContext) -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+async def on_tryon_person(message: Message, state: FSMContext) -> None:
+    photos = message.photo or []
+    file_id = photos[-1].file_id if photos else None
+    doc = message.document
+    if not file_id and doc and (doc.mime_type or "").startswith("image/"):
+        file_id = doc.file_id
+    if not file_id:
+        await message.answer("Нужно фото человека — картинкой или файлом-изображением.")
+        return
+    job = await _job(state)
+    job["mode"] = "tryon"
+    job["photo_file_id"] = file_id
+    job["consent_verified"] = False
+    await _save_job(state, job)
+    await state.set_state(Flow.custom_consent)
+    await message.answer(PHOTO_CONSENT_PROMPT, reply_markup=consent_kb())
+
+
+async def on_tryon_clothes(message: Message, state: FSMContext) -> None:
+    photos = message.photo or []
+    file_id = photos[-1].file_id if photos else None
+    doc = message.document
+    if not file_id and doc and (doc.mime_type or "").startswith("image/"):
+        file_id = doc.file_id
+    if not file_id:
+        await message.answer("Нужно фото одежды — картинкой или файлом-изображением.")
+        return
+    job = await _job(state)
+    person_id = str(job.get("photo_file_id") or "")
+    blocked = photo_start_blocked(person_id or None, bool(job.get("consent_verified")))
+    if blocked:
+        await message.answer(blocked, reply_markup=consent_kb())
+        await state.set_state(Flow.custom_consent)
+        return
+    if BUSY.locked():
+        await message.answer("⏳ Я уже занят. Подожди, пока пришлю результат.")
+        return
+    work = _w2_work(message)
+    status = await message.answer("⏳ Примеряю одежду…")
+    await BUSY.acquire()
+    try:
+        from studio import tryon_images
+
+        person = await _tg_download(message.bot, person_id, work / "person.jpg")
+        clothes = await _tg_download(message.bot, file_id, work / "clothes.jpg")
+        dest = work / "tryon.png"
+        out = await tryon_images(person, clothes, dest)
+        await message.answer_document(FSInputFile(out, filename="tryon.png"), caption="Примерка одежды")
+        await state.clear()
+        await status.edit_text("Готово.")
+        await message.answer("Ещё что-нибудь?", reply_markup=main_menu())
+    except PipelineError as exc:
+        await message.answer(exc.user_message, reply_markup=more_kb())
+    except Exception:
+        log.exception("tryon")
+        await message.answer("Не примерил. Пришли другие фото.", reply_markup=more_kb())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+        BUSY.release()
+
+
 async def on_w2_upscale(message: Message, state: FSMContext) -> None:
     media = _media_file_id(message)
     if not media:
@@ -2317,28 +2484,19 @@ async def on_w2_upscale(message: Message, state: FSMContext) -> None:
         return
     file_id, ext = media
     work = _w2_work(message)
-    status = await message.answer("⏳ Увеличиваю качество…")
+    status = await message.answer("⏳ Увеличиваю качество (Topaz)…")
     try:
+        from studio import upscale_media
+
         src = await _tg_download(message.bot, file_id, work / f"in.{ext}")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)) as session:
-            if ext == "jpg":
-                uri = await file_to_data_uri(src, work / "ref.jpg")
-                dest = work / "out.png"
-                await runway_generate_file(
-                    session,
-                    "/v1/image_upscale",
-                    image_upscale_payload(uri),
-                    dest,
-                    used_image=True,
-                )
-                await message.answer_document(FSInputFile(dest, filename="upscale.png"), caption="Увеличенное фото")
-            else:
-                uri = await runway_upload(session, src)
-                dest = work / "out.mp4"
-                await runway_generate_file(session, "/v1/video_upscale", video_upscale_payload(uri), dest)
-                keep = save_last_video(message.chat.id, dest, "Увеличенное видео")
-                clear_last_job(message.chat.id)
-                await _send_video(message, keep, "Увеличенное видео", filename="upscale_tiktok.mp4")
+        dest = work / ("out.png" if ext == "jpg" else "out.mp4")
+        out = await upscale_media(src, dest, is_image=ext == "jpg")
+        if ext == "jpg":
+            await message.answer_document(FSInputFile(out, filename="upscale.png"), caption="Увеличенное фото")
+        else:
+            keep = save_last_video(message.chat.id, out, "Увеличенное видео")
+            clear_last_job(message.chat.id)
+            await _send_video(message, keep, "Увеличенное видео", filename="upscale_tiktok.mp4")
         await state.clear()
         await status.edit_text("Готово.")
         await message.answer("Можно ещё раз улучшить или снять новый ролик.", reply_markup=result_kb(can_finalize=False))
@@ -2501,22 +2659,22 @@ async def _pixel_upscale_last(msg: Message) -> None:
         return
     title = get_last_title(msg.chat.id) or "video"
     work = _w2_work(msg)
-    status = await msg.answer("⏳ Улучшаю картинку готового файла…")
+    status = await msg.answer("⏳ Улучшаю картинку готового файла (Topaz)…")
     await BUSY.acquire()
     try:
+        from studio import upscale_media
+
         local = work / "final.mp4"
         shutil.copyfile(src, local)
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)) as session:
-            uri = await runway_upload(session, local)
-            dest = work / "upscale.mp4"
-            await runway_generate_file(session, "/v1/video_upscale", video_upscale_payload(uri), dest)
-            keep = save_last_video(msg.chat.id, dest, title)
-            await _send_video(
-                msg,
-                keep,
-                "Улучшенное качество картинки",
-                filename=tiktok_upload_filename(title),
-            )
+        dest = work / "upscale.mp4"
+        out = await upscale_media(local, dest, is_image=False)
+        keep = save_last_video(msg.chat.id, out, title)
+        await _send_video(
+            msg,
+            keep,
+            "Улучшенное качество картинки",
+            filename=tiktok_upload_filename(title),
+        )
         await status.edit_text("Готово — увеличенный файл выше.")
         await msg.answer(
             "Это увеличение картинки готового файла. Переснять сюжет с правками можно после «идея → видео».",
@@ -2684,6 +2842,12 @@ async def on_other(message: Message, state: FSMContext) -> None:
     if current == Flow.act_photo.state:
         await on_act_photo(message, state)
         return
+    if current == Flow.tryon_person.state:
+        await on_tryon_person(message, state)
+        return
+    if current == Flow.tryon_clothes.state:
+        await on_tryon_clothes(message, state)
+        return
     if current == Flow.w2_clone_audio.state:
         await on_w2_clone_audio(message, state)
         return
@@ -2789,6 +2953,10 @@ async def main() -> None:
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_act_photo, Flow.act_photo, F.photo)
     dp.message.register(on_act_photo, Flow.act_photo, F.document)
+    dp.message.register(on_tryon_person, Flow.tryon_person, F.photo)
+    dp.message.register(on_tryon_person, Flow.tryon_person, F.document)
+    dp.message.register(on_tryon_clothes, Flow.tryon_clothes, F.photo)
+    dp.message.register(on_tryon_clothes, Flow.tryon_clothes, F.document)
     dp.message.register(on_w2_clone_audio, Flow.w2_clone_audio)
     dp.message.register(on_w2_sts_audio, Flow.w2_sts_audio)
     dp.message.register(on_w2_upscale, Flow.w2_upscale)
@@ -2812,8 +2980,20 @@ async def main() -> None:
     dp.callback_query.register(on_live_refresh, F.data.startswith("live:"))
     dp.callback_query.register(on_stale_callback)
     from night_loop import start_auto_pipeline
+    from webapp_server import start_webapp
 
     auto_task = start_auto_pipeline(BUSY) if config.NIGHT_BACKGROUND else None
+    web_runner = await start_webapp(bot)
+    if config.WEBAPP_PUBLIC_URL:
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Открыть меню",
+                    web_app=WebAppInfo(url=config.WEBAPP_PUBLIC_URL),
+                )
+            )
+        except Exception as exc:
+            log.warning("не поставил MenuButtonWebApp: %s", exc)
     log.info("VideoBot polling start")
     try:
         await dp.start_polling(bot)
@@ -2824,6 +3004,8 @@ async def main() -> None:
                 await auto_task
             except asyncio.CancelledError:
                 pass
+        if web_runner is not None:
+            await web_runner.cleanup()
 
 
 if __name__ == "__main__":

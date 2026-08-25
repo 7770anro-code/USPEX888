@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+import config
+
 # Runway: по факту gen4.5 ~12 кр/с (10с = 120). turbo I2V дешевле — оценка 5 кр/с.
 # Veo/Gemini на том же ключе не выводим в UI: живой A/B не дал явного выигрыша.
+# Дефолт видео — fal.ai; эти цифры только если VIDEO_PROVIDER=runway.
 RUNWAY_CREDITS_PER_SEC = {"fast": 5, "optimal": 12}
 STILL_CREDITS = 5
 ELEVEN_CREDITS_PER_CHAR = 1
@@ -63,10 +66,31 @@ SPEED: dict[str, dict[str, Any]] = {
     "xfst": {"label": "Очень быстро", "value": 1.2},
 }
 
+# UI по умолчанию — fal.ai. Runway-модели только для VIDEO_PROVIDER=runway.
 QUALITY: dict[str, dict[str, Any]] = {
     "fast": {
         "label": "Быстро",
-        "hint": "дешевле, чуть проще картинка",
+        "hint": "Seedance 2.5 на fal.ai — дешевле и быстрее",
+        "i2v_model": "bytedance/seedance-2.5/image-to-video",
+        "t2v_model": "",
+        "still_model": "fal-ai/flux/schnell",
+        "prefer_t2v": False,
+    },
+    "optimal": {
+        "label": "Оптимально",
+        "hint": "Kling 3.0 Pro на fal.ai — киношная картинка",
+        "i2v_model": "fal-ai/kling-video/v3/pro/image-to-video",
+        "t2v_model": "fal-ai/kling-video/v3/pro/text-to-video",
+        "still_model": "fal-ai/flux/schnell",
+        "prefer_t2v": False,
+    },
+}
+
+# Запасной путь, если явно VIDEO_PROVIDER=runway. UI подменяет QUALITY через quality_catalog().
+RUNWAY_QUALITY: dict[str, dict[str, Any]] = {
+    "fast": {
+        "label": "Быстро",
+        "hint": "gen4_turbo — быстрее и дешевле",
         "i2v_model": "gen4_turbo",
         "t2v_model": "",
         "still_model": "gen4_image",
@@ -74,13 +98,19 @@ QUALITY: dict[str, dict[str, Any]] = {
     },
     "optimal": {
         "label": "Оптимально",
-        "hint": "дороже и лучше",
+        "hint": "gen4.5 — киношная картинка",
         "i2v_model": "gen4.5",
         "t2v_model": "gen4.5",
         "still_model": "gen4_image",
         "prefer_t2v": True,
     },
 }
+
+
+def quality_catalog() -> dict[str, dict[str, Any]]:
+    if config.video_provider() == "runway":
+        return RUNWAY_QUALITY
+    return QUALITY
 
 CAMERA: dict[str, dict[str, str]] = {
     "lock": {"label": "Статично", "prompt": "camera holds static"},
@@ -257,13 +287,30 @@ def estimate_cost(
 ) -> dict[str, Any]:
     n_scenes = max(1, min(6, int(n_scenes or 1)))
     clip_sec = 10 if int(clip_sec) >= 8 else 5
+    chars = len((text or "").strip())
+    eleven = chars * ELEVEN_CREDITS_PER_CHAR
+    catalog = quality_catalog()
+    q_label = (catalog.get(quality) or catalog["optimal"])["label"]
+    if config.video_provider() != "runway":
+        lines = [
+            f"Клипы: {n_scenes} × {clip_sec} сек × {q_label}",
+            "Списание — в кабинете fal.ai (Kling 3.0 / Seedance 2.5), не кредиты Runway.",
+        ]
+        if need_still:
+            lines.append("Первый кадр — Flux на fal.ai.")
+        lines.append(f"Озвучка ≈ {chars} символов ElevenLabs")
+        return {
+            "runway": 0,
+            "eleven_chars": chars,
+            "eleven": eleven,
+            "total_runway": 0,
+            "provider": "fal",
+            "text": "\n".join(lines),
+        }
     per_sec = RUNWAY_CREDITS_PER_SEC.get(quality, 12)
     runway = n_scenes * clip_sec * per_sec
     if need_still:
         runway += STILL_CREDITS
-    chars = len((text or "").strip())
-    eleven = chars * ELEVEN_CREDITS_PER_CHAR
-    q_label = (QUALITY.get(quality) or QUALITY["optimal"])["label"]
     lines = [
         f"Клипы: {n_scenes} × {clip_sec} сек × {q_label} ≈ {n_scenes * clip_sec * per_sec} кр. Runway",
     ]
@@ -276,6 +323,7 @@ def estimate_cost(
         "eleven_chars": chars,
         "eleven": eleven,
         "total_runway": runway,
+        "provider": "runway",
         "text": "\n".join(lines),
     }
 

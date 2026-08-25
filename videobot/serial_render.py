@@ -192,6 +192,7 @@ async def _render_one(
             hook=plan["hook"],
             script_system=SERIAL_SCRIPT_SYSTEM,
             photo_lock=False,
+            route_mode="synthetic_multi_scene",
         )
         RUNWAY.ok()
         ELEVEN.ok()

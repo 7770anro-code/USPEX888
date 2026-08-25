@@ -2,6 +2,8 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-25 (8):** после «ок» на Kling/Seedance (fal.ai) + Mini App код ветки `cursor/fal-kling-miniapp-00ae` выложен в `/opt/videobot`. Рестарт только `videobot.service` (PID 169141 → 182509). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling. Mini App `/health` 200 на `127.0.0.1:8088`. Перед деплоем: `smoke_rollout.py` (Grok/TTS/монтаж) и `--live-only` на VPS из `/tmp` (Flux + Kling 3с + Seedance 4с).
+
 **Деплой 2026-08-25 (7):** после «ок» на Nano Banana (Gemini 2.5 Flash Image) перед Runway и более частую нарезку 1-клик/вайб (6×~5 сек, 20–30 сек). Рестарт только `videobot.service` (PID 161342 → 169141). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling.
 
 **Деплой 2026-08-24 (6):** после «ок» на ужесточение авто-сценария «1 клик» (хук 8–14 слов, 18–28, энергичная камера синтетики, grok-4.5). Рестарт только `videobot.service` (PID 160726 → 161342). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling.

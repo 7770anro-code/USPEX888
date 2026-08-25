@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>VideoBot</title>
+  <link rel="stylesheet" href="./app.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <button id="tip" class="tip" type="button" hidden></button>
+  <main class="shell">
+    <header class="hero">
+      <p class="kicker">VideoBot</p>
+      <h1>Меню</h1>
+      <p class="lede">Готовое придёт в чат с ботом.</p>
+    </header>
+
+    <section id="home" class="home">
+      <button class="card" data-go="create" type="button">
+        <span class="ico">🎬</span>
+        <span class="ttl">Создать видео</span>
+        <span class="sub">Тема → ролик. Можно своё фото.</span>
+      </button>
+      <button class="card" data-go="cut" type="button">
+        <span class="ico">✂️</span>
+        <span class="ttl">Монтаж</span>
+        <span class="sub">Нарезать своё видео или снять вайб.</span>
+      </button>
+      <button class="card" data-go="improve" type="button">
+        <span class="ico">✨</span>
+        <span class="ttl">Улучшить</span>
+        <span class="sub">4K, слоу-мо, реставрация фото.</span>
+      </button>
+      <button class="card" data-go="tryon" type="button">
+        <span class="ico">👗</span>
+        <span class="ttl">Примерка</span>
+        <span class="sub">Твоё фото + шмотка → ты в ней.</span>
+      </button>
+      <button class="card" data-go="voice" type="button">
+        <span class="ico">🎙</span>
+        <span class="ttl">Мой голос</span>
+        <span class="sub">Клон MiniMax, потом выбираешь его в съёмке.</span>
+      </button>
+      <button class="card" data-go="mine" type="button">
+        <span class="ico">📊</span>
+        <span class="ttl">Мои видео</span>
+        <span class="sub">Последний готовый ролик в этот чат.</span>
+      </button>
+    </section>
+
+    <section id="panel-create" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Создать видео</h2>
+      <p class="hint">Напиши тему — хватит пары слов.</p>
+      <label>Тема
+        <textarea id="idea" rows="3" maxlength="400" placeholder="лестница микро…"></textarea>
+      </label>
+      <fieldset class="row">
+        <legend>Качество</legend>
+        <label class="chip"><input type="radio" name="quality" value="fast" /> Быстро</label>
+        <label class="chip"><input type="radio" name="quality" value="optimal" checked /> Оптимально</label>
+      </fieldset>
+      <label>Своё фото (необязательно)
+        <input id="quick-photo" type="file" accept="image/*" />
+      </label>
+      <label class="check">
+        <input id="quick-consent" type="checkbox" />
+        Это моё фото или есть согласие
+      </label>
+      <button class="go" id="go-quick" type="button">Снять</button>
+    </section>
+
+    <section id="panel-cut" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Монтаж</h2>
+      <p class="hint">Напиши вайб — сниму синтетику. Своё видео режется в чате бота.</p>
+      <label>Вайб / тема
+        <textarea id="vibe" rows="3" maxlength="400" placeholder="ночной неон, быстрый хук…"></textarea>
+      </label>
+      <button class="go" id="go-vibe" type="button">Снять вайб</button>
+    </section>
+
+    <section id="panel-improve" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Улучшить</h2>
+      <p class="hint">Topaz: 4K, слоу-мо или починить старое фото.</p>
+      <label>Файл
+        <input id="improve-file" type="file" accept="image/*,video/*" />
+      </label>
+      <div class="row-btns">
+        <button class="go" id="go-upscale" type="button">Апскейл 4K</button>
+        <button class="go alt" id="go-slowmo" type="button">Слоу-мо</button>
+        <button class="go alt" id="go-restore" type="button">Реставрация фото</button>
+      </div>
+    </section>
+
+    <section id="panel-tryon" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Примерка</h2>
+      <p class="hint">Два фото: ты и одежда. Без галочки согласия не беру.</p>
+      <label>Фото человека
+        <input id="tryon-person" type="file" accept="image/*" />
+      </label>
+      <label>Фото одежды
+        <input id="tryon-clothes" type="file" accept="image/*" />
+      </label>
+      <label class="check">
+        <input id="tryon-consent" type="checkbox" />
+        Подтверждаю: моё фото / есть согласие
+      </label>
+      <button class="go" id="go-tryon" type="button">Примерить</button>
+    </section>
+
+    <section id="panel-voice" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Мой голос</h2>
+      <p class="hint">Чистая речь 10+ сек. Клон MiniMax, согласие отдельно от фото.</p>
+      <label>Голосовое
+        <input id="clone-audio" type="file" accept="audio/*,.ogg,.mp3,.wav,.m4a" />
+      </label>
+      <label class="check">
+        <input id="clone-consent" type="checkbox" />
+        Разрешаю клонировать этот голос
+      </label>
+      <button class="go" id="go-clone" type="button">Клонировать</button>
+    </section>
+
+    <section id="panel-mine" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Мои видео</h2>
+      <p class="hint">Пришлю последний готовый файл в чат.</p>
+      <button class="go" id="go-history" type="button">Прислать последний</button>
+    </section>
+
+    <p id="status" class="status" hidden></p>
+  </main>
+  <script src="./app.js"></script>
+</body>
+</html>

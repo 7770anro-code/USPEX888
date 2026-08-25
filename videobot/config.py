@@ -69,6 +69,16 @@ XAI_API_KEY_NEW, XAI_API_KEY_ERROR = _load_xai_api_key()
 ELEVENLABS_API_KEY = _clean("ELEVENLABS_API_KEY")
 RUNWAY_API_KEY = _clean("RUNWAY_API_KEY")
 VIDEOBOT_TELEGRAM_TOKEN = _clean("VIDEOBOT_TELEGRAM_TOKEN")
+# fal.ai — Kling 3.0 + Seedance 2.5 + Topaz + примерка. Ключ: https://fal.ai/dashboard/keys
+# Бриф: Authorization: Key $FAL_API_KEY. Принимаем и FAL_KEY (как в кабинете fal).
+FAL_KEY = _clean("FAL_KEY") or _clean("FAL_API_KEY")
+VIDEO_PROVIDER = (_clean("VIDEO_PROVIDER") or "fal").strip().lower()
+FAL_VIDEO_MODEL = _clean("FAL_VIDEO_MODEL")
+FAL_POLL_SEC = float(_clean("FAL_POLL_SEC") or "4")
+FAL_TIMEOUT_SEC = float(_clean("FAL_TIMEOUT_SEC") or "720")
+WEBAPP_PUBLIC_URL = _clean("WEBAPP_PUBLIC_URL")
+WEBAPP_PORT = int(_clean("WEBAPP_PORT") or "8088")
+WEBAPP_HOST = _clean("WEBAPP_HOST") or "127.0.0.1"
 # Google AI Studio — Nano Banana (gemini-2.5-flash-image). Не Runway GEMINI.
 # Без ключа своё фото идёт в I2V как есть. Не входит в missing_secrets().
 GEMINI_API_KEY = _clean("GEMINI_API_KEY")
@@ -142,19 +152,31 @@ NIGHT_OUTBOX = _clean("NIGHT_OUTBOX") or str(Path(DATA_DIR) / "outbox")
 NIGHT_DEDUP_DAYS = max(7, min(30, int(_clean("NIGHT_DEDUP_DAYS") or "21")))
 
 
+def video_provider() -> str:
+    """fal — дефолт (Kling/Seedance). runway — запасной путь, если явно включён."""
+    raw = (VIDEO_PROVIDER or "fal").strip().lower()
+    if raw in ("runway", "runwayml"):
+        return "runway"
+    return "fal"
+
+
 def missing_secrets() -> list[str]:
     names = [
         "XAI_API_KEY_NEW",
         "ELEVENLABS_API_KEY",
-        "RUNWAY_API_KEY",
         "VIDEOBOT_TELEGRAM_TOKEN",
     ]
     values = [
         XAI_API_KEY_NEW,
         ELEVENLABS_API_KEY,
-        RUNWAY_API_KEY,
         VIDEOBOT_TELEGRAM_TOKEN,
     ]
+    if video_provider() == "runway":
+        names.append("RUNWAY_API_KEY")
+        values.append(RUNWAY_API_KEY)
+    else:
+        names.append("FAL_KEY")
+        values.append(FAL_KEY)
     missing = [name for name, value in zip(names, values) if not value]
     if XAI_API_KEY_ERROR:
         missing = [n for n in missing if n != "XAI_API_KEY_NEW"]
@@ -175,8 +197,14 @@ def runway_model_router_enabled() -> bool:
 
 
 def missing_render_secrets() -> list[str]:
-    names = ["XAI_API_KEY_NEW", "ELEVENLABS_API_KEY", "RUNWAY_API_KEY"]
-    values = [XAI_API_KEY_NEW, ELEVENLABS_API_KEY, RUNWAY_API_KEY]
+    names = ["XAI_API_KEY_NEW", "ELEVENLABS_API_KEY"]
+    values = [XAI_API_KEY_NEW, ELEVENLABS_API_KEY]
+    if video_provider() == "runway":
+        names.append("RUNWAY_API_KEY")
+        values.append(RUNWAY_API_KEY)
+    else:
+        names.append("FAL_KEY")
+        values.append(FAL_KEY)
     missing = [name for name, value in zip(names, values) if not value]
     if XAI_API_KEY_ERROR and "XAI_API_KEY_NEW" not in missing:
         missing.insert(0, "XAI_API_KEY_NEW")
