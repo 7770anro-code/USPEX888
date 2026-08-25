@@ -48,6 +48,8 @@ class TestJournalAndVersion(unittest.TestCase):
             taker_fee_bps_roundtrip=11.0, min_net_bps=3.0,
         )
         self.assertFalse(net.ok)
+        # Entry half-spread already in executable gross → costs get exit half only.
+        self.assertAlmostEqual(net.expected_costs_bps, 1.5 + 2.0 + 11.0, places=7)
         rec = net_edge_reject_record(net, side="LONG", score=80.0, edge_bps=5.0)
         self.assertEqual(rec["reject"], JournalCode.NET_EDGE_REJECT)
         self.assertIn("NET_EDGE_TOO_SMALL", rec["reject_detail"])
@@ -59,6 +61,7 @@ class TestJournalAndVersion(unittest.TestCase):
         self.assertIn("settle_cancelled_tasks", src)
         self.assertIn("vote_from_task", src)
         self.assertIn("NET_EDGE_REJECT", src)
+        self.assertIn("spread_already_in_gross=uses_executable", src)
         self.assertIn("CURSOR_CONNECT_TIMEOUT", src)
         self.assertIn("COUNCIL_TASK_CANCELLED", src)
         self.assertNotIn(

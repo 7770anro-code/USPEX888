@@ -62,6 +62,32 @@ class TestV3Institutional(unittest.TestCase):
                               taker_fee_bps_roundtrip=11.0, uncertainty_bps=2.0, min_net_bps=3.0)
         self.assertTrue(r.ok)
 
+    def test_net_edge_spread_once_when_gross_is_executable(self):
+        # Prod example: gross vs ask/bid already includes entry half-spread.
+        # Quoted spread 3.4bps must not be added in full to costs.
+        r = estimate_net_edge(
+            gross_edge_bps=3.8, spread_bps=3.4, expected_slippage_bps=2.0,
+            taker_fee_bps_roundtrip=11.0, uncertainty_bps=2.0, min_net_bps=3.0,
+        )
+        self.assertAlmostEqual(r.expected_costs_bps, 1.7 + 2.0 + 11.0, places=7)
+        self.assertAlmostEqual(r.expected_net_edge_bps, 3.8 - 14.7 - 2.0, places=7)
+        self.assertFalse(r.ok)
+
+        full = estimate_net_edge(
+            gross_edge_bps=3.8, spread_bps=3.4, expected_slippage_bps=2.0,
+            taker_fee_bps_roundtrip=11.0, uncertainty_bps=2.0, min_net_bps=3.0,
+            spread_already_in_gross=False,
+        )
+        self.assertAlmostEqual(full.expected_costs_bps, 16.4, places=7)
+        self.assertGreater(full.expected_costs_bps, r.expected_costs_bps)
+
+    def test_net_edge_zero_spread_unchanged(self):
+        r = estimate_net_edge(
+            gross_edge_bps=20.0, spread_bps=0.0, expected_slippage_bps=2.0,
+            taker_fee_bps_roundtrip=11.0, uncertainty_bps=2.0, min_net_bps=3.0,
+        )
+        self.assertAlmostEqual(r.expected_costs_bps, 13.0, places=7)
+
     def test_okx_seq_gap_marks_dirty(self):
         ad = OkxAdapter()
         snap = MarketSnapshot(venue="okx", canonical_symbol="BTCUSDT", native_symbol="BTC-USDT-SWAP",
