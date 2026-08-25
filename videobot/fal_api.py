@@ -138,8 +138,8 @@ def _encode_model(model_id: str) -> str:
     return "/".join(quote(part, safe="-._") for part in (model_id or "").split("/") if part)
 
 
-def _safe_fal_url(url: Any, fallback: str) -> str:
-    """Только HTTPS queue.fal.run — не подставляем чужой host из sidecar/submit."""
+def _safe_fal_url(url: Any, fallback: str = "") -> str:
+    """Только HTTPS *.fal.run с /requests/ — не подставляем чужой host."""
     raw = str(url or "").strip()
     try:
         parsed = urlparse(raw)
@@ -163,6 +163,86 @@ def _with_query(url: str, query: str) -> str:
     return f"{url}{sep}{query}"
 
 
+def _model_id_candidates(model_id: str) -> list[str]:
+    """fal часто кладёт джобу на родителя: fal-ai/flux/schnell → fal-ai/flux."""
+    parts = [p for p in (model_id or "").split("/") if p]
+    out: list[str] = []
+    while len(parts) >= 2:
+        name = "/".join(parts)
+        if name not in out:
+            out.append(name)
+        parts = parts[:-1]
+    return out
+
+
+def _result_url_candidates(url: str) -> list[str]:
+    """GET result: у Flux — голый .../requests/{id}; в доке ещё бывает /response."""
+    raw = (url or "").strip()
+    if not raw:
+        return []
+    parsed = urlparse(raw)
+    path = (parsed.path or "").rstrip("/")
+    query = f"?{parsed.query}" if parsed.query else ""
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    out = [raw]
+    if path.endswith("/response"):
+        alt = origin + path[: -len("/response")] + query
+    else:
+        alt = origin + path + "/response" + query
+    if alt and alt not in out:
+        out.append(alt)
+    return out
+
+
+_FAL_JOB_URLS: dict[str, tuple[str, str]] = {}
+
+
+def remember_fal_urls(
+    request_id: str,
+    *,
+    status_url: str = "",
+    response_url: str = "",
+) -> None:
+    rid = (request_id or "").strip()
+    status = _safe_fal_url(status_url)
+    response = _safe_fal_url(response_url)
+    if rid and (status or response):
+        prev = _FAL_JOB_URLS.get(rid, ("", ""))
+        _FAL_JOB_URLS[rid] = (status or prev[0], response or prev[1])
+
+
+def recalled_fal_urls(request_id: str) -> tuple[str, str]:
+    return _FAL_JOB_URLS.get((request_id or "").strip(), ("", ""))
+
+
+def fal_side_payload(submitted: dict[str, Any] | None) -> dict[str, str]:
+    blob = submitted if isinstance(submitted, dict) else {}
+    return {
+        "request_id": str(blob.get("request_id") or ""),
+        "status_url": str(blob.get("status_url") or ""),
+        "response_url": str(blob.get("response_url") or ""),
+    }
+
+
+def read_fal_side(path: Path) -> dict[str, str]:
+    raw = Path(path).read_text(encoding="utf-8").strip()
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(data, dict):
+            return {
+                "request_id": str(data.get("request_id") or ""),
+                "status_url": str(data.get("status_url") or ""),
+                "response_url": str(data.get("response_url") or ""),
+            }
+        return {}
+    return {"request_id": raw}
+
+
 def fal_request_urls(
     model_id: str,
     request_id: str,
@@ -171,23 +251,28 @@ def fal_request_urls(
     status_url: str | None = None,
     response_url: str | None = None,
 ) -> tuple[str, str]:
-    """status = .../requests/{id}/status, result = .../requests/{id}/response.
+    """URL статуса и результата.
 
-    Голый .../requests/{id} на GET даёт HTTP 405: это не result endpoint.
+    Submit сам отдаёт status_url/response_url — их и берём. Путь модели в них
+    может отличаться от id, которым слали POST (flux/schnell → flux).
+    Голый .../requests/{id} на *правильном* app — валидный GET result (Flux).
+    Тот же путь на *чужом* app (schnell) даёт HTTP 405 Allow: POST.
     """
-    encoded = _encode_model(model_id)
     rid = (request_id or "").strip()
+    blob = submitted if isinstance(submitted, dict) else {}
+    remembered = recalled_fal_urls(rid)
+    encoded = _encode_model(model_id)
     base = f"{FAL_QUEUE}/{encoded}/requests/{rid}"
     default_status = f"{base}/status"
-    default_response = f"{base}/response"
-    blob = submitted if isinstance(submitted, dict) else {}
-    status = _safe_fal_url(status_url or blob.get("status_url") or default_status, default_status)
-    response = _safe_fal_url(
-        response_url or blob.get("response_url") or default_response, default_response
+    default_response = base
+    status = _safe_fal_url(
+        status_url or blob.get("status_url") or remembered[0] or default_status,
+        default_status,
     )
-    # submit иногда отдаёт result без /response — GET туда = 405
-    if not urlparse(response).path.rstrip("/").endswith("/response"):
-        response = default_response
+    response = _safe_fal_url(
+        response_url or blob.get("response_url") or remembered[1] or default_response,
+        default_response,
+    )
     return status, response
 
 
@@ -219,6 +304,11 @@ async def fal_submit(
                 data = json.loads(raw)
                 if not isinstance(data, dict) or not data.get("request_id"):
                     raise PipelineError("fal.ai не вернул request_id.", _clip(raw, 240))
+                remember_fal_urls(
+                    str(data.get("request_id") or ""),
+                    status_url=str(data.get("status_url") or ""),
+                    response_url=str(data.get("response_url") or ""),
+                )
                 return data
         except PipelineError:
             raise
@@ -229,6 +319,63 @@ async def fal_submit(
                 continue
             raise PipelineError("Не достучался до fal.ai.", last) from exc
     raise PipelineError("Не достучался до fal.ai.", last)
+
+
+def _status_url_list(model_id: str, request_id: str, status_url: str) -> list[str]:
+    rid = (request_id or "").strip()
+    out: list[str] = []
+    if status_url:
+        out.append(_with_query(status_url, "logs=0"))
+    for mid in _model_id_candidates(model_id):
+        u = f"{FAL_QUEUE}/{_encode_model(mid)}/requests/{rid}/status"
+        q = _with_query(u, "logs=0")
+        if q not in out:
+            out.append(q)
+    return out
+
+
+def _result_url_list(model_id: str, request_id: str, result_url: str) -> list[str]:
+    rid = (request_id or "").strip()
+    out: list[str] = []
+    for cand in _result_url_candidates(result_url):
+        if cand not in out:
+            out.append(cand)
+    for mid in _model_id_candidates(model_id):
+        base = f"{FAL_QUEUE}/{_encode_model(mid)}/requests/{rid}"
+        for cand in (base, base + "/response"):
+            if cand not in out:
+                out.append(cand)
+    return out
+
+
+async def _fal_get_json(
+    session: aiohttp.ClientSession,
+    urls: list[str],
+    *,
+    used_image: bool = False,
+    timeout_sec: float = 30,
+) -> tuple[int, dict[str, Any], str, str]:
+    """Первый не-405 GET. 429/5xx и прочие 4xx возвращаем вызывающему."""
+    last_code, last_raw, last_url = 0, "", ""
+    seen: set[str] = set()
+    for url in urls:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        async with session.get(
+            url,
+            headers=fal_headers(json_body=False),
+            timeout=aiohttp.ClientTimeout(total=timeout_sec),
+        ) as resp:
+            raw = await resp.text()
+            last_code, last_raw, last_url = resp.status, raw, url
+            if resp.status == 405:
+                continue
+            data = json.loads(raw) if raw and resp.status < 400 else {}
+            if resp.status < 400 and not isinstance(data, dict):
+                data = {}
+            return resp.status, data if isinstance(data, dict) else {}, raw, url
+    return last_code, {}, last_raw, last_url
 
 
 async def fal_poll(
@@ -250,26 +397,27 @@ async def fal_poll(
         status_url=status_url,
         response_url=response_url,
     )
+    status_urls = _status_url_list(model_id, rid, status_url)
+    result_urls = _result_url_list(model_id, rid, result_url)
     deadline = time.monotonic() + float(timeout_sec or config.FAL_TIMEOUT_SEC)
     last_status = ""
     while time.monotonic() < deadline:
         try:
-            async with session.get(
-                _with_query(status_url, "logs=0"),
-                headers=fal_headers(json_body=False),
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                raw = await resp.text()
-                if resp.status in (429, 502, 503, 504):
-                    await sleep_backoff(1)
-                    continue
-                if resp.status >= 400:
-                    err = fal_fail_error(
-                        _clip(f"HTTP {resp.status}: {raw}"), used_image=used_image
-                    )
-                    err.status = resp.status
-                    raise err
-                data = json.loads(raw) if raw else {}
+            code, data, raw, used = await _fal_get_json(
+                session, status_urls, used_image=used_image, timeout_sec=30
+            )
+            if code in (429, 502, 503, 504):
+                await sleep_backoff(1)
+                continue
+            if code >= 400:
+                err = fal_fail_error(
+                    _clip(f"HTTP {code}: {raw}"), used_image=used_image
+                )
+                err.status = code
+                raise err
+            if used and used != status_urls[0]:
+                remember_fal_urls(rid, status_url=used.split("?", 1)[0])
+                status_urls = _status_url_list(model_id, rid, used.split("?", 1)[0])
         except PipelineError:
             raise
         except Exception as exc:
@@ -278,6 +426,11 @@ async def fal_poll(
             continue
         last_status = str((data or {}).get("status") or "")
         status_u = last_status.upper()
+        if data.get("response_url"):
+            remember_fal_urls(rid, response_url=str(data.get("response_url") or ""))
+            result_urls = _result_url_list(
+                model_id, rid, str(data.get("response_url") or result_url)
+            )
         if status_u in FAL_FAIL_STATUSES or (data or {}).get("error"):
             detail = _clip(
                 f"{status_u}: {(data or {}).get('error') or (data or {}).get('error_type') or raw}",
@@ -285,17 +438,15 @@ async def fal_poll(
             )
             raise fal_fail_error(detail, used_image=used_image)
         if status_u in FAL_DONE:
-            async with session.get(
-                result_url,
-                headers=fal_headers(json_body=False),
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                raw = await resp.text()
-                if resp.status >= 400:
-                    raise fal_fail_error(
-                        _clip(f"HTTP {resp.status}: {raw}"), used_image=used_image
-                    )
-                result = json.loads(raw)
+            code, result, raw, used = await _fal_get_json(
+                session, result_urls, used_image=used_image, timeout_sec=60
+            )
+            if code >= 400:
+                raise fal_fail_error(
+                    _clip(f"HTTP {code}: {raw}"), used_image=used_image
+                )
+            if used:
+                remember_fal_urls(rid, response_url=used)
             if not isinstance(result, dict):
                 raise PipelineError("fal.ai вернул не JSON результата.", _clip(raw, 240))
             if result.get("error"):
@@ -322,17 +473,18 @@ async def fal_peek_status(
     if not rid:
         raise PipelineError("Нет fal request_id — опрашивать нечего.")
     status_url, _result_url = fal_request_urls(model_id, rid)
-    async with session.get(
-        _with_query(status_url, "logs=0"),
-        headers=fal_headers(json_body=False),
-        timeout=aiohttp.ClientTimeout(total=30),
-    ) as resp:
-        raw = await resp.text()
-        if resp.status >= 400:
-            err = fal_fail_error(_clip(f"HTTP {resp.status}: {raw}"), used_image=used_image)
-            err.status = resp.status
-            raise err
-        data = json.loads(raw) if raw else {}
+    code, data, raw, used = await _fal_get_json(
+        session,
+        _status_url_list(model_id, rid, status_url),
+        used_image=used_image,
+        timeout_sec=30,
+    )
+    if code >= 400:
+        err = fal_fail_error(_clip(f"HTTP {code}: {raw}"), used_image=used_image)
+        err.status = code
+        raise err
+    if used:
+        remember_fal_urls(rid, status_url=used.split("?", 1)[0])
     if not isinstance(data, dict):
         return {}
     status_u = str(data.get("status") or "").upper()
@@ -362,15 +514,16 @@ async def fal_fetch_result(
     _status_url, result_url = fal_request_urls(
         model_id, request_id, response_url=response_url
     )
-    async with session.get(
-        result_url,
-        headers=fal_headers(json_body=False),
-        timeout=aiohttp.ClientTimeout(total=60),
-    ) as resp:
-        raw = await resp.text()
-        if resp.status >= 400:
-            raise fal_fail_error(_clip(f"HTTP {resp.status}: {raw}"), used_image=used_image)
-        result = json.loads(raw) if raw else {}
+    code, result, raw, used = await _fal_get_json(
+        session,
+        _result_url_list(model_id, request_id, result_url),
+        used_image=used_image,
+        timeout_sec=60,
+    )
+    if code >= 400:
+        raise fal_fail_error(_clip(f"HTTP {code}: {raw}"), used_image=used_image)
+    if used:
+        remember_fal_urls(request_id, response_url=used)
     if not isinstance(result, dict):
         raise PipelineError("fal.ai вернул не JSON результата.", _clip(raw, 240))
     return result
@@ -395,11 +548,24 @@ async def fal_run(
     if dest_id is not None:
         side = dest_id.with_suffix(dest_id.suffix + ".fal_id")
         if side.is_file():
-            saved = side.read_text(encoding="utf-8").strip()
-            if saved:
-                log.info("fal resume poll request_id=%s file=%s", saved, dest_id.name)
+            saved = read_fal_side(side)
+            rid_saved = (saved.get("request_id") or "").strip()
+            if rid_saved:
+                remember_fal_urls(
+                    rid_saved,
+                    status_url=saved.get("status_url") or "",
+                    response_url=saved.get("response_url") or "",
+                )
+                log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
                 try:
-                    return await fal_poll(session, model_id, saved, used_image=used_image)
+                    return await fal_poll(
+                        session,
+                        model_id,
+                        rid_saved,
+                        used_image=used_image,
+                        status_url=saved.get("status_url") or None,
+                        response_url=saved.get("response_url") or None,
+                    )
                 except PipelineError as exc:
                     timeout = "слишком долго" in (exc.user_message or "").lower()
                     if not timeout:
@@ -412,7 +578,10 @@ async def fal_run(
     rid = str(submitted.get("request_id") or "")
     if side is not None and rid:
         try:
-            side.write_text(rid, encoding="utf-8")
+            side.write_text(
+                json.dumps(fal_side_payload(submitted), ensure_ascii=False),
+                encoding="utf-8",
+            )
         except OSError:
             log.warning("не записал fal request_id рядом с %s", dest_id.name if dest_id else "")
     log.info("fal submitted model=%s request_id=%s", model_id, rid)

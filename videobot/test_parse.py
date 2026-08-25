@@ -2012,6 +2012,8 @@ def test_fal_kling_and_miniapp() -> None:
         fal_poll,
         fal_request_urls,
         fal_run,
+        _model_id_candidates,
+        _result_url_candidates,
     )
     from fal_models import (
         KLING_I2V_PRO,
@@ -2088,33 +2090,40 @@ def test_fal_kling_and_miniapp() -> None:
         get_headers = fal_headers(json_body=False)
         assert "Content-Type" not in get_headers
         status_u, response_u = fal_request_urls("fal-ai/flux/schnell", "rid-1")
-        assert status_u.endswith("/requests/rid-1/status")
-        assert response_u.endswith("/requests/rid-1/response")
+        assert status_u.endswith("/fal-ai/flux/schnell/requests/rid-1/status")
+        assert response_u.endswith("/fal-ai/flux/schnell/requests/rid-1")
+        assert not response_u.rstrip("/").endswith("/response")
         _st, from_submit = fal_request_urls(
             "fal-ai/flux/schnell",
             "rid-1",
             submitted={
-                "status_url": "https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1/status",
-                "response_url": "https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1/response",
+                "status_url": "https://queue.fal.run/fal-ai/flux/requests/rid-1/status",
+                "response_url": "https://queue.fal.run/fal-ai/flux/requests/rid-1",
             },
         )
-        assert from_submit.endswith("/response")
-        _st, stripped = fal_request_urls(
-            "fal-ai/flux/schnell",
-            "rid-1",
-            response_url="https://queue.fal.run/fal-ai/flux/schnell/requests/rid-1",
+        assert from_submit == "https://queue.fal.run/fal-ai/flux/requests/rid-1"
+        assert "/schnell" not in from_submit
+        _st, with_response = fal_request_urls(
+            "fal-ai/kling-video/v3/pro/image-to-video",
+            "rid-2",
+            response_url="https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video/requests/rid-2/response",
         )
-        assert stripped.endswith("/response")
+        assert with_response.endswith("/response")
         _st, rejected = fal_request_urls(
             "fal-ai/flux/schnell",
             "rid-1",
             response_url="https://evil.example/requests/rid-1/response",
         )
         assert rejected.startswith("https://queue.fal.run/")
-        assert "/response" in inspect.getsource(fal_request_urls)
-        assert "response_url" in inspect.getsource(fal_poll)
+        assert "fal-ai/flux" in _model_id_candidates("fal-ai/flux/schnell")
+        alts = _result_url_candidates("https://queue.fal.run/fal-ai/flux/requests/rid-1")
+        assert alts[0].endswith("/requests/rid-1")
+        assert any(item.endswith("/response") for item in alts)
+        assert "status_url" in inspect.getsource(fal_poll)
         assert "response_url" in inspect.getsource(fal_run)
-        assert "json_body=False" in inspect.getsource(fal_poll)
+        fal_src = Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
+        assert "_fal_get_json" in fal_src
+        assert "json_body=False" in fal_src
     finally:
         config.FAL_KEY = old_key
 
