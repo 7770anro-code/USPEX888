@@ -34,7 +34,8 @@ def validate_init_data(
     got_hash = str(pairs.pop("hash", "") or "")
     if not got_hash:
         raise WebAppAuthError("В initData нет hash.")
-    # signature — отдельное поле Telegram; в data_check_string не входит hash.
+    # signature — отдельное поле Telegram; в HMAC-строку не входит (как и hash).
+    pairs.pop("signature", None)
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
     calc = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -46,7 +47,7 @@ def validate_init_data(
         raise WebAppAuthError("Некорректный auth_date.") from exc
     stamp = float(now if now is not None else time.time())
     if auth_date <= 0 or stamp - auth_date > int(max_age_sec):
-        raise WebAppAuthError("initData устарел. Открой Студию заново.")
+        raise WebAppAuthError("initData устарел. Открой меню заново.")
     user_raw = pairs.get("user") or "{}"
     try:
         user = json.loads(unquote(user_raw) if "%" in user_raw else user_raw)

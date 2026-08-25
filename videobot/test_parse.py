@@ -2143,14 +2143,22 @@ def test_fal_kling_and_miniapp() -> None:
     init = urlencode({**pairs, "hash": digest})
     parsed = validate_init_data(init, token)
     assert parsed["id"] == 42
+    # Telegram кладёт signature рядом с hash — в HMAC-строку его не мешаем.
+    parsed_sig = validate_init_data(init + "&signature=not-part-of-hmac", token)
+    assert parsed_sig["id"] == 42
     try:
         validate_init_data(init, "wrong-token")
         raise AssertionError("bad token must fail")
     except WebAppAuthError:
         pass
 
-    from bot import main, main_menu, more_kb, on_consent, on_w2_menu
+    from bot import _drop_remote_voice, main, main_menu, more_kb, on_consent, on_w2_menu
     from webapp_server import build_app, start_webapp
+    import asyncio
+
+    drop_src = inspect.getsource(_drop_remote_voice)
+    assert "is_minimax_voice" in drop_src
+    assert "delete_eleven_voice" in drop_src
 
     menu_labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
     assert "🎬 Открыть меню" in menu_labels
@@ -2183,6 +2191,18 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/restore" in paths
     assert "/api/history" in paths
     assert "/api/vibe" in paths
+
+    async def _unsigned_post_is_403() -> None:
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/quick")
+            assert resp.status == 403
+            data = await resp.json()
+            assert data.get("ok") is False
+
+    asyncio.run(_unsigned_post_is_403())
+
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert "telegram-web-app.js" in html
     assert "go-tryon" in html

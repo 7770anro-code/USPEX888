@@ -1371,13 +1371,23 @@ async def _start_act_two(msg: Message, state: FSMContext) -> None:
     )
 
 
+async def _drop_remote_voice(session: aiohttp.ClientSession, voice_id: str) -> None:
+    """ElevenLabs IVC удаляем. MiniMax (mm:) живёт на fal — чужой DELETE не зовём."""
+    from fal_models import is_minimax_voice
+
+    vid = (voice_id or "").strip()
+    if not vid or is_minimax_voice(vid):
+        return
+    await delete_eleven_voice(session, vid)
+
+
 async def _delete_cloned_voice(msg: Message) -> None:
     vid = delete_cloned_voice(msg.chat.id)
     if not vid:
         await msg.answer("Клонированного голоса пока нет.", reply_markup=main_menu())
         return
     async with aiohttp.ClientSession() as session:
-        await delete_eleven_voice(session, vid)
+        await _drop_remote_voice(session, vid)
     await msg.answer("Клон голоса удалён.", reply_markup=main_menu())
 
 
@@ -2236,7 +2246,7 @@ async def on_w2_menu(query: CallbackQuery, state: FSMContext) -> None:
         ids = clear_user_voices(msg.chat.id)
         async with aiohttp.ClientSession() as session:
             for vid in ids:
-                await delete_eleven_voice(session, vid)
+                await _drop_remote_voice(session, vid)
         await state.clear()
         await msg.answer("Свои голоса убрал.", reply_markup=main_menu())
         return
@@ -2365,7 +2375,7 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
         async with aiohttp.ClientSession() as session:
             voice_id = await clone_user_audio(session, src, name="Мой голос")
             if old and old.get("id") and old["id"] != voice_id:
-                await delete_eleven_voice(session, old["id"])
+                await _drop_remote_voice(session, old["id"])
         set_cloned_voice(message.chat.id, voice_id, "Мой голос")
         await state.clear()
         await status.edit_text("Голос склонирован и сохранён.")
