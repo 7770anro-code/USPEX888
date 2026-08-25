@@ -139,8 +139,11 @@ class FalClient(VideoProvider):
         dest: Path,
         *,
         photo_lock: bool = False,
+        elements: list[str] | None = None,
     ) -> Path:
-        model_id, payload = self._kling_body(prompt, start_frame, seconds, photo_lock=photo_lock)
+        model_id, payload = self._kling_body(
+            prompt, start_frame, seconds, photo_lock=photo_lock, elements=elements
+        )
         data = await fal_run(session, model_id, payload, used_image=bool(start_frame), dest_id=dest)
         out = await fal_download_media(session, data, dest)
         write_runway_model(dest, model_id)
@@ -177,12 +180,15 @@ class FalClient(VideoProvider):
         seconds: int,
         *,
         photo_lock: bool = False,
+        elements: list[str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         override = (config.FAL_VIDEO_MODEL or "").strip()
         model_id = override if override.startswith("fal-ai/kling") else KLING_I2V_PRO
         if not start_frame:
             raise PipelineError("Kling 3.0 I2V нужен start_image_url (кадр или still).")
-        payload = kling_i2v_payload(prompt, start_frame, seconds, photo_lock=photo_lock)
+        payload = kling_i2v_payload(
+            prompt, start_frame, seconds, photo_lock=photo_lock, elements=elements
+        )
         return model_id, payload
 
     def _seedance_body(

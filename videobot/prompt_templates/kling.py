@@ -15,6 +15,7 @@ def kling_video_prompt(
     *,
     style: str = "cinematic",
     photo_lock: bool = False,
+    character_lock: bool = True,
 ) -> str:
     base = compose_runway_prompt(
         continuity,
@@ -23,6 +24,7 @@ def kling_video_prompt(
         motion,
         style=style,
         photo_lock=photo_lock,
+        character_lock=character_lock,
     )
     if not photo_lock:
         return base

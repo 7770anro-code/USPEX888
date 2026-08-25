@@ -2162,6 +2162,7 @@ def test_fal_kling_and_miniapp() -> None:
 
     menu_labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
     assert "🎬 Открыть меню" in menu_labels
+    assert "🎞 Авторолик" in menu_labels
     more = [b.callback_data for row in more_kb().inline_keyboard for b in row]
     assert "more:tryon" in more
     assert "more:upscale" in more
@@ -2184,6 +2185,7 @@ def test_fal_kling_and_miniapp() -> None:
         if "formatter" in info:
             paths.add(info["formatter"])
     assert "/api/quick" in paths
+    assert "/api/autorolik" in paths
     assert "/api/upscale" in paths
     assert "/api/tryon" in paths
     assert "/api/clone" in paths
@@ -2200,6 +2202,8 @@ def test_fal_kling_and_miniapp() -> None:
             assert resp.status == 403
             data = await resp.json()
             assert data.get("ok") is False
+            resp2 = await client.post("/api/autorolik")
+            assert resp2.status == 403
 
     asyncio.run(_unsigned_post_is_403())
 
@@ -2215,6 +2219,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "data-go" in js
     assert "/api/interpolate" in js
     assert "/api/history" in js
+    assert "/api/autorolik" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
     assert "--live" in smoke
@@ -2222,7 +2227,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert 'TIPS' in js or "home:" in js
     assert "Нажми карточку" in js
     assert "sendData" not in js
-    assert html.count('class="sub"') == 6
+    assert html.count('class="sub"') == 7
+    assert "go-autorolik" in html
+    assert "Авторолик" in html
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media
 
@@ -2252,7 +2259,16 @@ def test_fal_kling_and_miniapp() -> None:
     ref = seedance_ref_payload("go", ["https://a", "https://b"], 8)
     assert ref["duration"] == "8"
     assert "@Image1" in ref["prompt"]
+    many = kling_i2v_payload(
+        "walk @Element1",
+        "https://example.com/a.jpg",
+        5,
+        elements=["https://example.com/face.jpg"],
+    )
+    assert many["elements"] == [{"frontal_image_url": "https://example.com/face.jpg"}]
     assert ROUTING["real_photo"][0] == "kling"
+    assert ROUTING["autorolik_face"][0] == "kling"
+    assert ROUTING["autorolik_wide"][0] == "seedance"
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
@@ -2278,9 +2294,93 @@ def test_fal_kling_and_miniapp() -> None:
     assert rid == "rid-1"
     mux_src = inspect.getsource(__import__("pipeline", fromlist=["mux_scene"]).mux_scene)
     assert "lip_sync" in mux_src or "_maybe_kling_lipsync" in mux_src
+    seed_wide = video_prompt_for(
+        "seedance", "amber dusk", "drone over city", photo_lock=False, character_lock=False
+    )
+    assert "Face is not the subject" in seed_wide
     bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "menu:auto" in bot_src
+    assert "Авторолик" in bot_src
     assert "poll_status" in bot_src
     assert "note_fal_poll" in bot_src
+
+
+def test_autorolik_script_and_route() -> None:
+    import inspect
+    from pathlib import Path
+
+    from autorolik import (
+        MAX_PHOTOS,
+        MAX_SCENES,
+        MIN_SCENES,
+        WIDE_CAMERA,
+        clamp_element,
+        kling_api_prompt,
+        parse_autorolik_script,
+        photos_kb,
+        route_for_scene,
+        scene_camera,
+    )
+    from pipeline import PipelineError, build_video
+    from provider_router import chain_for
+
+    raw = """
+    {
+      "title": "Янтарь",
+      "hook": "Город не спит",
+      "caption": "друзья",
+      "continuity": "warm amber",
+      "scenes": [
+        {"narration": "Мы выходим из машины на закате и город уже горит.", "visual_prompt": "man steps out of a car at sunset, rack focus to face", "face_scene": true, "element_index": 2},
+        {"narration": "Дрон над площадью, вертолёты в дымке, медленный наезд.", "visual_prompt": "drone over city monument helicopters haze slow push-in", "face_scene": false, "element_index": 0},
+        {"narration": "Колонна фар в тумане режет боковой трекинг низко.", "visual_prompt": "low angle lateral track of convoy headlights in fog", "face_scene": false},
+        {"narration": "Он смотрит в камеру сквозь боке фар клуба.", "visual_prompt": "@Element3 close-up club backlight", "face_scene": true, "element_index": 9}
+      ]
+    }
+    """
+    parsed = parse_autorolik_script(raw, n_photos=3)
+    assert parsed["kind"] == "autorolik"
+    assert MIN_SCENES <= len(parsed["scenes"]) <= MAX_SCENES
+    assert parsed["scenes"][0]["face_scene"] is True
+    assert parsed["scenes"][0]["element_index"] == 2
+    assert "@Element2" in parsed["scenes"][0]["visual_prompt"]
+    assert parsed["scenes"][1]["face_scene"] is False
+    assert parsed["scenes"][1]["element_index"] == 0
+    assert parsed["scenes"][3]["element_index"] == 3
+    assert route_for_scene(parsed["scenes"][0]) == "autorolik_face"
+    assert route_for_scene(parsed["scenes"][1]) == "autorolik_wide"
+    assert route_for_scene(False) == "autorolik_wide"
+    assert chain_for("autorolik_face")[0] == "kling"
+    assert chain_for("autorolik_wide")[0] == "seedance"
+    assert "drone" in scene_camera(False).lower() or "lateral" in WIDE_CAMERA.lower()
+    assert "rack focus" in WIDE_CAMERA.lower()
+    rewritten = kling_api_prompt("@Element3 close-up", element_index=3)
+    assert "@Element1" in rewritten
+    assert "@Element3" not in rewritten
+    assert clamp_element(0, 4, face=False) == 0
+    assert clamp_element(99, 4, face=True) == 4
+    assert MAX_PHOTOS == 6
+    kb = photos_kb(count=6)
+    labels = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "auto:next" in labels
+    three = '{"scenes":[{"narration":"a","visual_prompt":"x","face_scene":true},{"narration":"b","visual_prompt":"y","face_scene":false},{"narration":"c","visual_prompt":"z","face_scene":true}]}'
+    try:
+        parse_autorolik_script(three, n_photos=1)
+        raise AssertionError("need 4 scenes")
+    except PipelineError:
+        pass
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "седьмое не беру" in bot_src
+    assert "MAX_PHOTOS" in bot_src
+    pipe = inspect.getsource(build_video)
+    assert "autorolik_wide" in pipe
+    assert "kling_api_prompt" in pipe
+    assert "script_override" in pipe
+    assert "element_images" in pipe
+    assert "character_lock=False" in pipe
+    studio_src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
+    assert "run_studio_autorolik" in studio_src
+    assert "review_kb" in studio_src
 
 
 if __name__ == "__main__":
@@ -2331,4 +2431,5 @@ if __name__ == "__main__":
     test_serial_reveal_show()
     test_nano_banana_and_dynamic_pacing()
     test_fal_kling_and_miniapp()
+    test_autorolik_script_and_route()
     print("ok")

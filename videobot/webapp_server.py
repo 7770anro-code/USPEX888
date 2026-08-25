@@ -173,6 +173,59 @@ async def handle_clone(request: web.Request) -> web.Response:
     )
 
 
+async def _read_photos(form: Any) -> list[bytes]:
+    blobs: list[bytes] = []
+    seen: set[int] = set()
+
+    def _add(data: bytes) -> None:
+        if not data:
+            return
+        key = hash(data)
+        if key in seen:
+            return
+        seen.add(key)
+        blobs.append(data)
+
+    for i in range(1, 7):
+        data, _name, _mime = await _read_file_field(form, f"photo{i}")
+        _add(data)
+    data, _name, _mime = await _read_file_field(form, "photo")
+    _add(data)
+    if hasattr(form, "getall"):
+        for field in form.getall("photos") or []:
+            if isinstance(field, FileField) and field.file:
+                _add(field.file.read() or b"")
+            elif isinstance(field, bytes):
+                _add(field)
+    return blobs
+
+
+async def handle_autorolik(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    consent = str(form.get("consent") or "") in ("1", "true", "yes", "on")
+    topic = str(form.get("topic") or form.get("idea") or "").strip()
+    photos = await _read_photos(form)
+    if len(photos) > 6:
+        return json_error("Максимум 6 фото.")
+    if not photos:
+        return json_error("Нужно хотя бы одно фото.")
+    if not consent:
+        return json_error("Без согласия фото людей не использую.")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "autorolik", photos, consent, topic))
+    return web.json_response(
+        {
+            "ok": True,
+            "message": "Пишу сценарий. Подтверждение придёт в чат с ботом — съёмка после кнопки «Снять».",
+            "close": True,
+        }
+    )
+
+
 async def handle_history(request: web.Request) -> web.Response:
     form = await request.post()
     try:
@@ -189,6 +242,7 @@ async def handle_history(request: web.Request) -> web.Response:
 async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
     from studio import (
         job_error_text,
+        run_studio_autorolik,
         run_studio_clone,
         run_studio_history,
         run_studio_interpolate,
@@ -229,6 +283,15 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
         elif kind == "clone":
             audio, filename, consent = args
             await run_studio_clone(bot, user_id, audio, str(filename), consent=bool(consent))
+        elif kind == "autorolik":
+            photos, consent, topic = args
+            await run_studio_autorolik(
+                bot,
+                user_id,
+                list(photos or []),
+                consent=bool(consent),
+                topic=str(topic or ""),
+            )
         elif kind == "history":
             await run_studio_history(bot, user_id)
     except (PipelineError, Exception) as exc:
@@ -253,6 +316,7 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_post("/api/restore", handle_restore)
     app.router.add_post("/api/tryon", handle_tryon)
     app.router.add_post("/api/clone", handle_clone)
+    app.router.add_post("/api/autorolik", handle_autorolik)
     app.router.add_post("/api/history", handle_history)
     return app
 

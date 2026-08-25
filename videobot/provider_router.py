@@ -21,6 +21,8 @@ ROUTING: dict[str, list[str]] = {
     "synthetic_multi_scene": ["seedance", "kling", "legacy_runway"],
     "night_pipeline": ["seedance", "kling", "legacy_runway"],
     "montage_generate": ["seedance", "kling", "legacy_runway"],
+    "autorolik_face": ["kling", "seedance", "legacy_runway"],
+    "autorolik_wide": ["seedance", "kling", "legacy_runway"],
 }
 
 MODE_DEFAULT = "synthetic_multi_scene"
@@ -63,6 +65,7 @@ async def render_clip(
     route_mode: str = MODE_DEFAULT,
     photo_lock: bool = False,
     references: list[str] | None = None,
+    elements: list[str] | None = None,
 ) -> Path:
     """Все кнопки генерации идут сюда, не в конкретный вендор."""
     last: PipelineError | None = None
@@ -105,6 +108,7 @@ async def render_clip(
                 seconds,
                 dest,
                 photo_lock=photo_lock,
+                elements=elements,
             )
         except PipelineError as exc:
             last = exc

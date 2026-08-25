@@ -77,6 +77,7 @@ def kling_i2v_payload(
     *,
     end_image_url: str = "",
     photo_lock: bool = False,
+    elements: list[str] | None = None,
 ) -> dict[str, Any]:
     text = (prompt or "").strip() or "cinematic motion, photoreal, vertical 9:16"
     body: dict[str, Any] = {
@@ -89,9 +90,12 @@ def kling_i2v_payload(
     if end_image_url:
         body["end_image_url"] = end_image_url
     # generate_audio и elements вместе Kling не принимает — аудио всегда выкл.
-    if photo_lock and image_url:
-        body["elements"] = [{"frontal_image_url": image_url}]
-        if "@Element1" not in body["prompt"]:
+    urls = [u for u in (elements or []) if u][:6]
+    if photo_lock and not urls and image_url:
+        urls = [image_url]
+    if urls:
+        body["elements"] = [{"frontal_image_url": u} for u in urls]
+        if "@Element1" not in body["prompt"] and "@element" not in body["prompt"].lower():
             body["prompt"] = "@Element1 is the same person, same face and clothes. " + body["prompt"]
     return body
 

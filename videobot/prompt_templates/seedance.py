@@ -13,6 +13,7 @@ def seedance_video_prompt(
     *,
     style: str = "cinematic",
     photo_lock: bool = False,
+    character_lock: bool = True,
 ) -> str:
     base = compose_runway_prompt(
         continuity,
@@ -21,11 +22,18 @@ def seedance_video_prompt(
         motion,
         style=style,
         photo_lock=photo_lock,
+        character_lock=character_lock,
     )
     if photo_lock:
         roles = (
             "@Image1 = frontal face and outfit of the same person, keep identity. "
             "Do not invent another character. "
+        )
+        return roles + base
+    if not character_lock:
+        roles = (
+            "@Image1 = establishing still of location, scale, haze and lighting. "
+            "Face is not the subject. Do not lock identity to a person. "
         )
         return roles + base
     roles = (

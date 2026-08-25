@@ -22,6 +22,11 @@
         <span class="ttl">Создать видео</span>
         <span class="sub">Тема → ролик. Можно своё фото.</span>
       </button>
+      <button class="card" data-go="autorolik" type="button">
+        <span class="ico">🎞</span>
+        <span class="ttl">Авторолик</span>
+        <span class="sub">До 6 фото друзей. FACE=Kling, WIDE=Seedance.</span>
+      </button>
       <button class="card" data-go="cut" type="button">
         <span class="ico">✂️</span>
         <span class="ttl">Монтаж</span>
@@ -69,6 +74,23 @@
         Это моё фото или есть согласие
       </label>
       <button class="go" id="go-quick" type="button">Снять</button>
+    </section>
+
+    <section id="panel-autorolik" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Авторолик</h2>
+      <p class="hint">До 6 фото друзей. Сценарий подтвердишь в чате. FACE — Kling, WIDE — Seedance (дрон, колонна, фары, толпа).</p>
+      <label>Тема / вайб (необязательно)
+        <textarea id="auto-topic" rows="2" maxlength="400" placeholder="закат, ночной город, друзья…"></textarea>
+      </label>
+      <label>Фото друзей (1–6)
+        <input id="auto-photos" type="file" accept="image/*" multiple />
+      </label>
+      <label class="check">
+        <input id="auto-consent" type="checkbox" />
+        Это наши фото / есть согласие всех на кадре
+      </label>
+      <button class="go" id="go-autorolik" type="button">Собрать сценарий</button>
     </section>
 
     <section id="panel-cut" class="panel">

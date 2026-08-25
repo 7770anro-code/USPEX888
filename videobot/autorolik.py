@@ -1,0 +1,344 @@
+"""Авторолик: хайповый монтаж UKRAINIAN CORE, 4–8 сцен, face_scene → Kling / Seedance."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from pathlib import Path
+from typing import Any
+
+import aiohttp
+
+import config
+from pipeline import PipelineError, _clip, _grok_once
+
+log = logging.getLogger("videobot")
+
+MAX_PHOTOS = 6
+MIN_SCENES = 4
+MAX_SCENES = 8
+ELEMENT_RE = re.compile(r"@Element\s*(\d+)|@element_(\d+)", re.I)
+
+FACE_CAMERA = (
+    "slight handheld push-in or handheld shake, shallow depth of field, "
+    "warm sunset amber or cool club backlight, subject looks slightly away or turns toward camera"
+)
+WIDE_CAMERA = (
+    "more camera movement than a portrait: drone over a hazy city monument with helicopters, "
+    "slow push-in; or low-angle lateral tracking of a convoy in fog with headlights; "
+    "or rack focus on a radiator grille and lamps; or crowd silhouettes in a backlit hall. "
+    "Face is not the subject."
+)
+
+SCRIPT_SYSTEM = """Ты режиссёр вертикального Reels 9:16 в стиле «хайповый монтаж / UKRAINIAN CORE».
+Эталон: тёплый закат и контровый клубный свет на лицах друзей, между ними — масштаб страны/ночи/дорог.
+Верни ТОЛЬКО JSON без markdown:
+
+{
+  "title": "короткий заголовок",
+  "hook": "удар первой секунды, 4–8 слов",
+  "caption": "подпись для Reels без водяного знака на кадре",
+  "continuity": "English locked grade: warm sunset amber + cool club backlight, 9:16, photoreal live-action, no on-screen text, no logos, no watermark. Do not describe faces here.",
+  "scenes": [
+    {
+      "narration": "озвучка языком пользователя, 12–18 слов",
+      "visual_prompt": "English, 1–2 sentences, camera + action only",
+      "face_scene": true,
+      "element_index": 1
+    }
+  ]
+}
+
+Правила сцен:
+- Ровно N сцен (N дадут в запросе), диапазон 4–8. Чередуй FACE и WIDE: не две FACE подряд больше одного раза, не все WIDE подряд.
+- face_scene=true (Kling elements, @ElementN): крупный или поясной план КОНКРЕТНОГО друга из фото N.
+  Свет: тёплый закат ИЛИ контровый клубный. Камера: лёгкий наезд или хендхелд-дрожь, неглубокая резкость, фон размыт.
+  Subject смотрит чуть в сторону или доворачивает лицо к камере. Мало движения камеры.
+  Пример visual_prompt: "man steps out of a car at sunset, camera racks focus onto his face, headlight bokeh, warm amber grade, shallow DOF, slight handheld push-in".
+  В visual_prompt укажи @ElementN (N = номер фото 1..P). Не выдумывай лицо — только это фото.
+- face_scene=false (Seedance): лицо НЕ главное. Работает масштаб и движение:
+  дрон над городом (памятник, вертолёты, дымка, медленный наезд);
+  колонна машин в тумане (низкий ракурс, боковой трекинг, фары);
+  крупный план решётки радиатора / фар (рек-фокус);
+  толпа / зал, силуэты в контровом свете.
+  Здесь камеры больше, чем в FACE. element_index = 0. Не ставь узнаваемое лицо в центр кадра.
+- narration сцены 1 начинается с hook.
+- Без текста на экране, логотипов, знаменитостей, NSFW.
+- Это живое кино, не CGI-пластик. Тег эстетики UKRAINIAN CORE — в настроении (янтарь заката, ночные фары, бетон, дымка), не надписью в кадре.
+"""
+
+
+def pending_path(user_id: int) -> Path:
+    folder = Path(config.DATA_DIR) / "autorolik"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{int(user_id)}.json"
+
+
+def save_pending(user_id: int, payload: dict[str, Any]) -> Path:
+    path = pending_path(user_id)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_pending(user_id: int) -> dict[str, Any] | None:
+    path = pending_path(user_id)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_pending(user_id: int) -> None:
+    path = pending_path(user_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def parse_bool(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    blob = str(raw or "").strip().lower()
+    return blob in ("1", "true", "yes", "on", "face", "face_scene")
+
+
+def clamp_element(raw: Any, n_photos: int, *, face: bool) -> int:
+    if not face:
+        return 0
+    n_photos = max(1, min(MAX_PHOTOS, int(n_photos or 1)))
+    try:
+        idx = int(raw)
+    except (TypeError, ValueError):
+        idx = 1
+    if idx < 1:
+        token = ELEMENT_RE.search(str(raw or ""))
+        if token:
+            idx = int(token.group(1) or token.group(2) or 1)
+        else:
+            idx = 1
+    return max(1, min(n_photos, idx))
+
+
+def parse_autorolik_script(raw: str, *, n_photos: int) -> dict[str, Any]:
+    """JSON сцен с face_scene. 4–8 штук. n_photos 1..6."""
+    text = (raw or "").strip()
+    if not text:
+        raise PipelineError("Сценарий Авторолика пустой.")
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
+    if fence:
+        text = fence.group(1)
+    else:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise PipelineError("Сценарий Авторолика не JSON.", _clip(raw, 240))
+        text = text[start : end + 1]
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PipelineError("Не разобрал JSON Авторолика.", str(exc)) from exc
+    n_photos = max(1, min(MAX_PHOTOS, int(n_photos or 1)))
+    scenes_in = data.get("scenes")
+    if not isinstance(scenes_in, list) or not scenes_in:
+        raise PipelineError("В Авторолике нет сцен.")
+    cleaned: list[dict[str, Any]] = []
+    for i, scene in enumerate(scenes_in[:MAX_SCENES]):
+        if not isinstance(scene, dict):
+            continue
+        narration = str(scene.get("narration") or "").strip()
+        visual = str(scene.get("visual_prompt") or scene.get("visualPrompt") or "").strip()
+        if not narration:
+            continue
+        face = parse_bool(scene.get("face_scene", scene.get("faceScene")))
+        if "face_scene" not in scene and "faceScene" not in scene:
+            face = i % 2 == 0
+        idx = clamp_element(
+            scene.get("element_index") or scene.get("elementIndex") or visual,
+            n_photos,
+            face=face,
+        )
+        if not visual:
+            visual = (
+                "close-up of @Element1 at sunset, shallow DOF, slight handheld push-in, warm amber"
+                if face
+                else "drone over a hazy city monument, slow push-in, helicopters, dusk smoke, 9:16"
+            )
+        if face:
+            token = f"@Element{idx}"
+            if not ELEMENT_RE.search(visual):
+                visual = f"{token} {visual}"
+        cleaned.append(
+            {
+                "narration": narration[:500],
+                "visual_prompt": visual[:1500],
+                "face_scene": face,
+                "element_index": idx if face else 0,
+            }
+        )
+    if len(cleaned) < MIN_SCENES:
+        raise PipelineError(f"Нужно {MIN_SCENES}–{MAX_SCENES} сцен, пришло {len(cleaned)}.")
+    if n_photos >= 1 and not any(s["face_scene"] for s in cleaned):
+        cleaned[0]["face_scene"] = True
+        cleaned[0]["element_index"] = 1
+        if not ELEMENT_RE.search(cleaned[0]["visual_prompt"]):
+            cleaned[0]["visual_prompt"] = "@Element1 " + cleaned[0]["visual_prompt"]
+    if not any(not s["face_scene"] for s in cleaned) and len(cleaned) >= 2:
+        cleaned[1]["face_scene"] = False
+        cleaned[1]["element_index"] = 0
+    title = str(data.get("title") or "Авторолик").strip()[:80] or "Авторолик"
+    hook = str(data.get("hook") or "").strip()[:120]
+    caption = str(data.get("caption") or "").strip()[:400]
+    continuity = str(data.get("continuity") or "").strip()[:800]
+    if not continuity:
+        continuity = (
+            "UKRAINIAN CORE hype montage, warm amber sunset and cool club backlight, "
+            "photoreal 9:16, no on-screen text"
+        )
+    return {
+        "title": title,
+        "hook": hook,
+        "caption": caption,
+        "continuity": continuity,
+        "scenes": cleaned,
+        "kind": "autorolik",
+    }
+
+
+def route_for_scene(scene: dict[str, Any] | bool) -> str:
+    face = parse_bool(scene.get("face_scene") if isinstance(scene, dict) else scene)
+    return "autorolik_face" if face else "autorolik_wide"
+
+
+def scene_camera(scene: dict[str, Any] | bool) -> str:
+    face = parse_bool(scene.get("face_scene") if isinstance(scene, dict) else scene)
+    return FACE_CAMERA if face else WIDE_CAMERA
+
+
+def pick_element_uri(scene: dict[str, Any], uris: list[str]) -> str:
+    if not uris:
+        return ""
+    idx = clamp_element(scene.get("element_index"), len(uris), face=True)
+    return uris[idx - 1]
+
+
+def kling_api_prompt(visual: str, *, element_index: int = 1) -> str:
+    """В API одна картинка = всегда @Element1. В сценарии остаётся @ElementN."""
+    text = ELEMENT_RE.sub("@Element1", visual or "")
+    if "@Element1" not in text:
+        text = f"@Element1 is the same person, same face and clothes. {text}"
+    _ = element_index
+    return text
+
+
+def format_script_preview(script: dict[str, Any]) -> str:
+    scenes = script.get("scenes") or []
+    lines = [
+        f"🎞 Авторолик «{script.get('title') or 'без названия'}»",
+        f"Сцен: {len(scenes)} · FACE = Kling @ElementN · WIDE = Seedance",
+    ]
+    hook = str(script.get("hook") or "").strip()
+    if hook:
+        lines.append(f"Хук: {hook}")
+    lines.append("")
+    for i, scene in enumerate(scenes, start=1):
+        face = parse_bool(scene.get("face_scene"))
+        if face:
+            tag = f"FACE · друг {int(scene.get('element_index') or 1)} · Kling"
+        else:
+            tag = "WIDE · Seedance"
+        narr = str(scene.get("narration") or "").strip()
+        vis = str(scene.get("visual_prompt") or "").strip()
+        lines.append(f"{i}. [{tag}]")
+        lines.append(narr)
+        lines.append(vis)
+        lines.append("")
+    lines.append("Проверь лица и монтаж. Можно поправить текстом — или снять как есть.")
+    return "\n".join(lines).strip()[:3500]
+
+
+def photos_kb(*, count: int) -> Any:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if count >= 1:
+        rows.append(
+            [InlineKeyboardButton(text=f"➡️ Дальше ({count}/{MAX_PHOTOS})", callback_data="auto:next")]
+        )
+    rows.append([InlineKeyboardButton(text="🗑 Сбросить фото", callback_data="auto:reset")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def review_kb() -> Any:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Снять", callback_data="auto:go")],
+            [InlineKeyboardButton(text="✏️ Правки", callback_data="auto:edit")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="auto:no")],
+        ]
+    )
+
+
+def topic_kb() -> Any:
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Без темы — сам соберу", callback_data="auto:notopic")],
+            [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu:home")],
+        ]
+    )
+
+
+async def grok_autorolik(
+    session: aiohttp.ClientSession,
+    *,
+    n_photos: int,
+    idea: str = "",
+    notes: str = "",
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if config.XAI_API_KEY_ERROR:
+        raise PipelineError("Ключ Grok в неправильном формате.", config.XAI_API_KEY_ERROR)
+    if not config.XAI_API_KEY_NEW:
+        raise PipelineError("Нет XAI_API_KEY_NEW — сценарий Авторолика не собрать.")
+    n_photos = max(1, min(MAX_PHOTOS, int(n_photos or 1)))
+    n_scenes = max(MIN_SCENES, min(MAX_SCENES, 4 + min(4, n_photos)))
+    idea = (idea or "").strip() or "хайповый монтаж друзей, закат, ночной город, UKRAINIAN CORE"
+    body = (
+        f"Фото друзей: {n_photos} шт. Нумерация @Element1…@Element{n_photos}.\n"
+        f"Сделай ровно {n_scenes} сцен (можно {MIN_SCENES}–{MAX_SCENES}, но сейчас {n_scenes}).\n"
+        f"Тема / вайб:\n{idea[:1500]}\n"
+    )
+    if previous:
+        body += "\nПредыдущий JSON (учти правки, верни полный JSON заново):\n"
+        body += json.dumps(previous, ensure_ascii=False)[:3500]
+    if notes.strip():
+        body += "\n\nПравки владельца, обязательны:\n" + notes.strip()[:1500]
+    last_err = ""
+    for model in config.xai_creative_models():
+        if not model:
+            continue
+        content, last_err = await _grok_once(
+            session,
+            [
+                {"role": "system", "content": SCRIPT_SYSTEM},
+                {"role": "user", "content": body},
+            ],
+            model,
+            temperature=0.55,
+        )
+        if not content:
+            continue
+        try:
+            return parse_autorolik_script(content, n_photos=n_photos)
+        except PipelineError as exc:
+            last_err = exc.user_message
+            continue
+    raise PipelineError("Не собрал сценарий Авторолика.", last_err or "Grok пустой")

@@ -352,6 +352,64 @@ async def run_studio_restore(bot: Bot, user_id: int, data: bytes, filename: str,
         shutil.rmtree(work, ignore_errors=True)
 
 
+async def run_studio_autorolik(
+    bot: Bot,
+    user_id: int,
+    photos: list[bytes],
+    *,
+    consent: bool,
+    topic: str = "",
+) -> None:
+    from autorolik import (
+        MAX_PHOTOS,
+        format_script_preview,
+        grok_autorolik,
+        review_kb,
+        save_pending,
+    )
+
+    if not consent:
+        raise PipelineError("Без согласия фото людей не использую.")
+    blobs = [p for p in (photos or []) if p]
+    if not blobs:
+        raise PipelineError("Нужно хотя бы одно фото друга.")
+    if len(blobs) > MAX_PHOTOS:
+        raise PipelineError(f"Максимум {MAX_PHOTOS} фото.")
+    work = studio_work(user_id, "autorolik")
+    ids: list[str] = []
+    try:
+        for i, data in enumerate(blobs, start=1):
+            pic = write_upload(work / f"p{i}.jpg", data, f"p{i}.jpg")
+            sent = await bot.send_photo(
+                int(user_id),
+                FSInputFile(pic),
+                caption=f"Фото {i}/{len(blobs)} для Авторолика",
+            )
+            if not sent.photo:
+                raise PipelineError("Не смог загрузить фото в чат.")
+            ids.append(sent.photo[-1].file_id)
+        await send_chat_text(
+            bot,
+            user_id,
+            "⏳ Пишу сценарий Авторолика. Снимать буду после кнопки «Снять» в чате.",
+        )
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            script = await grok_autorolik(session, n_photos=len(ids), idea=topic)
+        save_pending(
+            int(user_id),
+            {
+                "script": script,
+                "photo_file_ids": ids,
+                "consent_verified": True,
+                "idea": (topic or "").strip(),
+            },
+        )
+        await bot.send_message(int(user_id), format_script_preview(script)[:3500], reply_markup=review_kb())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 async def run_studio_history(bot: Bot, user_id: int) -> None:
     src = get_last_video(int(user_id))
     if not src:
