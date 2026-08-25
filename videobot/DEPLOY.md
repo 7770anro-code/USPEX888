@@ -22,9 +22,17 @@
 ```
 XAI_API_KEY_NEW=...
 ELEVENLABS_API_KEY=...
-RUNWAY_API_KEY=...
 VIDEOBOT_TELEGRAM_TOKEN=...
-# опционально, своё фото перед Runway:
+FAL_KEY=...                 # https://fal.ai/dashboard/keys  (дефолт камеры)
+# VIDEO_PROVIDER=fal
+# запасной путь, если явно вернуть старую камеру:
+# VIDEO_PROVIDER=runway
+# RUNWAY_API_KEY=...
+# Mini App (HTTPS снаружи, nginx → 127.0.0.1:8088):
+# WEBAPP_PUBLIC_URL=https://example.com/studio/
+# WEBAPP_HOST=127.0.0.1
+# WEBAPP_PORT=8088
+# опционально, своё фото перед I2V:
 # GEMINI_API_KEY=...   # Google AI Studio, https://aistudio.google.com/apikey
 ```
 
@@ -32,9 +40,22 @@ VIDEOBOT_TELEGRAM_TOKEN=...
 
 `XAI_API_KEY_NEW` в Cursor Secrets может быть обёрткой `XAI_API_KEY=xai-...` (96 символов). Бот сам снимает префикс `XAI_API_KEY=` и проверяет, что внутри ключ длиной 84 с префиксом `xai-`. Чистить секрет вручную не нужно.
 
-Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. По умолчанию прямой `gen4.5` / `gen4_turbo`. Veo/Gemini — тот же ключ, в UI не выводим (A/B 2026-08-24: без явного выигрыша). При необходимости `RUNWAY_MODEL` / `RUNWAY_STILL_MODEL`.
+Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). `FAL_KEY` обязателен, пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать и в git не класть.
 
-Нехватка кредитов Runway: ручная съёмка паузится в `/tmp/videobot/{chat_id}_resume` (или `WORK_DIR`). Кнопка «Продолжить съёмку» доснимает с места остановки. «Обновить статус» только GET, без новых задач.
+Mini App слушает `WEBAPP_HOST:WEBAPP_PORT` внутри процесса бота. Telegram откроет её только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Без URL кнопка «Студия» остаётся обычным меню. Пример nginx (не включать без домена и сертификата):
+
+```
+location /studio/ {
+    proxy_pass http://127.0.0.1:8088/;
+    proxy_set_header Host $host;
+    proxy_read_timeout 3600;
+    client_max_body_size 42m;
+}
+```
+
+Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. Запасной путь `VIDEO_PROVIDER=runway`.
+
+Нехватка кредитов fal.ai — текст в чат, кабинет fal.ai. Старый resume Runway (`{WORK_DIR}/{chat_id}_resume`) жив при `VIDEO_PROVIDER=runway`.
 
 Клон голоса: `POST /v1/voices/add` требует план ElevenLabs с Instant Voice Clone. На тарифе без IVC API отвечает `paid_plan_required` / `can_not_use_instant_voice_cloning` — это не баг ключа TTS.
 
@@ -114,7 +135,8 @@ sudo journalctl -u videobot.service -n 150 --no-pager
 - `Нет секретов: ...` — пустой `/opt/videobot/.env`
 - `нет ffmpeg` — `sudo apt-get install -y ffmpeg`
 - Telegram 401 — неверный `VIDEOBOT_TELEGRAM_TOKEN`
-- Runway 401 — неверный `RUNWAY_API_KEY` (в API это Bearer, как `RUNWAYML_API_SECRET` из кабинета dev.runwayml.com)
+- fal.ai 401 — неверный `FAL_KEY` (в API это `Authorization: Key …`, кабинет https://fal.ai/dashboard/keys)
+- Runway 401 — неверный `RUNWAY_API_KEY` (только если `VIDEO_PROVIDER=runway`)
 
 Перезапуск **только** этого unit:
 

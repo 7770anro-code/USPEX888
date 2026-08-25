@@ -671,7 +671,7 @@ def format_script(script: dict[str, Any]) -> str:
 
 
 def format_runway_usage(script: dict[str, Any] | None) -> str:
-    """Фактические модели Runway по кадрам — не тариф, pay-as-you-go кредиты."""
+    """Фактические модели по кадрам — Kling/Seedance (fal.ai) или Runway."""
     data = script or {}
     still = str(data.get("runway_still_model") or "").strip()
     raw = data.get("runway_models") or []
@@ -683,7 +683,9 @@ def format_runway_usage(script: dict[str, Any] | None) -> str:
         bits.append(f"первый кадр {still}")
     for i, name in enumerate(models, 1):
         bits.append(f"сцена {i} {name}")
-    line = "Runway: " + "; ".join(bits) + "."
+    blob = " ".join([still] + models).lower()
+    vendor = "fal.ai" if any(k in blob for k in ("kling", "seedance", "flux", "fal-ai", "bytedance")) else "Runway"
+    line = f"{vendor}: " + "; ".join(bits) + "."
     cheap = [m for m in models if "turbo" in m.lower()]
     has_45 = any(m.replace("_", "") in ("gen45", "gen4.5") or "gen4.5" in m for m in models)
     if cheap and has_45:
@@ -1493,9 +1495,10 @@ def i2v_fallback_chain(primary: str) -> list[str]:
 
 
 def runway_quality_spec(quality: str) -> dict[str, Any]:
-    from presets import QUALITY
+    """Модели Runway для запасного VIDEO_PROVIDER=runway. UI качества — presets.QUALITY (fal)."""
+    from presets import RUNWAY_QUALITY
 
-    return QUALITY.get(quality) or QUALITY["optimal"]
+    return RUNWAY_QUALITY.get(quality) or RUNWAY_QUALITY["optimal"]
 
 
 def still_model_for_quality(quality: str) -> str:
@@ -1553,6 +1556,10 @@ async def _text_to_image_url(
     model: str | None = None,
 ) -> str:
     """Общий still для цепочки I2V, если пользователь не прислал фото."""
+    if config.video_provider() == "fal":
+        from fal_models import fal_still_url
+
+        return await fal_still_url(session, prompt, dest_hint)
     wanted = (model or "gen4_image").strip() or "gen4_image"
     chain = [wanted]
     if wanted != "gen4_image":
@@ -1664,6 +1671,17 @@ async def runway_clip(
     seed: int | None = None,
     quality: str = "optimal",
 ) -> Path:
+    if config.video_provider() == "fal":
+        from fal_models import fal_render_clip
+
+        return await fal_render_clip(
+            session,
+            runway_prompt_text(prompt),
+            int(seconds),
+            dest,
+            prompt_image=prompt_image,
+            quality=quality,
+        )
     if not config.RUNWAY_API_KEY:
         raise PipelineError("Камера сейчас недоступна. Попробуй ещё раз чуть позже.")
     requested = int(seconds)
@@ -2355,10 +2373,11 @@ async def build_video(
             anchor_image = reference_image
         elif file_ready(still_png, min_bytes=1000):
             log.info("resume still %s", still_png.name)
-            await report("Первый кадр уже есть — Runway не дергаю", stage=live.STAGE_STILL)
+            await report("Первый кадр уже есть — камеру не дергаю", stage=live.STAGE_STILL)
             anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
         else:
-            await report("Общий первый кадр в Runway…", stage=live.STAGE_STILL)
+            still_vendor = "fal.ai" if config.video_provider() == "fal" else "Runway"
+            await report(f"Общий первый кадр в {still_vendor}…", stage=live.STAGE_STILL)
             try:
                 still_url = await _text_to_image_url(
                     session,
@@ -2406,7 +2425,9 @@ async def build_video(
                 tracker.tts_done = max(tracker.tts_done, n)
                 tracker.video_done = n
                 if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
-                    if i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
+                    if config.video_provider() == "fal":
+                        prompt_image = anchor_image
+                    elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                         prompt_image = anchor_image
                     else:
                         try:
@@ -2446,8 +2467,9 @@ async def build_video(
                 clip_sec = pick_clip_duration(
                     audio_sec or 10.0, prefer_short=dynamic_pacing
                 )
+                vendor = "fal.ai" if config.video_provider() == "fal" else "Runway"
                 await report(
-                    f"Сцена {n} из {total} рендерится в Runway",
+                    f"Сцена {n} из {total} рендерится в {vendor}",
                     stage=live.STAGE_RUNWAY,
                     scene=n,
                 )
@@ -2467,10 +2489,13 @@ async def build_video(
                 except PipelineError:
                     raise
             # Клип 1: якорь (фото или still). gen4.5/Veo: last-frame chaining.
+            # fal.ai Kling/Seedance: тот же first-frame на каждую сцену (как Seedance I2V).
             # Seedance I2V last-frame JPEG → INPUT_VALIDATION; тот же still
             # на каждую сцену лучше держит персонажа (и это единственный слот).
             if prompt_image and n < total:
-                if i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
+                if config.video_provider() == "fal":
+                    prompt_image = anchor_image
+                elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
                     prompt_image = anchor_image
                 else:
                     try:

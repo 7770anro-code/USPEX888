@@ -303,7 +303,10 @@ def test_presets_and_cost() -> None:
     assert vs["speed"] == 1.2
     assert "use_speaker_boost" in vs
     est = estimate_cost(n_scenes=5, clip_sec=10, quality="optimal", text="привет мир", need_still=True)
-    assert est["runway"] == 5 * 10 * 12 + 5
+    assert est["runway"] == 0
+    assert est["provider"] == "fal"
+    assert "fal.ai" in est["text"]
+    assert "Runway" in est["text"]
     assert "max" not in __import__("presets", fromlist=["QUALITY"]).QUALITY
     assert est["eleven_chars"] == len("привет мир")
     lock = "red coat rainy street"
@@ -685,6 +688,7 @@ def test_last_frame_chains_with_user_photo() -> None:
     assert "last_frame_data_uri" in src
     assert "RUNWAY_SEEDANCE_MODELS" in src
     assert "anchor_image" in src
+    assert 'video_provider() == "fal"' in src
     assert "not user_supplied_photo" not in src
     assert "No face, age, hair" in SCRIPT_SYSTEM or "без деталей лица" in SCRIPT_SYSTEM.lower() or "No face" in SCRIPT_SYSTEM
 
@@ -1537,9 +1541,14 @@ def test_upscale_result_uses_video_upscale() -> None:
     assert "_job_is_final" in notes
     assert "BUSY.locked()" in notes
     pix = inspect.getsource(_pixel_upscale_last)
-    assert "/v1/video_upscale" in pix
-    assert "video_upscale_payload" in pix
+    assert "upscale_media" in pix
     assert "_send_video" in pix
+    from studio import upscale_media
+
+    up_src = inspect.getsource(upscale_media)
+    assert "/v1/video_upscale" in up_src
+    assert "fal_upscale_file" in up_src
+    assert "video_upscale_payload" in up_src
     payload = video_upscale_payload("runway://final")
     assert payload["model"] == "magnific_video_upscaler_creative"
     kb = result_kb(can_finalize=True)
@@ -1662,6 +1671,7 @@ def test_look_and_runway_models() -> None:
     assert "promptImage" not in sd_t2v
     assert duration_for_model("seedance2_5", 3) == 4
     clip_upload = inspect.getsource(runway_clip)
+    assert "fal_render_clip" in clip_upload
     assert "runway_upload_data_uri" in clip_upload
     assert "RUNWAY_SEEDANCE_MODELS" in clip_upload
     assert video_models_for_quality("fast") == ("gen4_turbo", "")
@@ -1910,7 +1920,13 @@ def test_nano_banana_and_dynamic_pacing() -> None:
     env = Path(__file__).with_name(".env.example").read_text(encoding="utf-8")
     assert "GEMINI_API_KEY=" in env
     assert "aistudio.google.com/apikey" in env
+    assert "FAL_KEY=" in env
+    assert "fal.ai/dashboard/keys" in env
+    assert "WEBAPP_PUBLIC_URL=" in env
     assert "GEMINI_API_KEY" not in inspect.getsource(config.missing_secrets)
+    miss_src = inspect.getsource(config.missing_secrets)
+    assert "FAL_KEY" in miss_src
+    assert "RUNWAY_API_KEY" in miss_src
     assert "gemini-2.5-flash-image" in Path(__file__).with_name("config.py").read_text(
         encoding="utf-8"
     )
@@ -1944,8 +1960,10 @@ def test_nano_banana_and_dynamic_pacing() -> None:
         {"n_scenes": 6, "quality": "optimal", "idea": "кофе", "dynamic_pacing": True}
     )
     assert "6 × 5 сек" in text
+    assert "fal.ai" in text
     est = estimate_cost(n_scenes=6, clip_sec=5, quality="optimal", text="кофе", need_still=True)
-    assert est["runway"] == 6 * 5 * 12 + 5
+    assert est["runway"] == 0
+    assert est["provider"] == "fal"
 
     old_key = config.GEMINI_API_KEY
     config.GEMINI_API_KEY = ""
@@ -1961,6 +1979,152 @@ def test_nano_banana_and_dynamic_pacing() -> None:
         assert asyncio.run(_skip()) is None
     finally:
         config.GEMINI_API_KEY = old_key
+
+
+def test_fal_kling_and_miniapp() -> None:
+    import hashlib
+    import hmac
+    import inspect
+    import time
+    from pathlib import Path
+    from urllib.parse import urlencode
+
+    import config
+    from fal_api import FAL_CREDITS_MSG, extract_fal_media_url, fal_fail_error, fal_headers
+    from fal_models import (
+        KLING_I2V_PRO,
+        SEEDANCE_I2V,
+        as_file_url,
+        i2v_fallback_models,
+        kling_duration,
+        kling_i2v_payload,
+        quality_video_model,
+        seedance_i2v_payload,
+        topaz_image_payload,
+        topaz_video_payload,
+        tryon_payload,
+        use_fal,
+        video_payload,
+    )
+    from presets import QUALITY, RUNWAY_QUALITY, quality_catalog
+    from webapp_auth import WebAppAuthError, validate_init_data
+
+    assert config.video_provider() == "fal"
+    assert use_fal() is True
+    assert QUALITY["fast"]["i2v_model"] == SEEDANCE_I2V
+    assert QUALITY["optimal"]["i2v_model"] == KLING_I2V_PRO
+    assert quality_catalog()["optimal"]["i2v_model"] == KLING_I2V_PRO
+    assert RUNWAY_QUALITY["optimal"]["i2v_model"] == "gen4.5"
+    assert quality_video_model("fast") == SEEDANCE_I2V
+    assert quality_video_model("optimal") == KLING_I2V_PRO
+    assert kling_duration(5) == "5"
+    assert kling_duration(2) == "3"
+    assert kling_duration(20) == "15"
+    kling = kling_i2v_payload("a quiet street", "https://example.com/a.jpg", 5)
+    assert kling["duration"] == "5"
+    assert kling["generate_audio"] is False
+    assert kling["start_image_url"].startswith("https://")
+    seed = seedance_i2v_payload("a quiet street", "https://example.com/a.jpg", 5)
+    assert seed["duration"] == 5
+    assert seed["generate_audio"] is False
+    assert seed["aspect_ratio"] == "9:16"
+    assert seed["resolution"] == "720p"
+    body = video_payload(KLING_I2V_PRO, "go", "data:image/jpeg;base64,xx", 5)
+    assert body["generate_audio"] is False
+    assert as_file_url("data:image/png;base64,abc") == "data:image/png;base64,abc"
+    top = topaz_video_payload("https://example.com/v.mp4")
+    assert top["model"] == "Proteus"
+    img = topaz_image_payload("https://example.com/p.jpg")
+    assert img["upscale_factor"] == 2.0
+    tryon = tryon_payload("https://a", "https://b")
+    assert tryon["person_image_url"] == "https://a"
+    assert tryon["clothing_image_url"] == "https://b"
+    assert tryon["preserve_pose"] is True
+    assert tryon["aspect_ratio"] == "9:16"
+    assert i2v_fallback_models(KLING_I2V_PRO)[0] == KLING_I2V_PRO
+    assert SEEDANCE_I2V in i2v_fallback_models(KLING_I2V_PRO)
+    usage = format_runway_usage(
+        {
+            "runway_still_model": "fal-ai/flux/schnell",
+            "runway_models": [KLING_I2V_PRO, SEEDANCE_I2V],
+        }
+    )
+    assert usage.startswith("fal.ai:")
+    assert "kling" in usage
+    nested = extract_fal_media_url({"images": [{"url": "https://cdn.example/x.png"}]})
+    assert nested.endswith("x.png")
+    cred = fal_fail_error("insufficient credits on account")
+    assert cred.code == "credits"
+    assert cred.user_message == FAL_CREDITS_MSG
+
+    old_key = config.FAL_KEY
+    config.FAL_KEY = "test-fal-key"
+    try:
+        headers = fal_headers()
+        assert headers["Authorization"] == "Key test-fal-key"
+        assert "Bearer" not in headers["Authorization"]
+    finally:
+        config.FAL_KEY = old_key
+
+    miss = config.missing_secrets()
+    assert "RUNWAY_API_KEY" not in miss or config.video_provider() == "runway"
+    # при дефолтном fal ключ Runway не обязателен
+    names = inspect.getsource(config.missing_secrets)
+    assert 'video_provider() == "runway"' in names
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    auth_date = str(int(time.time()))
+    pairs = {"auth_date": auth_date, "query_id": "AA", "user": user}
+    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    digest = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
+    init = urlencode({**pairs, "hash": digest})
+    parsed = validate_init_data(init, token)
+    assert parsed["id"] == 42
+    try:
+        validate_init_data(init, "wrong-token")
+        raise AssertionError("bad token must fail")
+    except WebAppAuthError:
+        pass
+
+    from bot import main, main_menu, more_kb, on_consent, on_w2_menu
+    from webapp_server import build_app, start_webapp
+
+    menu_labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
+    assert "🖥 Студия" in menu_labels
+    more = [b.callback_data for row in more_kb().inline_keyboard for b in row]
+    assert "more:tryon" in more
+    assert "more:upscale" in more
+    consent_src = inspect.getsource(on_consent)
+    assert 'job.get("mode") == "tryon"' in consent_src
+    assert 'job.get("mode") == "act_two"' in consent_src
+    w2 = inspect.getsource(on_w2_menu)
+    assert "tryon" in w2
+    main_src = inspect.getsource(main)
+    assert "start_webapp" in main_src
+    assert "MenuButtonWebApp" in main_src
+    assert "WEBAPP_PUBLIC_URL" in main_src
+    app = build_app(bot=None)
+    paths = set()
+    for route in app.router.routes():
+        info = route.resource.get_info() if route.resource else {}
+        if "path" in info:
+            paths.add(info["path"])
+        if "formatter" in info:
+            paths.add(info["formatter"])
+    assert "/api/quick" in paths
+    assert "/api/upscale" in paths
+    assert "/api/tryon" in paths
+    assert "/api/clone" in paths
+    html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
+    assert "telegram-web-app.js" in html
+    assert "go-tryon" in html
+    assert "Topaz" in html
+    assert inspect.getsource(start_webapp)
+    from studio import upscale_media
+
+    assert "fal_upscale_file" in inspect.getsource(upscale_media)
 
 
 if __name__ == "__main__":
@@ -2010,4 +2174,5 @@ if __name__ == "__main__":
     test_look_and_runway_models()
     test_serial_reveal_show()
     test_nano_banana_and_dynamic_pacing()
+    test_fal_kling_and_miniapp()
     print("ok")
