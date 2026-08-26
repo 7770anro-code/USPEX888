@@ -115,6 +115,59 @@ def clear_pending(user_id: int) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+    folder = photos_dir(user_id)
+    try:
+        import shutil
+
+        shutil.rmtree(folder, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def photos_dir(user_id: int) -> Path:
+    folder = Path(config.DATA_DIR) / "autorolik" / f"{int(user_id)}_photos"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def script_view(script: dict[str, Any] | None) -> dict[str, Any]:
+    data = script if isinstance(script, dict) else {}
+    scenes_out: list[dict[str, Any]] = []
+    for i, scene in enumerate(data.get("scenes") or [], start=1):
+        if not isinstance(scene, dict):
+            continue
+        face = parse_bool(scene.get("face_scene"))
+        idx = int(scene.get("element_index") or 0)
+        scenes_out.append(
+            {
+                "n": i,
+                "face": face,
+                "element_index": idx,
+                "tag": (f"FACE · друг {idx} · Kling" if face else "WIDE · Seedance"),
+                "narration": str(scene.get("narration") or "").strip(),
+                "visual": str(scene.get("visual_prompt") or "").strip(),
+            }
+        )
+    return {
+        "title": str(data.get("title") or "Авторолик").strip() or "Авторолик",
+        "hook": str(data.get("hook") or "").strip(),
+        "caption": str(data.get("caption") or "").strip(),
+        "n_scenes": len(scenes_out),
+        "scenes": scenes_out,
+    }
+
+
+def pending_view(pending: dict[str, Any] | None) -> dict[str, Any]:
+    data = pending if isinstance(pending, dict) else {}
+    photos = data.get("photo_paths") or data.get("photo_file_ids") or []
+    n_photos = len(photos) if isinstance(photos, list) else 0
+    return {
+        "phase": str(data.get("phase") or ""),
+        "error": str(data.get("error") or ""),
+        "idea": str(data.get("idea") or ""),
+        "n_photos": n_photos,
+        "script": script_view(data.get("script") if isinstance(data.get("script"), dict) else None),
+    }
 
 
 def parse_bool(raw: Any) -> bool:

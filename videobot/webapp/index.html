@@ -79,7 +79,8 @@
     <section id="panel-autorolik" class="panel">
       <button class="back" data-back type="button">← Меню</button>
       <h2>Авторолик</h2>
-      <p class="hint">До 6 фото друзей. Сценарий подтвердишь в чате. FACE — Kling, WIDE — Seedance (дрон, колонна, фары, толпа).</p>
+      <p class="hint">До 6 фото друзей. Сценарий, «Снять» и прогресс — здесь. Готовое видео придёт в чат. FACE — Kling, WIDE — Seedance.</p>
+      <div id="auto-setup">
       <label>Тема / вайб (необязательно)
         <textarea id="auto-topic" rows="2" maxlength="400" placeholder="закат, ночной город, друзья…"></textarea>
       </label>
@@ -91,6 +92,24 @@
         Это наши фото / есть согласие всех на кадре
       </label>
       <button class="go" id="go-autorolik" type="button">Собрать сценарий</button>
+      </div>
+      <div id="auto-review" hidden>
+        <h3 id="auto-title" class="auto-h"></h3>
+        <p id="auto-hook" class="hint"></p>
+        <ol id="auto-scenes" class="scenes"></ol>
+        <label>Правки текстом
+          <textarea id="auto-notes" rows="2" maxlength="1500" placeholder="больше дрона, меньше портретов…"></textarea>
+        </label>
+        <div class="row-btns">
+          <button class="go" id="go-auto-shoot" type="button">Снять</button>
+          <button class="go alt" id="go-auto-edit" type="button">Правки</button>
+          <button class="go alt" id="go-auto-cancel" type="button">Отмена</button>
+        </div>
+      </div>
+      <div id="auto-progress" hidden>
+        <p id="auto-progress-label" class="hint"></p>
+        <ol id="auto-progress-scenes" class="scenes"></ol>
+      </div>
     </section>
 
     <section id="panel-cut" class="panel">

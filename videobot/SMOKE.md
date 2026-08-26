@@ -2,6 +2,10 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-26 (15):** resume «Продолжить съёмку» (`4300f0c`). Рестарт только `videobot.service` (PID 189659 → 190318, 04:57 UTC). USPEX 91832 и VECTOR 67680 без изменений. На диске resume: 8 сцен, 1 озвучка, 6 фото, 0 клипов, `credits_paused=true`. `python3 test_parse.py` — ok.
+
+**Деплой 2026-08-26 (14):** Авторолик внутри Mini App (`1633eb3`). Рестарт только `videobot.service` (PID 187389 → 189659, 04:51 UTC). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `/health` 200. Неподписанные POST `/api/autorolik` `/status` `/shoot` → 403. На прод-странице «Снять» (`go-auto-shoot`) и текст «Готовое видео придёт в чат». `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK. Live fal-кредиты не жгли.
+
 **Деплой 2026-08-26 (13):** hotfix Kling `reference_image_urls` + текст 422 (`1760a95`). Рестарт только `videobot.service` (PID 187107 → 187389, 01:38 UTC). USPEX 91832 и VECTOR 67680 без изменений. Съёмка 01:31: Kling submit `01a03bb1-c3cb-7f91-bb7c-95f2ef332f6f` + HTTP 422 за ~1 с (`Either frontal_image_url and reference_image_urls or video_url must be provided`, https `v3b.fal.media` уже был). Seedance submit `01a03bb1-cbb2-7262-9d1e-92e75cd77c59` + HTTP 422 `content_policy_violation` / likenesses / `partner_validation_failed`. Чат: голое «fal.ai не смог выполнить задачу» (`fal_fail_error` не брал JSON `msg`). GPU-инференс скорее всего не шёл. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK.
 
 **Деплой 2026-08-26 (12):** hotfix Kling `elements` https (`fd8bca4`). Рестарт только `videobot.service` (PID 186541 → 187107). USPEX 91832 и VECTOR 67680 без изменений. Съёмка 01:20 и 01:22: Kling submit + HTTP 422 (`frontal_image_url` = data URI), Seedance не submit (poll того же request_id), Runway 400 no credits. Готового I2V не было — GPU-инференс скорее всего не шёл.

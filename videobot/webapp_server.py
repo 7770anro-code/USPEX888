@@ -220,10 +220,107 @@ async def handle_autorolik(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "ok": True,
-            "message": "Пишу сценарий. Подтверждение придёт в чат с ботом — съёмка после кнопки «Снять».",
-            "close": True,
+            "phase": "scripting",
+            "message": "Пишу сценарий… Оставайся здесь — подтверждение и съёмка в Mini App.",
+            "close": False,
         }
     )
+
+
+async def handle_autorolik_status(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    from autorolik import load_pending, pending_view
+    from live_status import get_job, job_key_manual, status_payload
+
+    pending = load_pending(int(user["id"]))
+    snap = get_job(job_key_manual(int(user["id"])))
+    view = pending_view(pending)
+    return web.json_response(
+        {
+            "ok": True,
+            "close": False,
+            "phase": view.get("phase") or "",
+            "pending": view,
+            "shoot": status_payload(snap),
+        }
+    )
+
+
+async def handle_autorolik_revise(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    notes = str(form.get("notes") or form.get("text") or "").strip()
+    if len(notes) < 3:
+        return json_error("Напиши правку парой слов — что поменять в сценах.")
+    from autorolik import load_pending
+
+    pending = load_pending(int(user["id"])) or {}
+    if pending.get("phase") == "shooting":
+        return json_error("Съёмка уже идёт. Правки после неё.")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "autorolik_revise", notes))
+    return web.json_response(
+        {
+            "ok": True,
+            "phase": "scripting",
+            "message": "Переписываю сценарий…",
+            "close": False,
+        }
+    )
+
+
+async def handle_autorolik_shoot(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    from autorolik import load_pending
+
+    pending = load_pending(int(user["id"])) or {}
+    if pending.get("phase") == "shooting":
+        return web.json_response(
+            {
+                "ok": True,
+                "phase": "shooting",
+                "message": "Съёмка уже идёт. Прогресс на этом экране.",
+                "close": False,
+            }
+        )
+    if pending.get("phase") not in ("review", "error"):
+        return json_error("Сначала собери сценарий кнопкой «Собрать сценарий».")
+    bot = request.app["bot"]
+    asyncio.create_task(_run_safe(bot, user["id"], "autorolik_shoot"))
+    return web.json_response(
+        {
+            "ok": True,
+            "phase": "shooting",
+            "message": "Снимаю. Прогресс здесь, готовое видео — в чат.",
+            "close": False,
+        }
+    )
+
+
+async def handle_autorolik_cancel(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    from autorolik import clear_pending, load_pending
+
+    pending = load_pending(int(user["id"])) or {}
+    if pending.get("phase") == "shooting":
+        return json_error("Съёмку уже не остановить кнопкой. Дождись видео или ошибки.")
+    clear_pending(int(user["id"]))
+    return web.json_response({"ok": True, "phase": "", "message": "Отменил.", "close": False})
 
 
 async def handle_history(request: web.Request) -> web.Response:
@@ -243,6 +340,8 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
     from studio import (
         job_error_text,
         run_studio_autorolik,
+        run_studio_autorolik_revise,
+        run_studio_autorolik_shoot,
         run_studio_clone,
         run_studio_history,
         run_studio_interpolate,
@@ -292,9 +391,17 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
                 consent=bool(consent),
                 topic=str(topic or ""),
             )
+        elif kind == "autorolik_revise":
+            (notes,) = args
+            await run_studio_autorolik_revise(user_id, str(notes or ""))
+        elif kind == "autorolik_shoot":
+            await run_studio_autorolik_shoot(bot, user_id)
         elif kind == "history":
             await run_studio_history(bot, user_id)
     except (PipelineError, Exception) as exc:
+        if str(kind).startswith("autorolik"):
+            log.warning("studio autorolik %s user=%s: %s", kind, user_id, job_error_text(exc))
+            return
         try:
             await send_chat_text(bot, user_id, job_error_text(exc))
         except Exception:
@@ -317,6 +424,10 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_post("/api/tryon", handle_tryon)
     app.router.add_post("/api/clone", handle_clone)
     app.router.add_post("/api/autorolik", handle_autorolik)
+    app.router.add_post("/api/autorolik/status", handle_autorolik_status)
+    app.router.add_post("/api/autorolik/revise", handle_autorolik_revise)
+    app.router.add_post("/api/autorolik/shoot", handle_autorolik_shoot)
+    app.router.add_post("/api/autorolik/cancel", handle_autorolik_cancel)
     app.router.add_post("/api/history", handle_history)
     return app
 

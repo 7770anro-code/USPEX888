@@ -197,11 +197,16 @@ def run_kwargs_from_checkpoint(work_dir: Path) -> dict[str, Any] | None:
     revisions = run.get("revisions")
     if not isinstance(revisions, list):
         revisions = None
+    ids = [str(x) for x in (run.get("photo_file_ids") or []) if x]
+    fid = str(run.get("photo_file_id") or "") or None
+    if fid and fid not in ids:
+        ids = [fid] + ids
     return {
         "idea": idea,
         "user_script": bool(run.get("user_script")),
         "voice_id": str(run.get("voice_id") or "") or None,
-        "photo_file_id": str(run.get("photo_file_id") or "") or None,
+        "photo_file_id": fid or (ids[0] if ids else None),
+        "photo_file_ids": ids or None,
         "voice_name": str(run.get("voice_name") or "Сара"),
         "consent_verified": bool(run.get("consent_verified")),
         "n_scenes": int(run.get("n_scenes") or scene_count(work_dir)),
