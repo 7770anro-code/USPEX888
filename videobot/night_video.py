@@ -1,4 +1,4 @@
-"""Модуль 2: топ-N идей → Runway+ElevenLabs, без фото и без клона голоса."""
+"""Модуль 2: топ-N идей → Kling/Seedance + ElevenLabs, без фото и без клона голоса."""
 
 from __future__ import annotations
 

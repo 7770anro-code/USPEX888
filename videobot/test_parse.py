@@ -956,6 +956,7 @@ def test_credits_resume_keeps_artifacts() -> None:
     from pipeline import _runway_clip_native, eleven_tts, runway_clip
     from resume_job import (
         format_resume_progress,
+        load_checkpoint,
         load_script,
         mark_credits_pause,
         next_scene_to_render,
@@ -980,6 +981,7 @@ def test_credits_resume_keeps_artifacts() -> None:
     build_src = inspect.getsource(__import__("pipeline", fromlist=["build_video"]).build_video)
     assert "load_script" in build_src
     assert "resume muxed" in build_src
+    assert "raise_if_user_facing" in build_src
     bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
     assert "resume:go" in bot_src
     assert "credits_pause_kb" in bot_src
@@ -988,6 +990,8 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "В Mini App заново заходить не нужно" in bot_src
     assert "mark_credits_pause(work)" in bot_src
     assert "_user_photo_plates" in bot_src
+    assert "FAL_CREDITS_MSG" in bot_src
+    assert "Клипы Runway" not in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -1037,11 +1041,20 @@ def test_credits_resume_keeps_artifacts() -> None:
     text = format_resume_progress(work, 4)
     assert "4/4" in text
     assert "3/4" in text
+    assert "Клипы Runway" not in text
+    assert "Клипы:" in text
     kw = run_kwargs_from_checkpoint(work)
     assert kw is not None
     assert kw["idea"] == "лестница микро"
     assert kw["photo_file_ids"] == ["fid-a", "fid-b"]
     assert kw["kind"] == "autorolik"
+    assert kw.get("route_mode") is None
+    ckpt_run = dict((load_checkpoint(work) or {}).get("run") or {})
+    ckpt_run["route_mode"] = "real_photo"
+    save_checkpoint(work, run=ckpt_run)
+    kw2 = run_kwargs_from_checkpoint(work)
+    assert kw2 is not None
+    assert kw2["route_mode"] == "real_photo"
     from bot import _user_photo_plates
 
     (work / "user_photo_2.jpg").write_bytes(b"x" * 100)
@@ -1987,8 +2000,9 @@ def test_nano_banana_and_dynamic_pacing() -> None:
     assert "dynamic_pacing" in q
     vibe = inspect.getsource(_run_synth_vibe)
     assert "dynamic_pacing=True" in vibe
-    assert "clip_sec=5" in vibe
+    assert "~5 сек" in vibe
     assert "photo_file_id=None" in vibe
+    assert "Kling/Seedance" in vibe
 
     text = cost_text(
         {"n_scenes": 6, "quality": "optimal", "idea": "кофе", "dynamic_pacing": True}
@@ -2366,6 +2380,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert "skip legacy_runway after fal validation error" in router_src
     assert "skip seedance for FACE" in router_src
     assert 'route_mode in ("autorolik_face", "real_photo")' in router_src
+    assert "FAL_ONLY_MODES" in router_src
+    assert "is_fal_only_mode" in router_src
+    assert "if fal_only:" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
@@ -2379,8 +2396,32 @@ def test_fal_kling_and_miniapp() -> None:
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
-    assert "legacy_runway" in ROUTING["real_photo"]
-    assert chain_for("real_photo")[0] in ("kling", "seedance", "legacy_runway")
+    assert "legacy_runway" not in ROUTING["real_photo"]
+    assert "legacy_runway" not in ROUTING["synthetic_multi_scene"]
+    assert "legacy_runway" not in ROUTING["night_pipeline"]
+    assert "legacy_runway" not in ROUTING["montage_generate"]
+    assert "legacy_runway" in ROUTING["autorolik_face"]
+    assert chain_for("real_photo") == ["kling", "seedance"]
+    assert chain_for("synthetic_multi_scene") == ["seedance", "kling"]
+    assert chain_for("night_pipeline") == ["seedance", "kling"]
+    old_prov = config.VIDEO_PROVIDER
+    config.VIDEO_PROVIDER = "runway"
+    try:
+        assert "legacy_runway" not in chain_for("real_photo")
+        assert "legacy_runway" not in chain_for("night_pipeline")
+        assert chain_for("autorolik_face") == ["legacy_runway"]
+    finally:
+        config.VIDEO_PROVIDER = old_prov
+    from fal_api import FAL_CREDITS_MSG
+    from pipeline import raise_if_user_facing
+
+    fal_credits = PipelineError(FAL_CREDITS_MSG, "insufficient credits", code="credits")
+    try:
+        raise_if_user_facing(fal_credits)
+        raise AssertionError("credits must re-raise")
+    except PipelineError as kept:
+        assert kept.user_message == FAL_CREDITS_MSG
+        assert "Runway" not in kept.user_message
     kling_p = video_prompt_for("kling", "red coat", "walk", photo_lock=True)
     assert ELEMENT_TOKEN in kling_p
     seed_p = video_prompt_for("seedance", "red coat", "walk", photo_lock=False)

@@ -40,11 +40,14 @@ def smoke_routing() -> None:
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
-    for mode, chain in ROUTING.items():
-        assert chain[-1] == "legacy_runway", mode
-        assert "kling" in chain and "seedance" in chain
+    for mode in ("real_photo", "synthetic_multi_scene", "night_pipeline", "montage_generate"):
+        assert "legacy_runway" not in ROUTING[mode], mode
+        assert "kling" in ROUTING[mode] and "seedance" in ROUTING[mode]
+        assert "legacy_runway" not in chain_for(mode), mode
     assert ROUTING["autorolik_face"][0] == "kling"
     assert ROUTING["autorolik_wide"][0] == "seedance"
+    assert ROUTING["autorolik_face"][-1] == "legacy_runway"
+    assert ROUTING["autorolik_wide"][-1] == "legacy_runway"
     assert chain_for("real_photo")[0] == "kling"
     assert chain_for("night_pipeline")[0] == "seedance"
     assert chain_for("autorolik_face")[0] == "kling"
@@ -65,7 +68,7 @@ def smoke_routing() -> None:
         assert "Bearer" not in auth
     _ok(
         "routing",
-        "real_photo=Kling, synth/night/montage=Seedance, один FAL_API_KEY, Runway тихий хвост",
+        "1клик/фото/ночь/вайб=Kling+Seedance без Runway; Авторолик FACE/WIDE с тихим хвостом",
     )
 
 

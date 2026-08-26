@@ -9,7 +9,7 @@
 1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф. «⚡️ Видео за 1 клик» и авто-вайб: 6 коротких сцен, речь 12–18 слов, клипы ~5 сек, итого 20–30 сек.
 2. **Озвучка** — ElevenLabs пресеты или клон **MiniMax** (`fal-ai/minimax/voice-clone` → `fal-ai/minimax/speech-02-hd`). Клон выбирается в списке голосов вместо пресета.
 3. **fal.ai** (дефолт, `VIDEO_PROVIDER=fal`, ключ `FAL_KEY` или `FAL_API_KEY`) — очередь `https://queue.fal.run`, заголовок `Authorization: Key $FAL_KEY`, без SDK.
-   - Маршрутизация в `provider_router.ROUTING`: своё фото → Kling → Seedance → legacy Runway; синтетика / ночь / вайб монтажа / Авторолик WIDE → Seedance → Kling → legacy Runway; Авторолик FACE → Kling → Seedance → legacy Runway. Убрать `"legacy_runway"` из списка — Runway выключается.
+   - Маршрутизация в `provider_router.ROUTING`: старый пайплайн (1 клик / своё фото / ночь / вайб) — **только** Kling+Seedance, без Runway. Своё фото/лицо → Kling; синтетика / общий план / ночь → Seedance. Авторолик FACE → Kling → Seedance → тихий legacy Runway; Авторолик WIDE → Seedance → Kling → тихий legacy Runway.
    - Качество в UI: **Быстро** = Seedance 2.5 I2V (`bytedance/seedance-2.5/image-to-video`); **Оптимально** = Kling 3.0 Pro I2V (`fal-ai/kling-video/v3/pro/image-to-video`).
    - Вертикаль `9:16`. Duration — **строка**. `generate_audio=false` (нативная речь плохо с рус/укр). TTS клеим сами.
    - Kling Element Reference: `elements=[{frontal_image_url}]` + `@Element1` в промпте (взаимно исключается с `generate_audio`).

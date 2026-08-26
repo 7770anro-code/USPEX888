@@ -167,7 +167,7 @@ def format_resume_progress(work_dir: Path, n_scenes: int | None = None) -> str:
     still = "да" if p["has_still"] else "нет"
     return (
         f"Сценарий: {script}. Первый кадр: {still}. "
-        f"Озвучка: {p['tts']}/{n}. Клипы Runway: {p['clips']}/{n}. Монтаж: {p['muxed']}/{n}."
+        f"Озвучка: {p['tts']}/{n}. Клипы: {p['clips']}/{n}. Монтаж: {p['muxed']}/{n}."
     )
 
 
@@ -222,4 +222,5 @@ def run_kwargs_from_checkpoint(work_dir: Path) -> dict[str, Any] | None:
         "preset_brief": str(run.get("preset_brief") or ""),
         "kind": str(run.get("kind") or "motivational"),
         "dynamic_pacing": bool(run.get("dynamic_pacing")),
+        "route_mode": str(run.get("route_mode") or "") or None,
     }

@@ -1,4 +1,4 @@
-"""Маршрутизация Kling → Seedance → legacy Runway. Одна правка ROUTING — и Runway выключается."""
+"""Маршрутизация Kling / Seedance. Старый пайплайн без Runway; Авторолик может оставить тихий хвост."""
 
 from __future__ import annotations
 
@@ -15,12 +15,22 @@ from providers.legacy.runway_client import RunwayProvider
 
 log = logging.getLogger("videobot")
 
-# Убрать "legacy_runway" из списков — всегда только Kling+Seedance.
+# 1 клик / своё фото / ночь / вайб монтажа — только fal.ai (Kling+Seedance).
+# Авторолик FACE/WIDE пока может иметь тихий legacy_runway в хвосте.
+FAL_ONLY_MODES = frozenset(
+    {
+        "real_photo",
+        "synthetic_multi_scene",
+        "night_pipeline",
+        "montage_generate",
+    }
+)
+
 ROUTING: dict[str, list[str]] = {
-    "real_photo": ["kling", "seedance", "legacy_runway"],
-    "synthetic_multi_scene": ["seedance", "kling", "legacy_runway"],
-    "night_pipeline": ["seedance", "kling", "legacy_runway"],
-    "montage_generate": ["seedance", "kling", "legacy_runway"],
+    "real_photo": ["kling", "seedance"],
+    "synthetic_multi_scene": ["seedance", "kling"],
+    "night_pipeline": ["seedance", "kling"],
+    "montage_generate": ["seedance", "kling"],
     "autorolik_face": ["kling", "seedance", "legacy_runway"],
     "autorolik_wide": ["seedance", "kling", "legacy_runway"],
 }
@@ -28,16 +38,28 @@ ROUTING: dict[str, list[str]] = {
 MODE_DEFAULT = "synthetic_multi_scene"
 
 
+def is_fal_only_mode(mode: str) -> bool:
+    raw = (mode or "").strip() or MODE_DEFAULT
+    return raw in FAL_ONLY_MODES
+
+
 def chain_for(mode: str) -> list[str]:
     raw = (mode or "").strip() or MODE_DEFAULT
     names = list(ROUTING.get(raw) or ROUTING[MODE_DEFAULT])
-    if config.video_provider() == "runway":
+    fal_only = is_fal_only_mode(raw)
+    if fal_only:
+        names = [n for n in names if n != "legacy_runway"]
+    elif config.video_provider() == "runway":
         return ["legacy_runway"]
     force = (config.FAL_VIDEO_MODEL or "").strip().lower()
     if "kling" in force:
         names = ["kling"] + [n for n in names if n != "kling"]
     elif "seedance" in force:
         names = ["seedance"] + [n for n in names if n != "seedance"]
+    if fal_only:
+        names = [n for n in names if n != "legacy_runway"]
+        if not names:
+            names = ["kling", "seedance"] if raw == "real_photo" else ["seedance", "kling"]
     return names
 
 
@@ -70,9 +92,12 @@ async def render_clip(
     """Все кнопки генерации идут сюда, не в конкретный вендор."""
     last: PipelineError | None = None
     skip_runway = False
+    fal_only = is_fal_only_mode(route_mode)
     for engine in chain_for(route_mode):
         try:
             if engine == "legacy_runway":
+                if fal_only:
+                    continue
                 if skip_runway:
                     log.warning("skip legacy_runway after fal validation error")
                     continue
@@ -138,6 +163,8 @@ async def render_clip(
             continue
     if last:
         raise last
+    if fal_only:
+        raise PipelineError("Камера сейчас недоступна. Нужен FAL_KEY.")
     raise PipelineError("Камера сейчас недоступна. Нужен FAL_KEY (или RUNWAY_API_KEY как запас).")
 
 
@@ -149,9 +176,12 @@ async def generate_still(
     route_mode: str = MODE_DEFAULT,
 ) -> str:
     last: PipelineError | None = None
+    fal_only = is_fal_only_mode(route_mode)
     for engine in chain_for(route_mode):
         try:
             if engine == "legacy_runway":
+                if fal_only:
+                    continue
                 if not config.RUNWAY_API_KEY:
                     continue
                 from pipeline import _text_to_image_url_native
