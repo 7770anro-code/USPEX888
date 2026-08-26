@@ -92,8 +92,12 @@ def smoke_miniapp() -> None:
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert html.count('class="sub"') == 7
     assert "go-auto-shoot" in html
+    assert "go-auto-refresh" in html
+    assert "Обновить статус" in html
+    js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")
+    assert "go-auto-refresh" in js
     test_webapp_init_data_hmac_includes_signature()
-    _ok("miniapp", "7 карточек, HMAC включает signature, Авторолик")
+    _ok("miniapp", "7 карточек, HMAC, Авторолик, Обновить статус")
 
 
 async def smoke_idea_script() -> None:

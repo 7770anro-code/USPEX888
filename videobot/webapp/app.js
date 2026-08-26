@@ -121,12 +121,13 @@
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       showStatus(data.error || "Не вышло. Попробуй ещё раз.", "err");
-      return;
+      return null;
     }
     showStatus(data.message || "Готово. Смотри чат с ботом.", "ok");
     if (tg && tg.close && data.close) {
       setTimeout(() => tg.close(), 1200);
     }
+    return data;
   }
 
   function autoForm(extra) {
@@ -214,22 +215,28 @@
 
   function showAutoPhase(phase, pending, shoot) {
     const setup = document.getElementById("auto-setup");
+    const wait = document.getElementById("auto-wait");
     const review = document.getElementById("auto-review");
     const progress = document.getElementById("auto-progress");
+    const refreshWrap = document.getElementById("auto-refresh-wrap");
     const script = pending && pending.script;
     const hasScenes = script && script.scenes && script.scenes.length;
     if (phase === "shooting" || (shoot && shoot.active && !shoot.done && !shoot.failed)) {
       setHidden(setup, true);
+      setHidden(wait, true);
       setHidden(review, true);
       setHidden(progress, false);
+      setHidden(refreshWrap, false);
       renderShoot(shoot);
       startAutoPoll();
       return;
     }
     if (phase === "done" && shoot && shoot.done && !shoot.failed) {
       setHidden(setup, true);
+      setHidden(wait, true);
       setHidden(review, true);
       setHidden(progress, false);
+      setHidden(refreshWrap, false);
       renderShoot(shoot);
       stopAutoPoll();
       showStatus("Готово. Видео в чате с ботом.", "ok");
@@ -237,8 +244,10 @@
     }
     if ((phase === "review" || phase === "error") && hasScenes) {
       setHidden(setup, true);
+      setHidden(wait, true);
       setHidden(review, false);
       setHidden(progress, true);
+      setHidden(refreshWrap, false);
       renderScript(script);
       stopAutoPoll();
       if (phase === "error" && pending && pending.error) {
@@ -247,16 +256,35 @@
       return;
     }
     if (phase === "scripting") {
-      setHidden(setup, false);
+      setHidden(setup, true);
+      setHidden(wait, false);
       setHidden(review, true);
       setHidden(progress, true);
+      setHidden(refreshWrap, false);
       startAutoPoll();
       return;
     }
     setHidden(setup, false);
+    setHidden(wait, true);
     setHidden(review, true);
     setHidden(progress, true);
+    setHidden(refreshWrap, true);
     stopAutoPoll();
+  }
+
+  function clockStamp() {
+    try {
+      return new Date().toLocaleTimeString("ru-RU", { hour12: false });
+    } catch (_e) {
+      return "";
+    }
+  }
+
+  function markRefresh(line) {
+    const meta = document.getElementById("auto-refresh-meta");
+    if (!meta) return;
+    const t = clockStamp();
+    meta.textContent = t ? ("Обновлено " + t + (line ? " · " + line : "")) : (line || "");
   }
 
   async function refreshAutorolik() {
@@ -270,12 +298,25 @@
     const pending = data.pending || {};
     const shoot = data.shoot || {};
     const phase = data.phase || pending.phase || "";
+    const waitLabel = document.getElementById("auto-wait-label");
+    if (waitLabel && phase === "scripting") {
+      waitLabel.textContent = data.message || pending.error || "Пишу сценарий…";
+    }
     if (phase === "scripting") {
       showStatus(data.message || "Пишу сценарий…", "");
+      markRefresh("пишу сценарий");
     } else if (phase === "shooting") {
       showStatus(shoot.label || data.message || "Снимаю…", "");
+      markRefresh(shoot.label || "съёмка");
+    } else if (phase === "review") {
+      markRefresh("сценарий готов");
+    } else if (phase === "done") {
+      markRefresh("готово");
     } else if (phase === "error" && pending.error) {
       showStatus(pending.error, "err");
+      markRefresh("ошибка");
+    } else {
+      markRefresh(phase || "");
     }
     showAutoPhase(phase, pending, shoot);
     return data;
@@ -338,9 +379,27 @@
     files.forEach((f, i) => {
       photos["photo" + (i + 1)] = f;
     });
-    await postJob("/api/autorolik", { topic, consent: "1" }, photos);
+    const started = await postJob("/api/autorolik", { topic, consent: "1" }, photos);
+    if (!started) return;
+    showAutoPhase("scripting", { phase: "scripting" }, {});
     startAutoPoll();
     await refreshAutorolik();
+  });
+
+  bind("go-auto-refresh", async () => {
+    if (!initData) {
+      showStatus("Открой меню из Telegram — иначе нет подписи Mini App.", "err");
+      return;
+    }
+    showStatus("Проверяю статус…");
+    try {
+      const data = await refreshAutorolik();
+      if (!data || data.ok === false) {
+        showStatus((data && data.error) || "Не удалось обновить статус.", "err");
+      }
+    } catch (_e) {
+      showStatus("Не достучался до сервера. Нажми ещё раз.", "err");
+    }
   });
 
   bind("go-auto-shoot", async () => {

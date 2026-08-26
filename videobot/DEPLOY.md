@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-26** (Mini App «Обновить статус» в Авторолике, commit `dbd16d4`): кнопка на экране «Пишу сценарий…» / ревью / прогресс съёмки вручную дергает `/api/autorolik/status`, показывает время обновления, съёмку не стартует. Рестарт **только** `videobot.service` (PID 191258 → 191502, 05:16 UTC; чистое состояние перед попыткой владельца было 190318 → 191258 в 05:12). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `/health` 200, `@VideobotAI777_bot` в polling. Неподписанный POST `/api/autorolik/status` → 403. На прод-HTML есть `go-auto-refresh`.
+
 Выложено **2026-08-26** (resume «Продолжить съёмку» не стирает диск, commit `4300f0c`): клик в чате снова ставит `credits_paused`, подхватывает `photo_file_ids` и `user_photo_*.jpg` на диске. Рестарт **только** `videobot.service` (PID 189659 → 190318, 04:57 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. Папка resume на месте: script.json, n0.mp3, 6 фото, клипов 0.
 
 Выложено **2026-08-26** (Авторолик сценарий/съёмка внутри Mini App, commit `1633eb3`): после «Собрать сценарий» сценарий, «Снять/Правки/Отмена» и прогресс по сценам остаются в Mini App; в чат — готовое видео. Рестарт **только** `videobot.service` (PID 187389 → 189659, 04:51 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `/health` 200, `@VideobotAI777_bot` в polling. Неподписанные POST `/api/autorolik`, `/status`, `/shoot` → 403. На прод-HTML есть `go-auto-shoot`.
