@@ -61,6 +61,19 @@ def _strip_el(text: str) -> str:
     return re.sub(r"\s+", " ", ELEMENT_RE.sub("the person", text or "")).strip()
 
 
+def _is_credits(exc: BaseException) -> bool:
+    from pipeline import PipelineError, is_runway_credits_fail
+
+    if not isinstance(exc, PipelineError):
+        return False
+    if getattr(exc, "code", "") == "credits":
+        return True
+    blob = f"{exc.detail or ''} {exc}".lower()
+    return is_runway_credits_fail(exc.detail) or any(
+        w in blob for w in ("exhausted balance", "user is locked", "insufficient", "out of credit")
+    )
+
+
 async def _https(session, path: Path) -> str:
     from fal_api import path_to_fal_url, to_fal_https_url
 
@@ -235,7 +248,18 @@ async def main_async(args: argparse.Namespace) -> int:
             if not path.is_file():
                 report["notes"].append(f"нет фото p{idx}")
                 continue
-            https[idx] = await _https(session, path)
+            try:
+                https[idx] = await _https(session, path)
+            except Exception as exc:
+                if _is_credits(exc):
+                    report["notes"].append(f"credits on upload p{idx}: {(getattr(exc,'detail',None) or str(exc))[:180]}")
+                    report["est_usd"] = round(est, 2)
+                    (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+                    log.error("credits locked on upload p%s", idx)
+                    print("CREDITS_LOCKED")
+                    print("EST_USD 0.0")
+                    return 3
+                raise
             reuse = args.p1_still if idx == 1 and args.p1_still and Path(args.p1_still).is_file() else None
             dest = out / f"still_p{idx}.jpg"
             try:
@@ -247,6 +271,14 @@ async def main_async(args: argparse.Namespace) -> int:
                     est += COST["pulid"]
                     log.info("pulid p%s %s", idx, dest.name)
             except Exception as exc:
+                if _is_credits(exc):
+                    report["notes"].append(f"credits on PuLID p{idx}")
+                    report["est_usd"] = round(est, 2)
+                    (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+                    log.error("credits locked on pulid p%s", idx)
+                    print("CREDITS_LOCKED")
+                    print("EST_USD 0.0")
+                    return 3
                 report["notes"].append(f"PuLID p{idx} fail: {type(exc).__name__}")
                 log.warning("pulid p%s fail %s", idx, exc)
 
@@ -286,7 +318,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         est += COST["seed_ref_s"] * int(FACE_SEC)
                     except PipelineError as exc:
                         row["detail"] = f"{getattr(exc,'code','')}:{(exc.detail or '')[:180]}"
-                        if getattr(exc, "code", "") == "credits":
+                        if _is_credits(exc):
                             row["status"] = "credits"
                             report["scenes"].append(row)
                             report["est_usd"] = round(est, 2)
@@ -338,7 +370,7 @@ async def main_async(args: argparse.Namespace) -> int:
                         est += COST["seed_i2v_s"] * int(WIDE_SEC)
                     except PipelineError as exc:
                         row["detail"] = f"{getattr(exc,'code','')}:{(exc.detail or '')[:180]}"
-                        if getattr(exc, "code", "") == "credits":
+                        if _is_credits(exc):
                             row["status"] = "credits"
                             report["scenes"].append(row)
                             report["est_usd"] = round(est, 2)
