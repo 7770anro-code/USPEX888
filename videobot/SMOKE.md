@@ -2,6 +2,8 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-26 (11):** hotfix sendPhoto >10 МБ (`c6ebae3`): сжатие превью ffmpeg. Рестарт только `videobot.service` (PID 186193 → 186541). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. Прод-попытки 01:01 и 01:03 упали на Telegram Bad Request (11 308 176 байт / лимит 10 485 760) **до** Grok и **до** fal. Kling/Seedance не вызывались.
+
 **Деплой 2026-08-26 (10):** hotfix HMAC Mini App (`73ef903`): `signature` входит в hash. Рестарт только `videobot.service` (PID 185597 → 186193). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. На прод-коде HMAC с signature + официальный вектор Telegram — ok. Неподписанный POST `/api/autorolik` → 403. `/health` 200. `@VideobotAI777_bot` в polling.
 
 **Деплой 2026-08-26 (9):** после «ok» на Авторолик (FACE Kling / WIDE Seedance, 1–6 фото, сценарий в чате) и пометку «AI generated» код ветки `cursor/videobot-miniapp-17b5` (`569d3ec`) выложен в `/opt/videobot`. Рестарт только `videobot.service` (PID 184838 → 185597). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling. Mini App `/health` 200, 7 карточек, публичная страница отдаёт Авторолик. `python3 test_parse.py` — ok. Live fal-кредиты на Авторолик не жгли.

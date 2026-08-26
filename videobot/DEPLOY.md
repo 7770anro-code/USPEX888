@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-26** (hotfix sendPhoto >10 МБ, commit `c6ebae3`): ffmpeg-сжатие превью до лимита Telegram. Рестарт **только** `videobot.service` (PID 186193 → 186541, 01:08 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `/health` 200. На прод-коде compress + маппинг «too big for a photo» — ok. Kling/Seedance на упавшей попытке 01:01/01:03 **не вызывались**.
+
 Выложено **2026-08-26** (hotfix HMAC Mini App, commit `73ef903`): `signature` снова в data-check-string. Рестарт **только** `videobot.service` (PID 185597 → 186193, 00:59 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `/health` 200. На прод-коде: HMAC с `signature` ок, официальный вектор Telegram ок, неподписанный `POST /api/autorolik` → 403.
 
 Выложено **2026-08-26** (после «ok»: Авторолик FACE Kling / WIDE Seedance + «AI generated»): код ветки `cursor/videobot-miniapp-17b5` (commit `569d3ec`) в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 184838 → 185597, 00:28 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали (`WEBAPP_PUBLIC_URL` остался). `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `127.0.0.1:8088` (`/health` 200), 7 карточек включая Авторолик. Неподписанный `POST /api/autorolik` → 403.
