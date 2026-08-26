@@ -1996,11 +1996,13 @@ async def _autorolik_write_script(
     notes: str = "",
 ) -> None:
     from autorolik import (
+        clear_live,
         format_script_preview,
         grok_autorolik,
         load_pending,
         review_kb,
         save_pending,
+        set_live,
     )
 
     job = await _job(state)
@@ -2017,6 +2019,7 @@ async def _autorolik_write_script(
     topic = str(job.get("idea") or pending.get("idea") or "").strip()
     previous = pending.get("script") if notes else None
     await message.answer("Пишу сценарий Авторолика (4–8 сцен, FACE/WIDE)…")
+    set_live(message.chat.id, "scripting")
     try:
         timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -2027,31 +2030,32 @@ async def _autorolik_write_script(
                 notes=notes,
                 previous=previous if isinstance(previous, dict) else None,
             )
+        payload = {
+            "phase": "review",
+            "error": "",
+            "script": script,
+            "photo_file_ids": ids,
+            "photo_paths": paths,
+            "consent_verified": True,
+            "idea": topic,
+            "source": pending.get("source") or "chat",
+        }
+        save_pending(message.chat.id, payload)
+        job["script"] = script
+        job["consent_verified"] = True
+        await _save_job(state, job)
+        await state.set_state(Flow.auto_review)
+        await message.answer(format_script_preview(script), reply_markup=review_kb())
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=main_menu())
-        return
-    payload = {
-        "phase": "review",
-        "error": "",
-        "script": script,
-        "photo_file_ids": ids,
-        "photo_paths": paths,
-        "consent_verified": True,
-        "idea": topic,
-        "source": pending.get("source") or "chat",
-    }
-    save_pending(message.chat.id, payload)
-    job["script"] = script
-    job["consent_verified"] = True
-    await _save_job(state, job)
-    await state.set_state(Flow.auto_review)
-    await message.answer(format_script_preview(script), reply_markup=review_kb())
+    finally:
+        clear_live(message.chat.id)
 
 
 async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> None:
-    from autorolik import clear_pending, load_pending
+    from autorolik import clear_live, clear_pending, reconcile_pending, set_live
 
-    pending = load_pending(message.chat.id) or {}
+    pending = reconcile_pending(message.chat.id) or {}
     job = await _job(state)
     script = pending.get("script") or job.get("script")
     ids = [str(x) for x in (pending.get("photo_file_ids") or job.get("photo_file_ids") or []) if x]
@@ -2069,33 +2073,37 @@ async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> 
     voice_id, voice_name = _autorolik_voice(message.chat.id)
     scenes = script.get("scenes") or []
     await state.clear()
-    await _run_job(
-        message,
-        idea=str(pending.get("idea") or job.get("idea") or script.get("title") or "авторолик"),
-        user_script=True,
-        voice_id=voice_id,
-        photo_file_id=ids[0] if ids else None,
-        bot=bot,
-        voice_name=voice_name,
-        consent_verified=True,
-        n_scenes=max(4, len(scenes)),
-        extra_brief="",
-        voice_settings=voice_settings_payload("sure", "norm"),
-        camera="",
-        motion="",
-        quality="optimal",
-        style="cinematic",
-        watermark=False,
-        hook=str(script.get("hook") or ""),
-        kind="autorolik",
-        wipe=True,
-        dynamic_pacing=True,
-        route_mode="autorolik_face",
-        photo_file_ids=ids or None,
-        photo_paths=paths or None,
-        script_override=script,
-    )
-    clear_pending(message.chat.id)
+    set_live(message.chat.id, "shooting")
+    try:
+        await _run_job(
+            message,
+            idea=str(pending.get("idea") or job.get("idea") or script.get("title") or "авторолик"),
+            user_script=True,
+            voice_id=voice_id,
+            photo_file_id=ids[0] if ids else None,
+            bot=bot,
+            voice_name=voice_name,
+            consent_verified=True,
+            n_scenes=max(4, len(scenes)),
+            extra_brief="",
+            voice_settings=voice_settings_payload("sure", "norm"),
+            camera="",
+            motion="",
+            quality="optimal",
+            style="cinematic",
+            watermark=False,
+            hook=str(script.get("hook") or ""),
+            kind="autorolik",
+            wipe=True,
+            dynamic_pacing=True,
+            route_mode="autorolik_face",
+            photo_file_ids=ids or None,
+            photo_paths=paths or None,
+            script_override=script,
+        )
+        clear_pending(message.chat.id)
+    finally:
+        clear_live(message.chat.id)
 
 
 async def on_auto_photo(message: Message, state: FSMContext) -> None:

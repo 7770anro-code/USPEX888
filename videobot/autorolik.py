@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,17 @@ log = logging.getLogger("videobot")
 MAX_PHOTOS = 6
 MIN_SCENES = 4
 MAX_SCENES = 8
+LIVE_PHASES = frozenset({"scripting", "shooting"})
+SCRIPTING_STALE_SEC = 4 * 60
+SHOOTING_STALE_SEC = 60 * 60
+LIVE_STATUS_STALE_SEC = 15 * 60
+STALE_SCRIPT_MSG = (
+    "Прошлый сценарий не дописался — процесс оборвался. Можно собрать заново."
+)
+STALE_SHOOT_MSG = (
+    "Прошлая съёмка оборвалась. Сценарий на месте — можно править и снять, или собрать заново."
+)
+_live: dict[int, dict[str, Any]] = {}
 ELEMENT_RE = re.compile(r"@Element\s*(\d+)|@element_(\d+)", re.I)
 
 LOCKED_GRADE = (
@@ -93,8 +105,10 @@ def pending_path(user_id: int) -> Path:
 
 
 def save_pending(user_id: int, payload: dict[str, Any]) -> Path:
+    data = dict(payload or {})
+    data["updated_at"] = time.time()
     path = pending_path(user_id)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
 
@@ -128,6 +142,117 @@ def photos_dir(user_id: int) -> Path:
     folder = Path(config.DATA_DIR) / "autorolik" / f"{int(user_id)}_photos"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def set_live(user_id: int, phase: str) -> None:
+    _live[int(user_id)] = {"phase": str(phase or "scripting"), "t0": time.time()}
+
+
+def clear_live(user_id: int) -> None:
+    _live.pop(int(user_id), None)
+
+
+def live_phase(user_id: int) -> str:
+    if not worker_alive(user_id):
+        return ""
+    rec = _live.get(int(user_id)) or {}
+    return str(rec.get("phase") or "")
+
+
+def worker_alive(user_id: int) -> bool:
+    """Есть ли реальный фоновый воркер: in-memory задача или live_status съёмки."""
+    uid = int(user_id)
+    rec = _live.get(uid)
+    if rec:
+        phase = str(rec.get("phase") or "scripting")
+        limit = SCRIPTING_STALE_SEC if phase != "shooting" else SHOOTING_STALE_SEC
+        age = time.time() - float(rec.get("t0") or 0)
+        if age <= limit:
+            return True
+        log.warning("autorolik live timeout user=%s phase=%s age=%.0fs", uid, phase, age)
+        return False
+    try:
+        from live_status import get_job, job_key_manual
+
+        snap = get_job(job_key_manual(uid))
+    except Exception:
+        snap = None
+    if not snap or snap.get("done"):
+        return False
+    updated = float(snap.get("updated_at") or 0)
+    if updated and time.time() - updated > LIVE_STATUS_STALE_SEC:
+        return False
+    return True
+
+
+def has_usable_script(data: dict[str, Any] | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    script = data.get("script")
+    if not isinstance(script, dict):
+        return False
+    scenes = script.get("scenes")
+    return isinstance(scenes, list) and len(scenes) >= MIN_SCENES
+
+
+def expire_in_progress(user_id: int, data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Мёртвый scripting/shooting → stale или review. Фото на диске и resume не трогаем."""
+    uid = int(user_id)
+    blob = data if isinstance(data, dict) else {}
+    phase = str(blob.get("phase") or "")
+    clear_live(uid)
+    if has_usable_script(blob):
+        out = dict(blob)
+        out["phase"] = "review"
+        out["error"] = STALE_SHOOT_MSG if phase == "shooting" else STALE_SCRIPT_MSG
+        out["stale"] = True
+        save_pending(uid, out)
+        log.warning("autorolik expire to review user=%s was=%s", uid, phase)
+        return out
+    tomb = {
+        "phase": "stale",
+        "error": STALE_SCRIPT_MSG,
+        "script": None,
+        "idea": str(blob.get("idea") or ""),
+        "photo_paths": [],
+        "photo_file_ids": [],
+        "consent_verified": False,
+        "source": str(blob.get("source") or ""),
+        "stale": True,
+    }
+    save_pending(uid, tomb)
+    log.warning("autorolik expire to stale user=%s was=%s", uid, phase)
+    return tomb
+
+
+def reconcile_pending(user_id: int) -> dict[str, Any] | None:
+    uid = int(user_id)
+    data = load_pending(uid)
+    phase = str((data or {}).get("phase") or "")
+    if phase in LIVE_PHASES and not worker_alive(uid):
+        return expire_in_progress(uid, data)
+    return data
+
+
+def expire_all_dead_pendings() -> list[int]:
+    """На старте процесса: in-progress без живого воркера — мёртвые хвосты."""
+    folder = Path(config.DATA_DIR) / "autorolik"
+    if not folder.is_dir():
+        return []
+    expired: list[int] = []
+    for path in sorted(folder.glob("*.json")):
+        if not path.stem.isdigit():
+            continue
+        uid = int(path.stem)
+        before = load_pending(uid)
+        phase = str((before or {}).get("phase") or "")
+        if phase not in LIVE_PHASES:
+            continue
+        after = reconcile_pending(uid)
+        new_phase = str((after or {}).get("phase") or "")
+        if new_phase != phase:
+            expired.append(uid)
+    return expired
 
 
 def script_view(script: dict[str, Any] | None) -> dict[str, Any]:
@@ -196,6 +321,7 @@ def pending_view(pending: dict[str, Any] | None) -> dict[str, Any]:
         "error": str(data.get("error") or ""),
         "idea": str(data.get("idea") or ""),
         "n_photos": n_photos,
+        "stale": bool(data.get("stale")),
         "script": script_view(data.get("script") if isinstance(data.get("script"), dict) else None),
     }
 

@@ -2274,6 +2274,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "narr-in" in js
     assert "Речь" in js
     assert "Кадр" in js
+    assert "stale" in js
     assert "go-auto-refresh" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
@@ -2498,6 +2499,8 @@ def test_autorolik_script_and_route() -> None:
     server_src = Path(__file__).with_name("webapp_server.py").read_text(encoding="utf-8")
     assert "def _spawn" in server_src
     assert "_JOBS.add" in server_src
+    assert "expire_all_dead_pendings" in server_src
+    assert "reconcile_pending" in server_src
     assert "create_task(_run_safe" not in server_src
     assert "send_photo_get_id" not in inspect.getsource(
         __import__("studio", fromlist=["run_studio_autorolik"]).run_studio_autorolik
@@ -2522,6 +2525,77 @@ def test_autorolik_script_and_route() -> None:
     assert patched["hook"] == "тихо"
     assert patched["scenes"][0]["narration"] == "новая озвучка"
     assert patched["scenes"][0]["face_scene"] == parsed["scenes"][0]["face_scene"]
+    from autorolik import (
+        STALE_SCRIPT_MSG,
+        clear_live,
+        expire_all_dead_pendings,
+        reconcile_pending,
+        save_pending,
+        set_live,
+        worker_alive,
+    )
+    import config as _cfg
+    import tempfile as _tf
+
+    old_data = _cfg.DATA_DIR
+    tmp = _tf.mkdtemp(prefix="vb-stale-")
+    _cfg.DATA_DIR = tmp
+    try:
+        uid = 6748280112
+        photo_dir = Path(tmp) / "autorolik" / f"{uid}_photos"
+        photo_dir.mkdir(parents=True)
+        photo = photo_dir / "p1.jpg"
+        photo.write_bytes(b"jpeg-keep")
+        save_pending(
+            uid,
+            {
+                "phase": "scripting",
+                "error": "",
+                "script": None,
+                "photo_paths": [str(photo)],
+                "consent_verified": True,
+                "idea": "тени города",
+                "source": "miniapp",
+            },
+        )
+        assert worker_alive(uid) is False
+        after = reconcile_pending(uid)
+        assert after is not None
+        assert after["phase"] == "stale"
+        assert STALE_SCRIPT_MSG in after["error"]
+        assert photo.is_file()
+        resume = Path("/tmp") / "not-this-test"
+        _ = resume
+        save_pending(
+            uid + 1,
+            {
+                "phase": "shooting",
+                "error": "",
+                "script": parsed,
+                "photo_paths": [str(photo)],
+                "consent_verified": True,
+            },
+        )
+        shot = reconcile_pending(uid + 1)
+        assert shot["phase"] == "review"
+        assert shot["stale"] is True
+        assert shot["script"]["title"] == parsed["title"]
+        save_pending(uid + 2, {"phase": "review", "script": parsed, "error": ""})
+        kept = reconcile_pending(uid + 2)
+        assert kept["phase"] == "review"
+        set_live(uid + 3, "scripting")
+        save_pending(uid + 3, {"phase": "scripting", "script": None, "error": ""})
+        live = reconcile_pending(uid + 3)
+        assert live["phase"] == "scripting"
+        clear_live(uid + 3)
+        expired_ids = expire_all_dead_pendings()
+        assert uid + 3 in expired_ids
+        assert reconcile_pending(uid + 3)["phase"] == "stale"
+    finally:
+        _cfg.DATA_DIR = old_data
+        clear_live(6748280112)
+        clear_live(6748280113)
+        clear_live(6748280115)
     from branding import BRAND_NAME, COVER_PROMPT, cover_candidates
 
     assert BRAND_NAME == "Успех 888"
