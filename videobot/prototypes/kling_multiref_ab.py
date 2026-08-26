@@ -87,6 +87,32 @@ async def _kling(session, payload: dict, dest: Path) -> None:
     log.info("kling saved %s bytes=%s", dest.name, dest.stat().st_size)
 
 
+def _url_kind(url: str) -> str:
+    u = (url or "").strip()
+    if u.startswith("data:"):
+        return f"data-uri len={len(u)}"
+    if "://" in u:
+        return u.split("?", 1)[0][:72]
+    return f"other len={len(u)}"
+
+
+def _payload_shape(body: dict) -> dict:
+    """Без data-URI/лиц на диск — только форма elements."""
+    els = []
+    for el in body.get("elements") or []:
+        refs = el.get("reference_image_urls") or []
+        frontal = el.get("frontal_image_url") or ""
+        els.append(
+            {
+                "frontal": _url_kind(frontal),
+                "n_refs": len(refs),
+                "refs": [_url_kind(u) for u in refs],
+                "frontal_in_refs": frontal in refs,
+            }
+        )
+    return {"duration": body.get("duration"), "elements": els}
+
+
 def _element(frontal_url: str, extra_angle_urls: list[str] | None = None) -> dict:
     """Один персонаж. На VPS импортируем из ветки; иначе дублируем хелпер, прод не трогаем."""
     try:
@@ -137,11 +163,11 @@ async def main_async(photo: Path, out: Path) -> int:
         b = dict(base)
         b["elements"] = [_element(src_url, extras)]
         (out / "payload_a.json").write_text(
-            json.dumps({"elements": a["elements"], "duration": "3"}, indent=2),
+            json.dumps(_payload_shape(a), indent=2),
             encoding="utf-8",
         )
         (out / "payload_b.json").write_text(
-            json.dumps({"elements": b["elements"], "duration": "3", "extra_files": extra_files}, indent=2),
+            json.dumps({**_payload_shape(b), "extra_files": extra_files}, indent=2),
             encoding="utf-8",
         )
         await _kling(session, a, out / "a_single.mp4")
