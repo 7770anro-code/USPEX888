@@ -986,6 +986,8 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "resume_work_dir" in bot_src
     assert "shoot_fail_text" in bot_src
     assert "В Mini App заново заходить не нужно" in bot_src
+    assert "mark_credits_pause(work)" in bot_src
+    assert "_user_photo_plates" in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -1020,6 +1022,9 @@ def test_credits_resume_keeps_artifacts() -> None:
             "n_scenes": 4,
             "quality": "optimal",
             "voice_name": "Сара",
+            "photo_file_id": "fid-a",
+            "photo_file_ids": ["fid-a", "fid-b"],
+            "kind": "autorolik",
         },
     )
     prog = resume_progress(work, 4)
@@ -1035,6 +1040,13 @@ def test_credits_resume_keeps_artifacts() -> None:
     kw = run_kwargs_from_checkpoint(work)
     assert kw is not None
     assert kw["idea"] == "лестница микро"
+    assert kw["photo_file_ids"] == ["fid-a", "fid-b"]
+    assert kw["kind"] == "autorolik"
+    from bot import _user_photo_plates
+
+    (work / "user_photo_2.jpg").write_bytes(b"x" * 100)
+    (work / "user_photo_1.jpg").write_bytes(b"x" * 100)
+    assert [p.name for p in _user_photo_plates(work)] == ["user_photo_1.jpg", "user_photo_2.jpg"]
     assert resume_work_dir(7).name == "7_resume"
     wipe_resume(7)
 

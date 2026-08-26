@@ -496,6 +496,7 @@ async def on_resume_callback(query: CallbackQuery, state: FSMContext) -> None:
         )
         return
     await state.clear()
+    mark_credits_pause(work)
     await msg.answer("Продолжаю с места остановки — сценарий и озвучку не пересобираю.")
     await _run_job(msg, bot=msg.bot, wipe=False, **kwargs)
 
@@ -2193,6 +2194,17 @@ async def _download_photo(bot: Bot, file_id: str, dest: Path) -> Path:
     return dest
 
 
+def _user_photo_plates(work: Path) -> list[Path]:
+    found: list[tuple[int, Path]] = []
+    for path in Path(work).glob("user_photo_*.jpg"):
+        tail = path.stem.rsplit("_", 1)[-1]
+        try:
+            found.append((int(tail), path))
+        except ValueError:
+            continue
+    return [p for _, p in sorted(found)]
+
+
 def tiktok_upload_filename(title: str = "") -> str:
     slug = re.sub(r"[^\w]+", "_", (title or "").strip(), flags=re.UNICODE)
     slug = re.sub(r"_+", "_", slug).strip("_")[:48]
@@ -2375,6 +2387,10 @@ async def _run_job(
                     if not dest.is_file():
                         await _download_photo(bot, fid, dest)
                     element_paths.append(dest)
+                photo_path = element_paths[0]
+            plates = _user_photo_plates(work)
+            if len(plates) > len(element_paths):
+                element_paths = plates
                 photo_path = element_paths[0]
             with job_scope(job_key):
                 video_path, script = await build_video(
