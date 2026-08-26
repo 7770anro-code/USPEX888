@@ -83,6 +83,13 @@ def smoke_routing() -> None:
     from pipeline import PipelineError
 
     assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
+    stamped = PipelineError(
+        "fal.ai: Invalid reference index 1",
+        "HTTP 422 input_value_error",
+        code="fal_keep_sidecar",
+    )
+    stamped.status = 422
+    assert keep_fal_sidecar(stamped) is False
     fal_src = Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
     assert "fal_try_resume" in fal_src
     assert "poll saved" in fal_src

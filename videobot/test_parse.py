@@ -1226,6 +1226,13 @@ def test_fal_resume_completed_uses_status_media() -> None:
     assert keep_fal_sidecar(PipelineError("fal.ai слишком долго генерирует. Остановил ожидание.")) is True
     assert keep_fal_sidecar(PipelineError("нет", code="credits")) is True
     assert keep_fal_sidecar(PipelineError("просто упало")) is False
+    stamped_422 = PipelineError(
+        "fal.ai: Invalid reference index 1 for image. Only 0 images provided.",
+        'HTTP 422: {"detail":[{"type":"input_value_error","msg":"Invalid reference index 1"}]}',
+        code="fal_keep_sidecar",
+    )
+    stamped_422.status = 422
+    assert keep_fal_sidecar(stamped_422) is False
 
     class _FakeResp:
         def __init__(self, status: int, body: str = "", blob: bytes = b"") -> None:
@@ -1417,6 +1424,75 @@ def test_fal_resume_dead_other_family_unlinks() -> None:
         import shutil
 
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # Прод 13:11 МСК: GET /status = COMPLETED, GET /response = 422 — не keep_sidecar.
+    tmp2 = tempfile.mkdtemp()
+    dest2 = Path(tmp2) / "c3.mp4"
+    side2 = dest2.with_suffix(dest2.suffix + ".fal_id")
+    side2.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d72-83b0-7703-91a7-76d6948a6774",
+                "model_id": KLING_I2V_PRO,
+                "status_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774/status"
+                ),
+                "response_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _CompletedThen422:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            if "/status" in str(url):
+                return _FakeResp(200, json.dumps({"status": "COMPLETED"}))
+            return _FakeResp(
+                422,
+                json.dumps(
+                    {
+                        "detail": [
+                            {
+                                "loc": ["body"],
+                                "msg": "Invalid reference index 1 for image. Only 0 images provided.",
+                                "type": "input_value_error",
+                            }
+                        ]
+                    }
+                ),
+            )
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    session2 = _CompletedThen422()
+    config.FAL_KEY = "test-fal-key"
+
+    async def _completed_422() -> None:
+        data = await fal_try_resume(
+            session2, dest2, used_image=True, expected_model=SEEDANCE_I2V
+        )
+        assert data is None
+        assert session2.posts == []
+        assert not side2.is_file()
+
+    try:
+        asyncio.run(_completed_422())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp2, ignore_errors=True)
 
 
 def test_seedance_wide_likeness_retries_kling() -> None:
@@ -2918,6 +2994,15 @@ def test_fal_kling_and_miniapp() -> None:
     assert "poll saved" in try_src
     assert "leave sidecar, skip resume" not in try_src
     assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
+    keep_src = inspect.getsource(keep_fal_sidecar)
+    assert "is_fal_validation_fail" in keep_src
+    stamped = PipelineError(
+        "fal.ai: Invalid reference index 1",
+        "HTTP 422 input_value_error",
+        code="fal_keep_sidecar",
+    )
+    stamped.status = 422
+    assert keep_fal_sidecar(stamped) is False
     fal_run_src = inspect.getsource(fal_run)
     assert "fal_try_resume" in fal_run_src
     assert "fal_keep_sidecar" in fal_run_src

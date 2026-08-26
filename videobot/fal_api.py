@@ -65,6 +65,21 @@ def _fal_json_msg(detail: str) -> str:
     return ""
 
 
+def is_fal_validation_fail(detail: str = "", *, status: int | None = None) -> bool:
+    """422 на валидации тела — джобы нет, GPU не шёл, sidecar можно снять."""
+    if status == 422:
+        return True
+    blob = (detail or "").lower()
+    return any(
+        w in blob
+        for w in (
+            "input_value_error",
+            "invalid reference index",
+            "value_error",
+        )
+    )
+
+
 def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
     from pipeline import (
         RUNWAY_SAFETY_MSG,
@@ -499,7 +514,9 @@ async def fal_poll(
                 err = fal_fail_error(
                     _clip(str(result.get("error")), 300), used_image=used_image
                 )
-                if err.code != "credits":
+                if err.code != "credits" and not is_fal_validation_fail(
+                    f"{err.detail or ''} {result.get('error')}", status=getattr(err, "status", None)
+                ):
                     err.code = err.code or "fal_keep_sidecar"
                 raise err
             if code >= 400:
@@ -507,7 +524,9 @@ async def fal_poll(
                     _clip(f"HTTP {code}: {raw}"), used_image=used_image
                 )
                 err.status = code
-                if err.code != "credits":
+                if err.code != "credits" and not is_fal_validation_fail(
+                    f"{err.detail or ''} {raw}", status=code
+                ):
                     err.code = err.code or "fal_keep_sidecar"
                 raise err
             raise PipelineError(
@@ -606,10 +625,15 @@ def fal_model_family(model_id: str) -> str:
 
 
 def keep_fal_sidecar(exc: BaseException) -> bool:
-    """COMPLETED/timeout/credits — sidecar жив, новый submit сожжёт уже оплаченное."""
+    """COMPLETED/timeout/credits — sidecar жив. 422 validation — мёртвая, новый submit."""
     if not isinstance(exc, PipelineError):
         return False
-    if getattr(exc, "code", "") in ("fal_keep_sidecar", "credits"):
+    if getattr(exc, "code", "") == "credits":
+        return True
+    blob = f"{exc.detail or ''} {exc.user_message or ''}"
+    if is_fal_validation_fail(blob, status=getattr(exc, "status", None)):
+        return False
+    if getattr(exc, "code", "") == "fal_keep_sidecar":
         return True
     return "слишком долго" in (exc.user_message or "").lower()
 
