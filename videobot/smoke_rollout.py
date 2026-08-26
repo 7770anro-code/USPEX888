@@ -98,6 +98,7 @@ def smoke_miniapp() -> None:
     assert "go-auto-refresh" in html
     assert "Обновить статус" in html
     assert "cover.jpg" in html
+    assert "Anro.AI" in html
     cover = Path(__file__).with_name("webapp").joinpath("cover.jpg")
     assert cover.is_file() and cover.stat().st_size > 1024
     js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")

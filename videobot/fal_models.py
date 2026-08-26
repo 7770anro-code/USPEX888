@@ -19,6 +19,8 @@ SEEDANCE_I2V = "bytedance/seedance-2.5/image-to-video"
 SEEDANCE_T2V = "bytedance/seedance-2.5/text-to-video"
 SEEDANCE_REF = "bytedance/seedance-2.5/reference-to-video"
 FLUX_STILL = "fal-ai/flux/schnell"
+FLUX_DEV = "fal-ai/flux/dev"
+FLUX_PRO = "fal-ai/flux-pro/v1.1"
 TOPAZ_VIDEO = "fal-ai/topaz/upscale/video"
 TOPAZ_IMAGE = "fal-ai/topaz/upscale/image"
 TOPAZ_INTERP = "topaz/interpolate/video"
@@ -158,13 +160,25 @@ def video_payload(model_id: str, prompt: str, image_url: str, seconds: int) -> d
     return kling_t2v_payload(prompt, seconds)
 
 
-def flux_still_payload(prompt: str, *, image_size: str = "portrait_16_9") -> dict[str, Any]:
+def flux_still_payload(
+    prompt: str,
+    *,
+    image_size: str = "portrait_16_9",
+    steps: int | None = None,
+    guidance: float | None = None,
+) -> dict[str, Any]:
     size = (image_size or "portrait_16_9").strip() or "portrait_16_9"
-    return {
+    body: dict[str, Any] = {
         "prompt": (prompt or "").strip()[:2000] or "cinematic still, vertical 9:16, photoreal",
         "image_size": size,
         "num_images": 1,
+        "output_format": "jpeg",
     }
+    if steps is not None:
+        body["num_inference_steps"] = max(1, min(50, int(steps)))
+    if guidance is not None:
+        body["guidance_scale"] = max(1.0, min(20.0, float(guidance)))
+    return body
 
 
 def topaz_video_payload(video_url: str, *, upscale: float = 2.0) -> dict[str, Any]:
