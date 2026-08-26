@@ -77,11 +77,15 @@ def smoke_routing() -> None:
     assert "@Image" not in k_wide["prompt"]
     assert k_wide["start_image_url"] == "https://example.com/wide_still.jpg"
     assert "elements" not in k_wide
+    seed_keep = seedance_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image1" in seed_keep["prompt"]
     from fal_api import fal_try_resume, keep_fal_sidecar
     from pipeline import PipelineError
 
     assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
-    assert "fal_try_resume" in Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
+    fal_src = Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
+    assert "fal_try_resume" in fal_src
+    assert "poll saved" in fal_src
     seed = seedance_i2v_payload("walk", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False

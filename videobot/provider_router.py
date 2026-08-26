@@ -125,6 +125,7 @@ async def render_clip(
                 if photo_lock or elements or route_mode in ("autorolik_face", "real_photo"):
                     log.warning("skip seedance for FACE/photo_lock — partner rejects likenesses")
                     continue
+                # WIDE happy-path: промпт как есть, с @Image1. Стрип только у Kling.
                 return await client.generate_seedance(
                     session,
                     prompt,

@@ -1332,6 +1332,93 @@ def test_fal_resume_completed_uses_status_media() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_fal_resume_dead_other_family_unlinks() -> None:
+    """FAILED Kling sidecar на WIDE-клипе: poll, снять, Seedance может слать заново."""
+    import asyncio
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import config
+    from fal_api import fal_try_resume
+    from fal_models import KLING_I2V_PRO, SEEDANCE_I2V
+
+    class _FakeResp:
+        def __init__(self, status: int, body: str = "") -> None:
+            self.status = status
+            self._body = body
+
+        async def text(self) -> str:
+            return self._body
+
+        async def read(self) -> bytes:
+            return self._body.encode("utf-8")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            return _FakeResp(
+                200,
+                json.dumps(
+                    {
+                        "status": "FAILED",
+                        "error": "Invalid reference index 1 for image. Only 0 images provided.",
+                    }
+                ),
+            )
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    old_key = config.FAL_KEY
+    config.FAL_KEY = "test-fal-key"
+    tmp = tempfile.mkdtemp()
+    dest = Path(tmp) / "c3.mp4"
+    side = dest.with_suffix(dest.suffix + ".fal_id")
+    side.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d72-83b0-7703-91a7-76d6948a6774",
+                "model_id": KLING_I2V_PRO,
+                "status_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774/status"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = _FakeSession()
+
+    async def _go() -> None:
+        data = await fal_try_resume(
+            session, dest, used_image=True, expected_model=SEEDANCE_I2V
+        )
+        assert data is None
+        assert session.posts == []
+        assert session.gets
+        assert not side.is_file()
+
+    try:
+        asyncio.run(_go())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_seedance_wide_likeness_retries_kling() -> None:
     """WIDE 422 likeness Seedance → Kling I2V без @Image1, still как start_image. FACE Kling likeness — ошибка."""
     import asyncio
@@ -1409,6 +1496,42 @@ def test_seedance_wide_likeness_retries_kling() -> None:
 
             shutil.rmtree(tmp, ignore_errors=True)
 
+    async def _wide_seedance_ok() -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c5.mp4"
+        inst = AsyncMock()
+
+        async def seed_ok(*_a, **_k):
+            dest.write_bytes(b"s" * 12_000)
+            return dest
+
+        inst.generate_seedance = AsyncMock(side_effect=seed_ok)
+        inst.generate_kling = AsyncMock(side_effect=AssertionError("WIDE Seedance ok — Kling must not run"))
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                out = await render_clip(
+                    None,
+                    seed_prompt,
+                    5,
+                    dest,
+                    prompt_image=still,
+                    route_mode="autorolik_wide",
+                    photo_lock=False,
+                )
+            assert out == dest
+            assert inst.generate_seedance.await_count == 1
+            assert inst.generate_kling.await_count == 0
+            assert inst.generate_seedance.await_args.args[1] == seed_prompt
+            assert "@Image1" in inst.generate_seedance.await_args.args[1]
+            assert inst.generate_seedance.await_args.args[2] == still
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
     async def _face_kling_still_raises() -> None:
         tmp = tempfile.mkdtemp()
         dest = Path(tmp) / "c4.mp4"
@@ -1448,6 +1571,7 @@ def test_seedance_wide_likeness_retries_kling() -> None:
     asyncio.run(_wide("autorolik_wide"))
     asyncio.run(_wide("synthetic_multi_scene"))
     asyncio.run(_wide("night_pipeline"))
+    asyncio.run(_wide_seedance_ok())
     asyncio.run(_face_kling_still_raises())
 
 
@@ -2481,6 +2605,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert strip_seedance_image_refs("@Element1 is the same person. walk") == (
         "@Element1 is the same person. walk"
     )
+    seed_keep = seedance_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image1" in seed_keep["prompt"]
+    assert seed_keep["image_url"] == "https://example.com/wide_still.jpg"
     seed = seedance_i2v_payload("a quiet street", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False
@@ -2777,6 +2904,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "to_fal_https_url" in seed_fn
     assert "converted_map" in seed_fn
     assert "fal_try_resume" in seed_fn
+    assert "strip_seedance_image_refs" not in seed_fn
     assert seed_fn.index("fal_try_resume") < seed_fn.index("to_fal_https_url")
     from fal_api import fal_side_payload, fal_run, to_fal_https_url
 
@@ -2787,6 +2915,8 @@ def test_fal_kling_and_miniapp() -> None:
     try_src = inspect.getsource(fal_try_resume)
     assert "fal resume dead" in try_src
     assert "other model" in try_src
+    assert "poll saved" in try_src
+    assert "leave sidecar, skip resume" not in try_src
     assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
     fal_run_src = inspect.getsource(fal_run)
     assert "fal_try_resume" in fal_run_src
@@ -3603,6 +3733,7 @@ if __name__ == "__main__":
     test_credits_resume_keeps_artifacts()
     test_owner_resume_keeps_autorolik_artifacts()
     test_fal_resume_completed_uses_status_media()
+    test_fal_resume_dead_other_family_unlinks()
     test_seedance_wide_likeness_retries_kling()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()

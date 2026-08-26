@@ -638,12 +638,14 @@ async def fal_try_resume(
         and expected
         and fal_model_family(saved_model) != fal_model_family(expected)
     ):
+        # Мёртвый Kling sidecar после WIDE fallback не должен блокировать
+        # Seedance (и наоборот). Poll сохранённой камеры: COMPLETED — забрать,
+        # FAILED — снять sidecar и дать текущей камере новый submit.
         log.info(
-            "fal sidecar other model saved=%s now=%s — leave sidecar, skip resume",
+            "fal sidecar other model saved=%s now=%s — poll saved",
             saved_model,
             expected,
         )
-        return None
     model_id = saved_model or expected
     if not model_id:
         return None
