@@ -2383,6 +2383,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "FAL_ONLY_MODES" in router_src
     assert "is_fal_only_mode" in router_src
     assert "if fal_only:" in router_src
+    assert "слишком долго" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
@@ -2400,16 +2401,19 @@ def test_fal_kling_and_miniapp() -> None:
     assert "legacy_runway" not in ROUTING["synthetic_multi_scene"]
     assert "legacy_runway" not in ROUTING["night_pipeline"]
     assert "legacy_runway" not in ROUTING["montage_generate"]
-    assert "legacy_runway" in ROUTING["autorolik_face"]
+    assert "legacy_runway" not in ROUTING["autorolik_face"]
+    assert "legacy_runway" not in ROUTING["autorolik_wide"]
     assert chain_for("real_photo") == ["kling", "seedance"]
     assert chain_for("synthetic_multi_scene") == ["seedance", "kling"]
     assert chain_for("night_pipeline") == ["seedance", "kling"]
+    assert chain_for("autorolik_face") == ["kling", "seedance"]
     old_prov = config.VIDEO_PROVIDER
     config.VIDEO_PROVIDER = "runway"
     try:
         assert "legacy_runway" not in chain_for("real_photo")
         assert "legacy_runway" not in chain_for("night_pipeline")
-        assert chain_for("autorolik_face") == ["legacy_runway"]
+        assert "legacy_runway" not in chain_for("autorolik_face")
+        assert chain_for("autorolik_face")[0] == "kling"
     finally:
         config.VIDEO_PROVIDER = old_prov
     from fal_api import FAL_CREDITS_MSG

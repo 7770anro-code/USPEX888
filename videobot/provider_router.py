@@ -15,14 +15,16 @@ from providers.legacy.runway_client import RunwayProvider
 
 log = logging.getLogger("videobot")
 
-# 1 клик / своё фото / ночь / вайб монтажа — только fal.ai (Kling+Seedance).
-# Авторолик FACE/WIDE пока может иметь тихий legacy_runway в хвосте.
+# Съёмка ролика (1 клик / своё фото / ночь / вайб / Авторолик) — только fal.ai.
+# legacy Runway остаётся в файле providers/legacy/ для VIDEO_PROVIDER=runway и Act Two.
 FAL_ONLY_MODES = frozenset(
     {
         "real_photo",
         "synthetic_multi_scene",
         "night_pipeline",
         "montage_generate",
+        "autorolik_face",
+        "autorolik_wide",
     }
 )
 
@@ -31,8 +33,8 @@ ROUTING: dict[str, list[str]] = {
     "synthetic_multi_scene": ["seedance", "kling"],
     "night_pipeline": ["seedance", "kling"],
     "montage_generate": ["seedance", "kling"],
-    "autorolik_face": ["kling", "seedance", "legacy_runway"],
-    "autorolik_wide": ["seedance", "kling", "legacy_runway"],
+    "autorolik_face": ["kling", "seedance"],
+    "autorolik_wide": ["seedance", "kling"],
 }
 
 MODE_DEFAULT = "synthetic_multi_scene"
@@ -144,6 +146,9 @@ async def render_clip(
             )
         except PipelineError as exc:
             last = exc
+            if "слишком долго" in (exc.user_message or "").lower():
+                # Kling/Seedance ещё IN_PROGRESS — не бросать в Runway, sidecar жив для resume.
+                raise
             detail = str(exc.detail or exc.user_message or "")
             status = getattr(exc, "status", None)
             if engine in ("kling", "seedance") and (
