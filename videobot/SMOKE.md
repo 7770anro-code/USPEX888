@@ -2,6 +2,8 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-26 (13):** hotfix Kling `reference_image_urls` + текст 422 (`1760a95`). Рестарт только `videobot.service` (PID 187107 → 187389, 01:38 UTC). USPEX 91832 и VECTOR 67680 без изменений. Съёмка 01:31: Kling submit `01a03bb1-c3cb-7f91-bb7c-95f2ef332f6f` + HTTP 422 за ~1 с (`Either frontal_image_url and reference_image_urls or video_url must be provided`, https `v3b.fal.media` уже был). Seedance submit `01a03bb1-cbb2-7262-9d1e-92e75cd77c59` + HTTP 422 `content_policy_violation` / likenesses / `partner_validation_failed`. Чат: голое «fal.ai не смог выполнить задачу» (`fal_fail_error` не брал JSON `msg`). GPU-инференс скорее всего не шёл. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK.
+
 **Деплой 2026-08-26 (12):** hotfix Kling `elements` https (`fd8bca4`). Рестарт только `videobot.service` (PID 186541 → 187107). USPEX 91832 и VECTOR 67680 без изменений. Съёмка 01:20 и 01:22: Kling submit + HTTP 422 (`frontal_image_url` = data URI), Seedance не submit (poll того же request_id), Runway 400 no credits. Готового I2V не было — GPU-инференс скорее всего не шёл.
 
 **Деплой 2026-08-26 (11):** hotfix sendPhoto >10 МБ (`c6ebae3`): сжатие превью ffmpeg. Рестарт только `videobot.service` (PID 186193 → 186541). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. Прод-попытки 01:01 и 01:03 упали на Telegram Bad Request (11 308 176 байт / лимит 10 485 760) **до** Grok и **до** fal. Kling/Seedance не вызывались.
