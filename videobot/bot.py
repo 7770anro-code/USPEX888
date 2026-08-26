@@ -10,6 +10,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -173,7 +174,8 @@ HOW_IT_WORKS = (
     "9) «🎞 Авторолик»: до 6 фото друзей + согласие → 4–8 сцен хайпового монтажа UKRAINIAN CORE. "
     "FACE (крупный план друга) — Kling @ElementN; WIDE (дрон над городом, колонна в тумане, "
     "решётка фар, силуэты в контровом) — Seedance, лицо не главное, камеры больше. "
-    "Сначала подтверждаешь или правишь сценарий в чате, потом съёмка.\n"
+    "В Mini App сценарий, правки, «Снять» и прогресс по сценам остаются на экране; "
+    "в чат приходит готовое видео. Из обычного меню бота тот же сценарий можно подтвердить кнопками в чате.\n"
     "10) Меню Mini App: «🎬 Открыть меню» — семь категорий (создать / авторолик / монтаж / улучшить / "
     "примерка / мой голос / мои видео). Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
@@ -2226,6 +2228,24 @@ async def _send_video(message: Message, path: Path, caption: str, *, filename: s
         log.warning("send_document extra: %s", exc)
 
 
+class MiniChat:
+    """Чат без промежуточных статус-сообщений: только send_video / редкий текст ошибки."""
+
+    def __init__(self, bot: Bot, chat_id: int) -> None:
+        self.bot = bot
+        self.chat = SimpleNamespace(id=int(chat_id))
+
+    async def answer(self, text: str = "", **kwargs: Any) -> Any:
+        markup = kwargs.get("reply_markup")
+        return await self.bot.send_message(self.chat.id, (text or "")[:3900], reply_markup=markup)
+
+    async def answer_video(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.bot.send_video(self.chat.id, *args, **kwargs)
+
+    async def answer_document(self, *args: Any, **kwargs: Any) -> Any:
+        return await self.bot.send_document(self.chat.id, *args, **kwargs)
+
+
 async def _run_job(
     message: Message,
     *,
@@ -2252,16 +2272,22 @@ async def _run_job(
     dynamic_pacing: bool = False,
     route_mode: str | None = None,
     photo_file_ids: list[str] | None = None,
+    photo_paths: list[str] | None = None,
     script_override: dict[str, Any] | None = None,
+    quiet: bool = False,
 ) -> None:
     ids = [str(x) for x in (photo_file_ids or []) if x]
     if photo_file_id and str(photo_file_id) not in ids:
         ids = [str(photo_file_id)] + ids
     blocked = photo_start_blocked(ids[0] if ids else None, consent_verified)
     if blocked:
+        if quiet:
+            raise PipelineError(blocked)
         await message.answer(blocked, reply_markup=main_menu())
         return
     if BUSY.locked():
+        if quiet:
+            raise PipelineError("⏳ Я уже снимаю другой ролик. Подожди готовое видео.")
         await message.answer(
             "⏳ Я уже снимаю другой ролик. Напиши ещё раз, когда пришлю готовое видео.",
             reply_markup=main_menu(),
@@ -2271,6 +2297,8 @@ async def _run_job(
     file_lock = JobLock()
     if not file_lock.acquire():
         BUSY.release()
+        if quiet:
+            raise PipelineError("⏳ Сейчас уже идёт съёмка. Напиши позже.")
         await message.answer(
             "⏳ Сейчас уже идёт съёмка. Напиши позже.",
             reply_markup=main_menu(),
@@ -2311,21 +2339,36 @@ async def _run_job(
     )
     try:
         start_job(job_key, chat_id=message.chat.id, title="", scene_total=n_scenes)
-        status = await message.answer(
-            format_status(get_job(job_key)),
-            reply_markup=live_kb(job_key),
-        )
-        set_message(job_key, status.message_id)
+        status = None
+        if quiet:
+            async def progress(_text: str) -> None:
+                return
+        else:
+            status = await message.answer(
+                format_status(get_job(job_key)),
+                reply_markup=live_kb(job_key),
+            )
+            set_message(job_key, status.message_id)
 
-        async def progress(text: str) -> None:
-            snap = get_job(job_key)
-            alive = bool(snap and not snap.get("done"))
-            await edit_live_message(status, job_key, text, alive=alive)
+            async def progress(text: str) -> None:
+                snap = get_job(job_key)
+                alive = bool(snap and not snap.get("done"))
+                await edit_live_message(status, job_key, text, alive=alive)
 
         try:
             photo_path = None
             element_paths: list[Path] = []
-            if ids and consent_verified:
+            local = [Path(p) for p in (photo_paths or []) if p]
+            local = [p for p in local if p.is_file()]
+            if local and consent_verified:
+                work.mkdir(parents=True, exist_ok=True)
+                for i, src in enumerate(local, start=1):
+                    dest = work / f"user_photo_{i}.jpg"
+                    if src.resolve() != dest.resolve():
+                        shutil.copy2(src, dest)
+                    element_paths.append(dest)
+                photo_path = element_paths[0]
+            elif ids and consent_verified:
                 work.mkdir(parents=True, exist_ok=True)
                 for i, fid in enumerate(ids, start=1):
                     dest = work / f"user_photo_{i}.jpg"
@@ -2358,10 +2401,11 @@ async def _run_job(
                     element_images=element_paths or None,
                 )
             preview = format_script(script)
-            try:
-                await message.answer(preview[:3500])
-            except Exception:
-                pass
+            if not quiet:
+                try:
+                    await message.answer(preview[:3500])
+                except Exception:
+                    pass
             q_label = (quality_catalog().get(quality) or quality_catalog()["optimal"])["label"]
             caption = (script.get("title") or "Готово") + f" · {voice_name} · {q_label} · 9:16"
             still_name = str(script.get("runway_still_model") or "").strip()
@@ -2409,10 +2453,11 @@ async def _run_job(
                 filename=tiktok_upload_filename(title),
             )
             finish_job(job_key, label="Готово — видео выше.")
-            try:
-                await status.edit_text("✅ Черновик готов — видео выше.")
-            except Exception:
-                pass
+            if status is not None:
+                try:
+                    await status.edit_text("✅ Черновик готов — видео выше.")
+                except Exception:
+                    pass
             n_rev = len(revisions or [])
             if n_rev:
                 hint = f"Учёл правку #{n_rev}. Можно ещё раз улучшить или зафиксировать финал."
@@ -2423,7 +2468,8 @@ async def _run_job(
             usage = format_runway_usage(script)
             if usage:
                 hint = usage + "\n\n" + hint
-            await message.answer(hint, reply_markup=result_kb(can_finalize=True))
+            if not quiet:
+                await message.answer(hint, reply_markup=result_kb(can_finalize=True))
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)

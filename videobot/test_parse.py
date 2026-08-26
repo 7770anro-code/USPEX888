@@ -1330,6 +1330,12 @@ def test_live_status_runway_fields() -> None:
     text = live.format_status(live.get_job("m42"))
     assert "сцена 2 из 4" in text
     assert "20%" in text
+    payload = live.status_payload(live.get_job("m42"))
+    assert payload["active"] is True
+    assert payload["scene_n"] == 2
+    assert payload["scene_total"] == 4
+    assert payload["scenes"][1]["current"] is True
+    assert "Runway" in (payload["scenes"][1]["label"] or "")
     assert "кадр 17" not in text
     assert "GET /v1/tasks" in text
     no_pct = dict(live.get_job("m42") or {})
@@ -2201,6 +2207,10 @@ def test_fal_kling_and_miniapp() -> None:
             paths.add(info["formatter"])
     assert "/api/quick" in paths
     assert "/api/autorolik" in paths
+    assert "/api/autorolik/status" in paths
+    assert "/api/autorolik/revise" in paths
+    assert "/api/autorolik/shoot" in paths
+    assert "/api/autorolik/cancel" in paths
     assert "/api/upscale" in paths
     assert "/api/tryon" in paths
     assert "/api/clone" in paths
@@ -2219,6 +2229,10 @@ def test_fal_kling_and_miniapp() -> None:
             assert data.get("ok") is False
             resp2 = await client.post("/api/autorolik")
             assert resp2.status == 403
+            resp3 = await client.post("/api/autorolik/status")
+            assert resp3.status == 403
+            resp4 = await client.post("/api/autorolik/shoot")
+            assert resp4.status == 403
 
     asyncio.run(_unsigned_post_is_403())
 
@@ -2235,6 +2249,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/interpolate" in js
     assert "/api/history" in js
     assert "/api/autorolik" in js
+    assert "/api/autorolik/status" in js
+    assert "/api/autorolik/shoot" in js
+    assert "go-auto-shoot" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
     assert "--live" in smoke
@@ -2244,7 +2261,10 @@ def test_fal_kling_and_miniapp() -> None:
     assert "sendData" not in js
     assert html.count('class="sub"') == 7
     assert "go-autorolik" in html
+    assert "go-auto-shoot" in html
+    assert "go-auto-edit" in html
     assert "Авторолик" in html
+    assert "готовое видео придёт в чат" in html.lower() or "Готовое видео придёт в чат" in html
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media
 
@@ -2426,6 +2446,8 @@ def test_autorolik_script_and_route() -> None:
     bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
     assert "седьмое не беру" in bot_src
     assert "MAX_PHOTOS" in bot_src
+    assert "class MiniChat" in bot_src
+    assert "quiet: bool" in bot_src
     pipe = inspect.getsource(build_video)
     assert "autorolik_wide" in pipe
     assert "kling_api_prompt" in pipe
@@ -2434,7 +2456,21 @@ def test_autorolik_script_and_route() -> None:
     assert "character_lock=False" in pipe
     studio_src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
     assert "run_studio_autorolik" in studio_src
-    assert "review_kb" in studio_src
+    assert "prepare_autorolik_photos" in studio_src
+    assert "quiet=True" in studio_src
+    assert "review_kb" not in studio_src
+    assert "send_photo_get_id" not in inspect.getsource(
+        __import__("studio", fromlist=["run_studio_autorolik"]).run_studio_autorolik
+    )
+    from autorolik import pending_view, review_kb, script_view
+
+    viewed = script_view(parsed)
+    assert viewed["n_scenes"] == 4
+    assert viewed["scenes"][0]["face"] is True
+    assert "Kling" in viewed["scenes"][0]["tag"]
+    assert viewed["scenes"][1]["face"] is False
+    assert pending_view({"phase": "review", "script": parsed, "photo_paths": ["a.jpg"]})["phase"] == "review"
+    assert review_kb().inline_keyboard
     assert "Публичных лиц" in SCRIPT_SYSTEM
     assert "политики" in SCRIPT_SYSTEM
     assert "подлежащее" in SCRIPT_SYSTEM
@@ -2638,6 +2674,14 @@ def test_webapp_autorolik_formdata_hmac() -> None:
                 data = await resp.json()
                 assert resp.status != 403, data
                 assert data.get("ok") is True
+                assert data.get("close") is False
+                status_body = FormData()
+                status_body.add_field("initData", signed)
+                st = await client.post("/api/autorolik/status", data=status_body)
+                st_data = await st.json()
+                assert st.status == 200, st_data
+                assert st_data.get("ok") is True
+                assert "pending" in st_data
         finally:
             config.VIDEOBOT_TELEGRAM_TOKEN = old
 

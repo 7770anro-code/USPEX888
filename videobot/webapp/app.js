@@ -20,7 +20,7 @@
   const TIPS = {
     home: "Нажми карточку. Под ней написано, что она делает.",
     create: "Напиши тему двумя словами и жми «Снять».",
-    autorolik: "До 6 фото + галочка. Сценарий подтвердишь в чате.",
+    autorolik: "До 6 фото + галочка. Сценарий и съёмка здесь, видео — в чат.",
     cut: "Напиши вайб. Своё видео режется в чате бота.",
     improve: "Кинь файл: видео — 4K или слоу-мо, фото — починить.",
     tryon: "Фото тебя + фото одежды + галочка.",
@@ -76,6 +76,7 @@
   }
 
   function showHome() {
+    stopAutoPoll();
     document.querySelectorAll(".panel").forEach((p) => p.classList.remove("is-on"));
     if (homeEl) homeEl.classList.remove("is-off");
     hideTip();
@@ -87,6 +88,9 @@
       p.classList.toggle("is-on", p.id === "panel-" + name);
     });
     showTipOnce(name);
+    if (name === "autorolik") {
+      restoreAutorolik();
+    }
   }
 
   if (tipEl) {
@@ -122,6 +126,166 @@
     showStatus(data.message || "Готово. Смотри чат с ботом.", "ok");
     if (tg && tg.close && data.close) {
       setTimeout(() => tg.close(), 1200);
+    }
+  }
+
+  function autoForm(extra) {
+    const body = new FormData();
+    body.append("initData", initData);
+    Object.entries(extra || {}).forEach(([k, v]) => body.append(k, v));
+    return body;
+  }
+
+  let autoTimer = 0;
+
+  function stopAutoPoll() {
+    if (autoTimer) {
+      clearInterval(autoTimer);
+      autoTimer = 0;
+    }
+  }
+
+  function startAutoPoll() {
+    stopAutoPoll();
+    autoTimer = setInterval(() => {
+      refreshAutorolik().catch(() => {});
+    }, 1600);
+  }
+
+  function setHidden(el, hide) {
+    if (!el) return;
+    el.hidden = !!hide;
+  }
+
+  function renderScript(script) {
+    const titleEl = document.getElementById("auto-title");
+    const hookEl = document.getElementById("auto-hook");
+    const list = document.getElementById("auto-scenes");
+    if (!titleEl || !list) return;
+    titleEl.textContent = (script && script.title) || "Авторолик";
+    if (hookEl) hookEl.textContent = script && script.hook ? "Хук: " + script.hook : "";
+    list.innerHTML = "";
+    (script && script.scenes ? script.scenes : []).forEach((s) => {
+      const li = document.createElement("li");
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = (s.n || "") + ". " + (s.tag || "");
+      const narr = document.createElement("p");
+      narr.className = "narr";
+      narr.textContent = s.narration || "";
+      const vis = document.createElement("p");
+      vis.className = "vis";
+      vis.textContent = s.visual || "";
+      li.appendChild(tag);
+      li.appendChild(narr);
+      li.appendChild(vis);
+      list.appendChild(li);
+    });
+  }
+
+  function renderShoot(shoot) {
+    const box = document.getElementById("auto-progress");
+    const label = document.getElementById("auto-progress-label");
+    const list = document.getElementById("auto-progress-scenes");
+    if (!box || !list) return;
+    const scenes = (shoot && shoot.scenes) || [];
+    const n = (shoot && shoot.scene_n) || 0;
+    const total = (shoot && shoot.scene_total) || scenes.length;
+    if (label) {
+      const head = shoot && shoot.label ? shoot.label : "Снимаю…";
+      label.textContent = total ? head + " · сцена " + n + " из " + total : head;
+    }
+    list.innerHTML = "";
+    scenes.forEach((s) => {
+      const li = document.createElement("li");
+      if (s.current) li.classList.add("is-now");
+      if (s.done) li.classList.add("is-done");
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "Сцена " + s.n + (s.current ? " · сейчас" : s.done ? " · готово" : "");
+      const narr = document.createElement("p");
+      narr.className = "narr";
+      narr.textContent = s.label || "ждёт";
+      li.appendChild(tag);
+      li.appendChild(narr);
+      list.appendChild(li);
+    });
+  }
+
+  function showAutoPhase(phase, pending, shoot) {
+    const setup = document.getElementById("auto-setup");
+    const review = document.getElementById("auto-review");
+    const progress = document.getElementById("auto-progress");
+    const script = pending && pending.script;
+    const hasScenes = script && script.scenes && script.scenes.length;
+    if (phase === "shooting" || (shoot && shoot.active && !shoot.done && !shoot.failed)) {
+      setHidden(setup, true);
+      setHidden(review, true);
+      setHidden(progress, false);
+      renderShoot(shoot);
+      startAutoPoll();
+      return;
+    }
+    if (phase === "done" && shoot && shoot.done && !shoot.failed) {
+      setHidden(setup, true);
+      setHidden(review, true);
+      setHidden(progress, false);
+      renderShoot(shoot);
+      stopAutoPoll();
+      showStatus("Готово. Видео в чате с ботом.", "ok");
+      return;
+    }
+    if ((phase === "review" || phase === "error") && hasScenes) {
+      setHidden(setup, true);
+      setHidden(review, false);
+      setHidden(progress, true);
+      renderScript(script);
+      stopAutoPoll();
+      if (phase === "error" && pending && pending.error) {
+        showStatus(pending.error, "err");
+      }
+      return;
+    }
+    if (phase === "scripting") {
+      setHidden(setup, false);
+      setHidden(review, true);
+      setHidden(progress, true);
+      startAutoPoll();
+      return;
+    }
+    setHidden(setup, false);
+    setHidden(review, true);
+    setHidden(progress, true);
+    stopAutoPoll();
+  }
+
+  async function refreshAutorolik() {
+    if (!initData) return;
+    const resp = await fetch("/api/autorolik/status", { method: "POST", body: autoForm() });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      if (data.error) showStatus(data.error, "err");
+      return data;
+    }
+    const pending = data.pending || {};
+    const shoot = data.shoot || {};
+    const phase = data.phase || pending.phase || "";
+    if (phase === "scripting") {
+      showStatus(data.message || "Пишу сценарий…", "");
+    } else if (phase === "shooting") {
+      showStatus(shoot.label || data.message || "Снимаю…", "");
+    } else if (phase === "error" && pending.error) {
+      showStatus(pending.error, "err");
+    }
+    showAutoPhase(phase, pending, shoot);
+    return data;
+  }
+
+  async function restoreAutorolik() {
+    try {
+      await refreshAutorolik();
+    } catch (_e) {
+      /* offline */
     }
   }
 
@@ -175,6 +339,56 @@
       photos["photo" + (i + 1)] = f;
     });
     await postJob("/api/autorolik", { topic, consent: "1" }, photos);
+    startAutoPoll();
+    await refreshAutorolik();
+  });
+
+  bind("go-auto-shoot", async () => {
+    if (!initData) {
+      showStatus("Открой меню из Telegram — иначе нет подписи Mini App.", "err");
+      return;
+    }
+    showStatus("Снимаю. Прогресс здесь, видео — в чат.");
+    const resp = await fetch("/api/autorolik/shoot", { method: "POST", body: autoForm() });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      showStatus(data.error || "Не вышло снять.", "err");
+      return;
+    }
+    startAutoPoll();
+    await refreshAutorolik();
+  });
+
+  bind("go-auto-edit", async () => {
+    const notes = (document.getElementById("auto-notes").value || "").trim();
+    if (notes.length < 3) {
+      showStatus("Напиши правку парой слов.", "err");
+      return;
+    }
+    showStatus("Переписываю сценарий…");
+    const resp = await fetch("/api/autorolik/revise", {
+      method: "POST",
+      body: autoForm({ notes }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      showStatus(data.error || "Не вышло поправить.", "err");
+      return;
+    }
+    startAutoPoll();
+    await refreshAutorolik();
+  });
+
+  bind("go-auto-cancel", async () => {
+    const resp = await fetch("/api/autorolik/cancel", { method: "POST", body: autoForm() });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      showStatus(data.error || "Не вышло отменить.", "err");
+      return;
+    }
+    stopAutoPoll();
+    showAutoPhase("", {}, {});
+    showStatus("Отменил. Можно собрать сценарий заново.", "ok");
   });
 
   bind("go-vibe", async () => {

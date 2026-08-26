@@ -420,6 +420,32 @@ async def run_studio_restore(bot: Bot, user_id: int, data: bytes, filename: str,
         shutil.rmtree(work, ignore_errors=True)
 
 
+async def prepare_autorolik_photos(user_id: int, photos: list[bytes]) -> list[str]:
+    from autorolik import MAX_PHOTOS, photos_dir
+
+    blobs = [p for p in (photos or []) if p]
+    if not blobs:
+        raise PipelineError("Нужно хотя бы одно фото друга.")
+    if len(blobs) > MAX_PHOTOS:
+        raise PipelineError(f"Максимум {MAX_PHOTOS} фото.")
+    folder = photos_dir(int(user_id))
+    for old in folder.glob("p*.jpg"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    paths: list[str] = []
+    for i, data in enumerate(blobs, start=1):
+        raw = write_upload(folder / f"p{i}_raw.jpg", data, f"p{i}.jpg")
+        pic = await asyncio.to_thread(compress_telegram_photo, raw, folder / f"p{i}.jpg")
+        paths.append(str(pic))
+        try:
+            raw.unlink()
+        except OSError:
+            pass
+    return paths
+
+
 async def run_studio_autorolik(
     bot: Bot,
     user_id: int,
@@ -428,54 +454,165 @@ async def run_studio_autorolik(
     consent: bool,
     topic: str = "",
 ) -> None:
-    from autorolik import (
-        MAX_PHOTOS,
-        format_script_preview,
-        grok_autorolik,
-        review_kb,
-        save_pending,
-    )
+    """Собрать сценарий для Mini App. В чат ничего не пишем — только pending + JSON API."""
+    from autorolik import grok_autorolik, save_pending
 
+    _ = bot
     if not consent:
         raise PipelineError("Без согласия фото людей не использую.")
-    blobs = [p for p in (photos or []) if p]
-    if not blobs:
-        raise PipelineError("Нужно хотя бы одно фото друга.")
-    if len(blobs) > MAX_PHOTOS:
-        raise PipelineError(f"Максимум {MAX_PHOTOS} фото.")
-    work = studio_work(user_id, "autorolik")
-    ids: list[str] = []
+    uid = int(user_id)
+    idea = (topic or "").strip()
+    save_pending(
+        uid,
+        {
+            "phase": "scripting",
+            "error": "",
+            "script": None,
+            "photo_paths": [],
+            "consent_verified": True,
+            "idea": idea,
+            "source": "miniapp",
+        },
+    )
     try:
-        for i, data in enumerate(blobs, start=1):
-            raw = write_upload(work / f"p{i}_raw.jpg", data, f"p{i}.jpg")
-            pic = await asyncio.to_thread(compress_telegram_photo, raw, work / f"p{i}.jpg")
-            file_id = await send_photo_get_id(
-                bot,
-                user_id,
-                pic,
-                f"Фото {i}/{len(blobs)} для Авторолика",
-            )
-            ids.append(file_id)
-        await send_chat_text(
-            bot,
-            user_id,
-            "⏳ Пишу сценарий Авторолика. Снимать буду после кнопки «Снять» в чате.",
+        paths = await prepare_autorolik_photos(uid, photos)
+        save_pending(
+            uid,
+            {
+                "phase": "scripting",
+                "error": "",
+                "script": None,
+                "photo_paths": paths,
+                "consent_verified": True,
+                "idea": idea,
+                "source": "miniapp",
+            },
         )
         timeout = aiohttp.ClientTimeout(total=120)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            script = await grok_autorolik(session, n_photos=len(ids), idea=topic)
+            script = await grok_autorolik(session, n_photos=len(paths), idea=idea)
         save_pending(
-            int(user_id),
+            uid,
             {
+                "phase": "review",
+                "error": "",
                 "script": script,
-                "photo_file_ids": ids,
+                "photo_paths": paths,
                 "consent_verified": True,
-                "idea": (topic or "").strip(),
+                "idea": idea,
+                "source": "miniapp",
             },
         )
-        await bot.send_message(int(user_id), format_script_preview(script)[:3500], reply_markup=review_kb())
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    except Exception as exc:
+        from autorolik import load_pending
+
+        prev = load_pending(uid) or {}
+        prev["phase"] = "error"
+        prev["error"] = job_error_text(exc)
+        save_pending(uid, prev)
+        raise
+
+
+async def run_studio_autorolik_revise(user_id: int, notes: str) -> None:
+    from autorolik import grok_autorolik, load_pending, save_pending
+
+    uid = int(user_id)
+    pending = load_pending(uid) or {}
+    if pending.get("phase") == "shooting":
+        raise PipelineError("Съёмка уже идёт. Подожди результат.")
+    paths = [p for p in (pending.get("photo_paths") or []) if p]
+    ids = [x for x in (pending.get("photo_file_ids") or []) if x]
+    n_photos = len(paths) or len(ids)
+    if n_photos < 1:
+        raise PipelineError("Сначала загрузи фото и собери сценарий.")
+    text = (notes or "").strip()
+    if len(text) < 3:
+        raise PipelineError("Напиши правку парой слов — что поменять в сценах.")
+    previous = pending.get("script") if isinstance(pending.get("script"), dict) else None
+    idea = str(pending.get("idea") or "")
+    pending["phase"] = "scripting"
+    pending["error"] = ""
+    save_pending(uid, pending)
+    try:
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            script = await grok_autorolik(
+                session,
+                n_photos=n_photos,
+                idea=idea,
+                notes=text,
+                previous=previous,
+            )
+        pending["phase"] = "review"
+        pending["script"] = script
+        pending["error"] = ""
+        save_pending(uid, pending)
+    except Exception as exc:
+        pending["phase"] = "error"
+        pending["error"] = job_error_text(exc)
+        save_pending(uid, pending)
+        raise
+
+
+async def run_studio_autorolik_shoot(bot: Bot, user_id: int) -> None:
+    from autorolik import load_pending, save_pending
+    from bot import MiniChat, _autorolik_voice, _run_job
+    from presets import voice_settings_payload
+
+    uid = int(user_id)
+    pending = load_pending(uid) or {}
+    if pending.get("phase") == "shooting":
+        raise PipelineError("Съёмка уже идёт. Статус смотри в Mini App.")
+    script = pending.get("script")
+    paths = [str(p) for p in (pending.get("photo_paths") or []) if p]
+    ids = [str(x) for x in (pending.get("photo_file_ids") or []) if x]
+    if not isinstance(script, dict) or (not paths and not ids):
+        raise PipelineError("Сценарий или фото не нашёл. Собери Авторолик заново.")
+    if not pending.get("consent_verified"):
+        raise PipelineError("Без согласия фото людей не использую.")
+    scenes = script.get("scenes") or []
+    pending["phase"] = "shooting"
+    pending["error"] = ""
+    save_pending(uid, pending)
+    voice_id, voice_name = _autorolik_voice(uid)
+    try:
+        await _run_job(
+            MiniChat(bot, uid),
+            idea=str(pending.get("idea") or script.get("title") or "авторолик"),
+            user_script=True,
+            voice_id=voice_id,
+            photo_file_id=ids[0] if ids else None,
+            bot=bot,
+            voice_name=voice_name,
+            consent_verified=True,
+            n_scenes=max(4, len(scenes)),
+            extra_brief="",
+            voice_settings=voice_settings_payload("sure", "norm"),
+            camera="",
+            motion="",
+            quality="optimal",
+            style="cinematic",
+            watermark=False,
+            hook=str(script.get("hook") or ""),
+            kind="autorolik",
+            wipe=True,
+            dynamic_pacing=True,
+            route_mode="autorolik_face",
+            photo_file_ids=ids or None,
+            photo_paths=paths or None,
+            script_override=script,
+            quiet=True,
+        )
+        pending = load_pending(uid) or pending
+        pending["phase"] = "done"
+        pending["error"] = ""
+        save_pending(uid, pending)
+    except Exception as exc:
+        pending = load_pending(uid) or pending
+        pending["phase"] = "error"
+        pending["error"] = job_error_text(exc)
+        save_pending(uid, pending)
+        raise
 
 
 async def run_studio_history(bot: Bot, user_id: int) -> None:

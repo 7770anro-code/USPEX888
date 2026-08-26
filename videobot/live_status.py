@@ -120,6 +120,7 @@ def start_job(
         "runway_status": "",
         "runway_progress": None,
         "runway_frame": None,
+        "clip_states": {},
         "done": False,
         "updated_at": time.time(),
     }
@@ -154,6 +155,13 @@ def update_job(job_key: str | None = None, **fields: Any) -> None:
             if value is None and name not in ("runway_progress", "runway_frame"):
                 continue
             job[name] = value
+        n = int(job.get("scene_n") or 0)
+        if n > 0:
+            clips = job.get("clip_states")
+            if not isinstance(clips, dict):
+                clips = {}
+                job["clip_states"] = clips
+            clips[str(n)] = str(job.get("label") or "")
         job["updated_at"] = time.time()
 
 
@@ -236,6 +244,39 @@ def allow_runway_get(task_id: str) -> bool:
             return False
         _LAST_GET[tid] = now
         return True
+
+
+def status_payload(snap: dict[str, Any] | None) -> dict[str, Any]:
+    """Снимок съёмки для Mini App: сцена N из M и подпись по каждой."""
+    if not snap:
+        return {"active": False, "done": False, "failed": False, "scenes": []}
+    total = int(snap.get("scene_total") or 0)
+    current = int(snap.get("scene_n") or 0)
+    clips = snap.get("clip_states") if isinstance(snap.get("clip_states"), dict) else {}
+    scenes: list[dict[str, Any]] = []
+    for i in range(1, max(total, 0) + 1):
+        label = str(clips.get(str(i)) or clips.get(i) or "")
+        scenes.append(
+            {
+                "n": i,
+                "label": label,
+                "current": i == current and not snap.get("done"),
+                "done": bool(label) and i < current,
+            }
+        )
+    stage = str(snap.get("stage") or "")
+    return {
+        "active": True,
+        "done": bool(snap.get("done")),
+        "failed": stage == STAGE_FAILED,
+        "stage": stage,
+        "label": str(snap.get("label") or ""),
+        "title": str(snap.get("title") or ""),
+        "scene_n": current,
+        "scene_total": total,
+        "text": format_status(snap),
+        "scenes": scenes,
+    }
 
 
 def format_status(snap: dict[str, Any] | None, *, stale_runway: bool = False) -> str:

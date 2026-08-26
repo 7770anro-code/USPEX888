@@ -78,10 +78,20 @@ def smoke_miniapp() -> None:
     for route in app.router.routes():
         info = route.resource.get_info() if route.resource else {}
         paths.add(info.get("path") or info.get("formatter") or "")
-    for need in ("/api/quick", "/api/vibe", "/api/tryon", "/api/clone", "/api/autorolik", "/health"):
+    for need in (
+        "/api/quick",
+        "/api/vibe",
+        "/api/tryon",
+        "/api/clone",
+        "/api/autorolik",
+        "/api/autorolik/status",
+        "/api/autorolik/shoot",
+        "/health",
+    ):
         assert need in paths, need
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert html.count('class="sub"') == 7
+    assert "go-auto-shoot" in html
     test_webapp_init_data_hmac_includes_signature()
     _ok("miniapp", "7 карточек, HMAC включает signature, Авторолик")
 
