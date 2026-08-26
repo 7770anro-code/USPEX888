@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-26** (hotfix HMAC Mini App, commit `73ef903`): `signature` снова в data-check-string. Рестарт **только** `videobot.service` (PID 185597 → 186193, 00:59 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `/health` 200. На прод-коде: HMAC с `signature` ок, официальный вектор Telegram ок, неподписанный `POST /api/autorolik` → 403.
+
 Выложено **2026-08-26** (после «ok»: Авторолик FACE Kling / WIDE Seedance + «AI generated»): код ветки `cursor/videobot-miniapp-17b5` (commit `569d3ec`) в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 184838 → 185597, 00:28 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали (`WEBAPP_PUBLIC_URL` остался). `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `127.0.0.1:8088` (`/health` 200), 7 карточек включая Авторолик. Неподписанный `POST /api/autorolik` → 403.
 
 Выложено **2026-08-25** (после «ок»: Kling/Seedance на fal.ai + Mini App): код ветки `cursor/fal-kling-miniapp-00ae` в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 169141 → 182509, 23:47 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали (`FAL_API_KEY` уже был). `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App локально `127.0.0.1:8088` (`/health` 200). Без `WEBAPP_PUBLIC_URL` кнопка «🎬 Открыть меню» остаётся callback. Автоконтур стартовал (45 с → каждые 90 мин).
