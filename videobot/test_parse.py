@@ -2221,6 +2221,8 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/autorolik" in paths
     assert "/api/autorolik/status" in paths
     assert "/api/autorolik/revise" in paths
+    assert "/api/autorolik/script" in paths
+    assert "/cover.jpg" in paths
     assert "/api/autorolik/shoot" in paths
     assert "/api/autorolik/cancel" in paths
     assert "/api/upscale" in paths
@@ -2245,6 +2247,8 @@ def test_fal_kling_and_miniapp() -> None:
             assert resp3.status == 403
             resp4 = await client.post("/api/autorolik/shoot")
             assert resp4.status == 403
+            resp5 = await client.post("/api/autorolik/script")
+            assert resp5.status == 403
 
     asyncio.run(_unsigned_post_is_403())
 
@@ -2263,7 +2267,13 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/autorolik" in js
     assert "/api/autorolik/status" in js
     assert "/api/autorolik/shoot" in js
+    assert "/api/autorolik/script" in js
     assert "go-auto-shoot" in js
+    assert "go-auto-save" in js
+    assert "saveScriptEdits" in js
+    assert "narr-in" in js
+    assert "Речь" in js
+    assert "Кадр" in js
     assert "go-auto-refresh" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
@@ -2276,11 +2286,16 @@ def test_fal_kling_and_miniapp() -> None:
     assert "go-autorolik" in html
     assert "go-auto-shoot" in html
     assert "go-auto-edit" in html
+    assert "go-auto-save" in html
+    assert "Сохранить правки сцен" in html
     assert "go-auto-refresh" in html
     assert "Обновить статус" in html
     assert "auto-wait" in html
     assert "Авторолик" in html
-    assert "готовое видео придёт в чат" in html.lower() or "Готовое видео придёт в чат" in html
+    assert "чат" in html.lower()
+    assert "cover.jpg" in html
+    cover = Path(__file__).with_name("webapp").joinpath("cover.jpg")
+    assert cover.is_file() and cover.stat().st_size > 1024
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media
 
@@ -2474,7 +2489,16 @@ def test_autorolik_script_and_route() -> None:
     assert "run_studio_autorolik" in studio_src
     assert "prepare_autorolik_photos" in studio_src
     assert "quiet=True" in studio_src
-    assert "review_kb" not in studio_src
+    assert "review_kb" in studio_src
+    assert "format_script_preview" in studio_src
+    assert "Можно закрыть Telegram" in studio_src
+    from webapp_server import _spawn
+
+    assert callable(_spawn)
+    server_src = Path(__file__).with_name("webapp_server.py").read_text(encoding="utf-8")
+    assert "def _spawn" in server_src
+    assert "_JOBS.add" in server_src
+    assert "create_task(_run_safe" not in server_src
     assert "send_photo_get_id" not in inspect.getsource(
         __import__("studio", fromlist=["run_studio_autorolik"]).run_studio_autorolik
     )
@@ -2487,6 +2511,24 @@ def test_autorolik_script_and_route() -> None:
     assert viewed["scenes"][1]["face"] is False
     assert pending_view({"phase": "review", "script": parsed, "photo_paths": ["a.jpg"]})["phase"] == "review"
     assert review_kb().inline_keyboard
+    from autorolik import apply_manual_script_edits
+
+    patched = apply_manual_script_edits(
+        parsed,
+        {"title": "Ночь", "hook": "тихо", "scenes": [{"n": 1, "narration": "новая озвучка"}]},
+        n_photos=2,
+    )
+    assert patched["title"] == "Ночь"
+    assert patched["hook"] == "тихо"
+    assert patched["scenes"][0]["narration"] == "новая озвучка"
+    assert patched["scenes"][0]["face_scene"] == parsed["scenes"][0]["face_scene"]
+    from branding import BRAND_NAME, COVER_PROMPT, cover_candidates
+
+    assert BRAND_NAME == "Успех 888"
+    assert "no text" in COVER_PROMPT
+    assert any(str(p).endswith("cover.jpg") for p in cover_candidates())
+    assert "cover_path" in bot_src
+    assert "photo_paths=paths" in bot_src
     assert "Публичных лиц" in SCRIPT_SYSTEM
     assert "политики" in SCRIPT_SYSTEM
     assert "подлежащее" in SCRIPT_SYSTEM

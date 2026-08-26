@@ -124,8 +124,8 @@ async def send_photo_get_id(bot: Bot, user_id: int, path: Path, caption: str) ->
     return str(sent.photo[-1].file_id)
 
 
-async def send_chat_text(bot: Bot, user_id: int, text: str) -> None:
-    await bot.send_message(int(user_id), text[:3900])
+async def send_chat_text(bot: Bot, user_id: int, text: str, reply_markup: Any = None) -> None:
+    await bot.send_message(int(user_id), text[:3900], reply_markup=reply_markup)
 
 
 async def send_chat_photo(bot: Bot, user_id: int, path: Path, caption: str) -> None:
@@ -454,10 +454,9 @@ async def run_studio_autorolik(
     consent: bool,
     topic: str = "",
 ) -> None:
-    """Собрать сценарий для Mini App. В чат ничего не пишем — только pending + JSON API."""
-    from autorolik import grok_autorolik, save_pending
+    """Собрать сценарий. Mini App показывает его здесь; копия и кнопки — в чат, если приложение закрыли."""
+    from autorolik import format_script_preview, grok_autorolik, review_kb, save_pending
 
-    _ = bot
     if not consent:
         raise PipelineError("Без согласия фото людей не использую.")
     uid = int(user_id)
@@ -474,6 +473,15 @@ async def run_studio_autorolik(
             "source": "miniapp",
         },
     )
+    try:
+        await send_chat_text(
+            bot,
+            uid,
+            "Пишу сценарий Авторолика. Можно закрыть Telegram — план и кнопки «Снять» придут сюда. "
+            "Готовый ролик тоже пришлю сообщением в этот чат.",
+        )
+    except Exception:
+        log.warning("autorolik start ping failed user=%s", uid)
     try:
         paths = await prepare_autorolik_photos(uid, photos)
         save_pending(
@@ -503,6 +511,15 @@ async def run_studio_autorolik(
                 "source": "miniapp",
             },
         )
+        try:
+            await send_chat_text(
+                bot,
+                uid,
+                format_script_preview(script),
+                reply_markup=review_kb(),
+            )
+        except Exception:
+            log.warning("autorolik script chat failed user=%s", uid)
     except Exception as exc:
         from autorolik import load_pending
 
@@ -513,8 +530,8 @@ async def run_studio_autorolik(
         raise
 
 
-async def run_studio_autorolik_revise(user_id: int, notes: str) -> None:
-    from autorolik import grok_autorolik, load_pending, save_pending
+async def run_studio_autorolik_revise(bot: Bot, user_id: int, notes: str) -> None:
+    from autorolik import format_script_preview, grok_autorolik, load_pending, review_kb, save_pending
 
     uid = int(user_id)
     pending = load_pending(uid) or {}
@@ -547,6 +564,15 @@ async def run_studio_autorolik_revise(user_id: int, notes: str) -> None:
         pending["script"] = script
         pending["error"] = ""
         save_pending(uid, pending)
+        try:
+            await send_chat_text(
+                bot,
+                uid,
+                format_script_preview(script),
+                reply_markup=review_kb(),
+            )
+        except Exception:
+            log.warning("autorolik revise chat failed user=%s", uid)
     except Exception as exc:
         pending["phase"] = "error"
         pending["error"] = job_error_text(exc)
@@ -575,6 +601,14 @@ async def run_studio_autorolik_shoot(bot: Bot, user_id: int) -> None:
     pending["error"] = ""
     save_pending(uid, pending)
     voice_id, voice_name = _autorolik_voice(uid)
+    try:
+        await send_chat_text(
+            bot,
+            uid,
+            "Снимаю Авторолик. Можно закрыть Telegram — готовый ролик придёт сюда обычным сообщением.",
+        )
+    except Exception:
+        log.warning("autorolik shoot ping failed user=%s", uid)
     try:
         await _run_job(
             MiniChat(bot, uid),

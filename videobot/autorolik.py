@@ -157,6 +157,36 @@ def script_view(script: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def apply_manual_script_edits(script: dict[str, Any] | None, edits: dict[str, Any] | None, *, n_photos: int = 1) -> dict[str, Any]:
+    """Точечные правки title/hook/narration/visual, без смены FACE/WIDE."""
+    if not isinstance(script, dict) or not isinstance(script.get("scenes"), list):
+        raise PipelineError("Нет сценария, который можно править.")
+    data = json.loads(json.dumps(script, ensure_ascii=False))
+    blob = edits if isinstance(edits, dict) else {}
+    title = str(blob.get("title") or "").strip()
+    if title:
+        data["title"] = title[:80]
+    if "hook" in blob:
+        data["hook"] = str(blob.get("hook") or "").strip()[:120]
+    for item in blob.get("scenes") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            n = int(item.get("n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if n < 1 or n > len(data["scenes"]):
+            continue
+        scene = dict(data["scenes"][n - 1] or {})
+        if "narration" in item:
+            scene["narration"] = str(item.get("narration") or "").strip()[:500]
+        if "visual" in item or "visual_prompt" in item:
+            scene["visual_prompt"] = str(item.get("visual") or item.get("visual_prompt") or "").strip()[:1500]
+        data["scenes"][n - 1] = scene
+    n = max(1, min(MAX_PHOTOS, int(n_photos or 1)))
+    return parse_autorolik_script(json.dumps(data, ensure_ascii=False), n_photos=n)
+
+
 def pending_view(pending: dict[str, Any] | None) -> dict[str, Any]:
     data = pending if isinstance(pending, dict) else {}
     photos = data.get("photo_paths") or data.get("photo_file_ids") or []
@@ -324,26 +354,28 @@ def kling_api_prompt(visual: str, *, element_index: int = 1) -> str:
 def format_script_preview(script: dict[str, Any]) -> str:
     scenes = script.get("scenes") or []
     lines = [
-        f"🎞 Авторолик «{script.get('title') or 'без названия'}»",
-        f"Сцен: {len(scenes)} · FACE = Kling @ElementN · WIDE = Seedance",
+        f"🎞  {script.get('title') or 'Авторолик'}",
+        f"{len(scenes)} сцен · FACE → Kling · WIDE → Seedance",
     ]
     hook = str(script.get("hook") or "").strip()
     if hook:
         lines.append(f"Хук: {hook}")
-    lines.append("")
+    lines.append("────────")
     for i, scene in enumerate(scenes, start=1):
         face = parse_bool(scene.get("face_scene"))
         if face:
-            tag = f"FACE · друг {int(scene.get('element_index') or 1)} · Kling"
+            tag = f"FACE · друг {int(scene.get('element_index') or 1)}"
         else:
-            tag = "WIDE · Seedance"
+            tag = "WIDE"
         narr = str(scene.get("narration") or "").strip()
         vis = str(scene.get("visual_prompt") or "").strip()
-        lines.append(f"{i}. [{tag}]")
-        lines.append(narr)
-        lines.append(vis)
+        lines.append(f"{i}  {tag}")
+        if narr:
+            lines.append(narr)
+        if vis:
+            lines.append(vis)
         lines.append("")
-    lines.append("Проверь лица и монтаж. Можно поправить текстом — или снять как есть.")
+    lines.append("Можно закрыть Telegram — съёмка доварится на сервере, ролик придёт сюда.")
     return "\n".join(lines).strip()[:3500]
 
 
@@ -365,9 +397,9 @@ def review_kb() -> Any:
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Снять", callback_data="auto:go")],
-            [InlineKeyboardButton(text="✏️ Правки", callback_data="auto:edit")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="auto:no")],
+            [InlineKeyboardButton(text="🎬 Снять ролик", callback_data="auto:go")],
+            [InlineKeyboardButton(text="✏️ Описать правки", callback_data="auto:edit")],
+            [InlineKeyboardButton(text="✕ Отмена", callback_data="auto:no")],
         ]
     )
 
