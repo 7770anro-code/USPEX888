@@ -57,6 +57,9 @@ def smoke_routing() -> None:
     assert chain_for("night_pipeline")[0] == "seedance"
     assert chain_for("autorolik_face")[0] == "kling"
     assert chain_for("autorolik_wide")[0] == "seedance"
+    assert chain_for("autorolik_wide")[1] == "kling"
+    router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
+    assert "seedance likeness — retry this clip with Kling" in router_src
     night_src = Path(__file__).with_name("night_video.py").read_text(encoding="utf-8")
     assert 'route_mode="night_pipeline"' in night_src
     kling = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)

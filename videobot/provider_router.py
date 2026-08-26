@@ -162,6 +162,13 @@ async def render_clip(
             if getattr(exc, "code", "") in ("credits", "moderation", "moderation_person"):
                 log.warning("provider %s user-facing fail, try next: %s", engine, exc.code)
                 if getattr(exc, "code", "") == "moderation_person":
+                    # WIDE: Seedance режет likeness — та же сцена через Kling I2V.
+                    # FACE: Seedance и так skip, Kling likeness остаётся ошибкой.
+                    if engine == "seedance":
+                        log.warning(
+                            "seedance likeness — retry this clip with Kling"
+                        )
+                        continue
                     raise
                 if getattr(exc, "code", "") == "credits":
                     continue

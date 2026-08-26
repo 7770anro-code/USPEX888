@@ -1332,6 +1332,93 @@ def test_fal_resume_completed_uses_status_media() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_seedance_wide_likeness_retries_kling() -> None:
+    """WIDE 422 likeness Seedance → та же сцена Kling I2V, не raise. FACE Kling likeness — ошибка."""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import AsyncMock, patch
+
+    import config
+    from pipeline import PipelineError
+    from provider_router import render_clip
+
+    person = PipelineError(
+        "fal.ai отклонил фото живого человека (политика партнёра).",
+        "HTTP 422 partner_validation_failed likeness",
+        code="moderation_person",
+    )
+
+    async def _wide() -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c3.mp4"
+        inst = AsyncMock()
+        inst.generate_seedance = AsyncMock(side_effect=person)
+
+        async def kling_ok(*_a, **_k):
+            dest.write_bytes(b"k" * 12_000)
+            return dest
+
+        inst.generate_kling = AsyncMock(side_effect=kling_ok)
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                out = await render_clip(
+                    None,
+                    "wide street no face",
+                    5,
+                    dest,
+                    prompt_image="https://example.com/still.jpg",
+                    route_mode="autorolik_wide",
+                    photo_lock=False,
+                )
+            assert out == dest
+            assert dest.stat().st_size >= 10_000
+            assert inst.generate_seedance.await_count == 1
+            assert inst.generate_kling.await_count == 1
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    async def _face_kling_still_raises() -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c4.mp4"
+        inst = AsyncMock()
+        inst.generate_seedance = AsyncMock(side_effect=AssertionError("FACE must skip seedance"))
+        inst.generate_kling = AsyncMock(side_effect=person)
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                try:
+                    await render_clip(
+                        None,
+                        "face close-up",
+                        5,
+                        dest,
+                        prompt_image="https://example.com/face.jpg",
+                        route_mode="autorolik_face",
+                        photo_lock=True,
+                        elements=["https://example.com/face.jpg"],
+                    )
+                    raise AssertionError("FACE Kling likeness must raise")
+                except PipelineError as exc:
+                    assert exc.code == "moderation_person"
+            assert inst.generate_seedance.await_count == 0
+            assert inst.generate_kling.await_count == 1
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    asyncio.run(_wide())
+    asyncio.run(_face_kling_still_raises())
+
+
 def test_night_policy_defaults() -> None:
     import inspect
     import shutil
@@ -2660,6 +2747,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "if fal_only:" in router_src
     assert "слишком долго" in router_src
     assert "fal_keep_sidecar" in router_src
+    assert "seedance likeness — retry this clip with Kling" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
@@ -3460,6 +3548,7 @@ if __name__ == "__main__":
     test_credits_resume_keeps_artifacts()
     test_owner_resume_keeps_autorolik_artifacts()
     test_fal_resume_completed_uses_status_media()
+    test_seedance_wide_likeness_retries_kling()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()
