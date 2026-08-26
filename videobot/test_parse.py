@@ -2965,6 +2965,14 @@ def test_fal_kling_and_miniapp() -> None:
     assert restage.NEG_DEFAULT == "blur, distort, and low quality"
     assert "distorted face" in restage.NEG_FACE
     assert restage.SEEDANCE_REF_FAST == "bytedance/seedance-2.0/fast/reference-to-video"
+    batch_path = Path(__file__).with_name("prototypes") / "seedance_face_batch.py"
+    bspec = importlib.util.spec_from_file_location("seedance_face_batch", batch_path)
+    batch = importlib.util.module_from_spec(bspec)
+    assert bspec is not None and bspec.loader is not None
+    bspec.loader.exec_module(batch)
+    ids = [j["id"] for j in batch.jobs_spec()]
+    assert ids == ["9", "8", "11", "13a", "13b", "13c"]
+    assert batch.jobs_spec()[2]["photo_keys"] == ["p3"]
     cinematic_el = restage._element("https://example.com/still.jpg", ["https://example.com/selfie.jpg"])
     assert cinematic_el["frontal_image_url"] == "https://example.com/still.jpg"
     assert cinematic_el["reference_image_urls"] == ["https://example.com/selfie.jpg"]
