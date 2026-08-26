@@ -2590,6 +2590,77 @@ def test_webapp_autorolik_formdata_hmac() -> None:
     asyncio.run(_autorolik_hmac_ok())
 
 
+def test_telegram_photo_compress_and_error_text() -> None:
+    """Прод 01:01: sendPhoto 11.3 МБ / лимит 10 МБ → generic «Не вышло». Сжимаем и мапим ошибку."""
+    import inspect
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    from pipeline import PipelineError
+    from studio import (
+        TELEGRAM_PHOTO_SAFE_BYTES,
+        compress_telegram_photo,
+        job_error_text,
+        send_photo_get_id,
+    )
+
+    msg = (
+        "Telegram server says - Bad Request: file of size 11308176 bytes is too big "
+        "for a photo; the maximum size is 10485760 bytes"
+    )
+    try:
+        raise TelegramBadRequest(method="sendPhoto", message=msg)
+    except TypeError:
+        exc = TelegramBadRequest(message=msg)  # type: ignore[call-arg]
+    except TelegramBadRequest as raised:
+        exc = raised
+    text = job_error_text(exc)
+    assert "10 МБ" in text
+    assert "Не вышло" not in text
+
+    generic = job_error_text(RuntimeError("boom"))
+    assert "Не вышло" in generic
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        big = root / "big.jpg"
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=6000x4000:duration=1:rate=1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "1",
+                str(big),
+            ],
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        assert proc.returncode == 0, (proc.stderr or b"")[-400:]
+        assert big.exists() and big.stat().st_size > 1000
+        out = compress_telegram_photo(big, root / "out.jpg")
+        assert out.exists()
+        assert out.stat().st_size <= TELEGRAM_PHOTO_SAFE_BYTES
+        if big.stat().st_size > TELEGRAM_PHOTO_SAFE_BYTES:
+            assert out.stat().st_size < big.stat().st_size
+
+    src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
+    assert "compress_telegram_photo" in src
+    assert "send_photo_get_id" in src
+    assert "p{i}_raw.jpg" in src
+    assert inspect.getsource(send_photo_get_id)
+    assert issubclass(PipelineError, Exception)
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -2642,4 +2713,5 @@ if __name__ == "__main__":
     test_ai_generated_disclosure()
     test_webapp_init_data_hmac_includes_signature()
     test_webapp_autorolik_formdata_hmac()
+    test_telegram_photo_compress_and_error_text()
     print("ok")
