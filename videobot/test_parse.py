@@ -2900,7 +2900,7 @@ def test_autorolik_upload_disconnect() -> None:
                 [
                     _Part("initData", b"signed"),
                     _Part("consent", b"1"),
-                    _Part("topic", b"город"),
+                    _Part("topic", "город".encode("utf-8")),
                 ],
                 fail_at=3,
             )
