@@ -191,7 +191,7 @@ async def _read_photos(form: Any) -> list[bytes]:
         _add(data)
     data, _name, _mime = await _read_file_field(form, "photo")
     _add(data)
-    if hasattr(form, "getall"):
+    if hasattr(form, "getall") and "photos" in form:
         for field in form.getall("photos") or []:
             if isinstance(field, FileField) and field.file:
                 _add(field.file.read() or b"")

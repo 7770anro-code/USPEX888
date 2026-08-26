@@ -69,6 +69,7 @@ def smoke_routing() -> None:
 
 def smoke_miniapp() -> None:
     from webapp_server import build_app
+    from test_parse import test_webapp_init_data_hmac_includes_signature
 
     app = build_app(bot=None)
     paths = set()
@@ -79,7 +80,8 @@ def smoke_miniapp() -> None:
         assert need in paths, need
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert html.count('class="sub"') == 7
-    _ok("miniapp", "7 карточек, HMAC API, Авторолик")
+    test_webapp_init_data_hmac_includes_signature()
+    _ok("miniapp", "7 карточек, HMAC включает signature, Авторолик")
 
 
 async def smoke_idea_script() -> None:

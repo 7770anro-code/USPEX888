@@ -2143,9 +2143,6 @@ def test_fal_kling_and_miniapp() -> None:
     init = urlencode({**pairs, "hash": digest})
     parsed = validate_init_data(init, token)
     assert parsed["id"] == 42
-    # Telegram кладёт signature рядом с hash — в HMAC-строку его не мешаем.
-    parsed_sig = validate_init_data(init + "&signature=not-part-of-hmac", token)
-    assert parsed_sig["id"] == 42
     try:
         validate_init_data(init, "wrong-token")
         raise AssertionError("bad token must fail")
@@ -2480,6 +2477,119 @@ def test_ai_generated_disclosure() -> None:
     asyncio.run(_burn())
 
 
+def _sign_init_data(pairs: dict[str, str], token: str) -> str:
+    import hmac
+    import hashlib
+    from urllib.parse import urlencode
+
+    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    digest = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
+    return urlencode({**pairs, "hash": digest})
+
+
+def test_webapp_init_data_hmac_includes_signature() -> None:
+    """Bot API 7.2+: hash покрывает signature. Выкидывать его из HMAC — прод-баг «Подпись не совпала»."""
+    import time
+
+    from webapp_auth import WebAppAuthError, validate_init_data
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    auth_date = str(int(time.time()))
+    base = {"auth_date": auth_date, "query_id": "AA", "user": user}
+    # Как живой Telegram iOS: signature есть, и hash посчитан вместе с ним.
+    with_sig = {
+        **base,
+        "signature": "zL-ucjNyREiHDE8aihFwpfR9aggP2xiAo3NSpfe-p7IbCisNlDKlo7Kb6G4D0Ao2mBrSgEk4maLSdv6MLIlADQ",
+    }
+    parsed = validate_init_data(_sign_init_data(with_sig, token), token)
+    assert parsed["id"] == 42
+
+    # Старые клиенты без signature тоже проходят.
+    parsed_legacy = validate_init_data(_sign_init_data(base, token), token)
+    assert parsed_legacy["id"] == 42
+
+    # Регрессия PR #10: hash без signature, поле signature дописали отдельно — HMAC не сходится.
+    broken = _sign_init_data(base, token) + "&signature=not-part-of-hmac"
+    try:
+        validate_init_data(broken, token)
+        raise AssertionError("hash without signature must fail once signature is present")
+    except WebAppAuthError as exc:
+        assert "не совпала" in str(exc)
+
+    # Опубликованный вектор Telegram (без signature, старый auth_date).
+    # Токен из документации Bot API, не прод-секрет.
+    official = (
+        "query_id=AAHdF6IQAAAAAN0XohDhrOrc"
+        "&user=%7B%22id%22%3A279058397%2C%22first_name%22%3A%22Vladislav%22%2C%22last_name%22%3A%22Kibenko%22%2C%22username%22%3A%22vdkfrost%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%7D"
+        "&auth_date=1662771648"
+        "&hash=c501b71e775f74ce10e377dea85a7ea24ecd640b223ea86dfe453e0eaed2e2b2"
+    )
+    official_token = "5768337691:AAH5YkoiEuPk8-FZa32hStHTqXiLPtAEhx8"
+    official_user = validate_init_data(official, official_token, now=1662771648 + 10)
+    assert official_user["id"] == 279058397
+
+    stale = _sign_init_data(base, token)
+    try:
+        validate_init_data(stale, token, now=float(auth_date) + 200_000)
+        raise AssertionError("stale auth_date must fail")
+    except WebAppAuthError as exc:
+        assert "устарел" in str(exc)
+
+
+def test_webapp_autorolik_formdata_hmac() -> None:
+    """Тот же initData через multipart /api/autorolik: HMAC 200, без KeyError photos."""
+    import asyncio
+    import time
+    from io import BytesIO
+
+    import config
+    from aiohttp import FormData
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from webapp_server import build_app
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    with_sig = {
+        "auth_date": str(int(time.time())),
+        "query_id": "AA",
+        "user": user,
+        "signature": "zL-ucjNyREiHDE8aihFwpfR9aggP2xiAo3NSpfe-p7IbCisNlDKlo7Kb6G4D0Ao2mBrSgEk4maLSdv6MLIlADQ",
+    }
+    signed = _sign_init_data(with_sig, token)
+
+    class _StubBot:
+        async def send_message(self, *_a, **_k):
+            return None
+
+    async def _autorolik_hmac_ok() -> None:
+        old = config.VIDEOBOT_TELEGRAM_TOKEN
+        config.VIDEOBOT_TELEGRAM_TOKEN = token
+        app = build_app(bot=_StubBot())
+        body = FormData()
+        body.add_field("initData", signed)
+        body.add_field("topic", "вечер в городе")
+        body.add_field("consent", "1")
+        body.add_field(
+            "photo1",
+            BytesIO(b"\xff\xd8\xff\xd9"),
+            filename="a.jpg",
+            content_type="image/jpeg",
+        )
+        try:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/autorolik", data=body)
+                data = await resp.json()
+                assert resp.status != 403, data
+                assert data.get("ok") is True
+        finally:
+            config.VIDEOBOT_TELEGRAM_TOKEN = old
+
+    asyncio.run(_autorolik_hmac_ok())
+
+
 if __name__ == "__main__":
     test_plain_json()
     test_fenced_and_extra()
@@ -2530,4 +2640,6 @@ if __name__ == "__main__":
     test_fal_kling_and_miniapp()
     test_autorolik_script_and_route()
     test_ai_generated_disclosure()
+    test_webapp_init_data_hmac_includes_signature()
+    test_webapp_autorolik_formdata_hmac()
     print("ok")
