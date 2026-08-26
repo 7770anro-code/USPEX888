@@ -105,8 +105,12 @@ def smoke_miniapp() -> None:
     assert "go-auto-refresh" in js
     assert "phase === \"stale\"" in js or "phase === 'stale'" in js
     assert "/api/autorolik/script" in js
+    assert "authHeaders" in js
+    assert "X-Telegram-Init-Data" in js
+    assert "upload_failed" in js
+    assert "Загрузка фото оборвалась" in js
     test_webapp_init_data_hmac_includes_signature()
-    _ok("miniapp", "7 карточек, HMAC, правки сцен, обложка, Обновить статус")
+    _ok("miniapp", "7 карточек, HMAC, правки сцен, обложка, Обновить статус, обрыв загрузки")
 
 
 async def smoke_idea_script() -> None:

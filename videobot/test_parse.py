@@ -2275,6 +2275,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert "Речь" in js
     assert "Кадр" in js
     assert "stale" in js
+    assert "upload_failed" in js
+    assert "X-Telegram-Init-Data" in js
+    assert "Загрузка фото оборвалась" in js
     assert "go-auto-refresh" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
@@ -2502,6 +2505,9 @@ def test_autorolik_script_and_route() -> None:
     assert "_JOBS.add" in server_src
     assert "expire_all_dead_pendings" in server_src
     assert "reconcile_pending" in server_src
+    assert "collect_autorolik_parts" in server_src
+    assert "ingest_autorolik_body" in server_src
+    assert "mark_upload_failed" in server_src
     assert "create_task(_run_safe" not in server_src
     assert "send_photo_get_id" not in inspect.getsource(
         __import__("studio", fromlist=["run_studio_autorolik"]).run_studio_autorolik
@@ -2811,7 +2817,11 @@ def test_webapp_autorolik_formdata_hmac() -> None:
         )
         try:
             async with TestClient(TestServer(app)) as client:
-                resp = await client.post("/api/autorolik", data=body)
+                resp = await client.post(
+                    "/api/autorolik",
+                    data=body,
+                    headers={"X-Telegram-Init-Data": signed},
+                )
                 data = await resp.json()
                 assert resp.status != 403, data
                 assert data.get("ok") is True
@@ -2827,6 +2837,195 @@ def test_webapp_autorolik_formdata_hmac() -> None:
             config.VIDEOBOT_TELEGRAM_TOKEN = old
 
     asyncio.run(_autorolik_hmac_ok())
+
+
+def test_autorolik_upload_disconnect() -> None:
+    """Обрыв multipart до _spawn: JSON 409 + pending upload_failed, не голый 500.
+    Если хотя бы одно фото уже доехало — воркер всё равно стартует."""
+    import asyncio
+    import tempfile
+    import time
+    from pathlib import Path
+
+    import config
+    from aiohttp import FormData
+    from aiohttp.test_utils import TestClient, TestServer
+    from autorolik import (
+        UPLOAD_FAIL_MSG,
+        clear_live,
+        load_pending,
+        mark_upload_failed,
+        pending_view,
+        reconcile_pending,
+    )
+    from webapp_server import (
+        _is_client_disconnect,
+        build_app,
+        collect_autorolik_parts,
+    )
+
+    assert _is_client_disconnect(ConnectionResetError("Connection lost"))
+    assert "сценарий не запустился" in UPLOAD_FAIL_MSG
+
+    class _Part:
+        def __init__(self, name: str, data: bytes, filename: str | None = None) -> None:
+            self.name = name
+            self.filename = filename
+            self._data = data
+
+        async def text(self) -> str:
+            return self._data.decode("utf-8")
+
+        async def read(self, decode: bool = False) -> bytes:
+            return self._data
+
+    class _Reader:
+        def __init__(self, parts: list[_Part], fail_at: int | None = None) -> None:
+            self.parts = parts
+            self.fail_at = fail_at
+            self.i = 0
+
+        async def next(self):
+            if self.fail_at is not None and self.i == self.fail_at:
+                raise ConnectionResetError("Connection lost")
+            if self.i >= len(self.parts):
+                return None
+            part = self.parts[self.i]
+            self.i += 1
+            return part
+
+    async def _stream() -> None:
+        fields, photos, disc = await collect_autorolik_parts(
+            _Reader(
+                [
+                    _Part("initData", b"signed"),
+                    _Part("consent", b"1"),
+                    _Part("topic", b"город"),
+                ],
+                fail_at=3,
+            )
+        )
+        assert disc is True
+        assert fields["consent"] == "1"
+        assert fields["topic"] == "город"
+        assert photos == []
+
+        fields2, photos2, disc2 = await collect_autorolik_parts(
+            _Reader(
+                [
+                    _Part("consent", b"1"),
+                    _Part("photo1", b"\xff\xd8\xff\xd9", filename="a.jpg"),
+                    _Part("photo2", b"second", filename="b.jpg"),
+                ],
+                fail_at=2,
+            )
+        )
+        assert disc2 is True
+        assert fields2["consent"] == "1"
+        assert photos2 == [b"\xff\xd8\xff\xd9"]
+
+    asyncio.run(_stream())
+
+    old_data = config.DATA_DIR
+    tmp = tempfile.mkdtemp(prefix="vb-upload-")
+    config.DATA_DIR = tmp
+    uid = 424242
+    try:
+        tomb = mark_upload_failed(uid, "друзья")
+        assert tomb["phase"] == "error"
+        assert tomb["upload_failed"] is True
+        assert UPLOAD_FAIL_MSG in tomb["error"]
+        view = pending_view(load_pending(uid))
+        assert view["upload_failed"] is True
+        assert view["phase"] == "error"
+        kept = reconcile_pending(uid)
+        assert kept is not None
+        assert kept["phase"] == "error"
+        assert kept.get("stale") is not True
+    finally:
+        config.DATA_DIR = old_data
+        clear_live(uid)
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    signed = _sign_init_data(
+        {
+            "auth_date": str(int(time.time())),
+            "query_id": "AA",
+            "user": user,
+            "signature": "zL-ucjNyREiHDE8aihFwpfR9aggP2xiAo3NSpfe-p7IbCisNlDKlo7Kb6G4D0Ao2mBrSgEk4maLSdv6MLIlADQ",
+        },
+        token,
+    )
+
+    class _StubBot:
+        async def send_message(self, *_a, **_k):
+            return None
+
+    async def _http() -> None:
+        import shutil
+        import webapp_server as ws
+
+        old_token = config.VIDEOBOT_TELEGRAM_TOKEN
+        old_ing = ws.ingest_autorolik_body
+        old_dir = config.DATA_DIR
+        tmp_http = tempfile.mkdtemp(prefix="vb-upload-http-")
+        config.VIDEOBOT_TELEGRAM_TOKEN = token
+        config.DATA_DIR = tmp_http
+        app = build_app(bot=_StubBot())
+
+        async def _drop_before_photos(_request):
+            return {"topic": "вечер", "consent": "1"}, [], True
+
+        async def _drop_after_photo(_request):
+            return {"topic": "вечер", "consent": "1"}, [b"\xff\xd8\xff\xd9"], True
+
+        try:
+            ws.ingest_autorolik_body = _drop_before_photos
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/autorolik",
+                    headers={"X-Telegram-Init-Data": signed},
+                )
+                data = await resp.json()
+                assert resp.status == 409, data
+                assert data.get("ok") is False
+                assert data.get("upload_failed") is True
+                assert "не запустился" in (data.get("error") or "")
+                st_body = FormData()
+                st_body.add_field("initData", signed)
+                st = await client.post(
+                    "/api/autorolik/status",
+                    data=st_body,
+                    headers={"X-Telegram-Init-Data": signed},
+                )
+                st_data = await st.json()
+                assert st.status == 200, st_data
+                assert st_data.get("pending", {}).get("upload_failed") is True
+                assert st_data.get("phase") == "error"
+
+            ws.ingest_autorolik_body = _drop_after_photo
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/autorolik",
+                    headers={"X-Telegram-Init-Data": signed},
+                )
+                data = await resp.json()
+                assert resp.status == 200, data
+                assert data.get("ok") is True
+                assert data.get("phase") == "scripting"
+        finally:
+            ws.ingest_autorolik_body = old_ing
+            config.VIDEOBOT_TELEGRAM_TOKEN = old_token
+            config.DATA_DIR = old_dir
+            clear_live(42)
+            shutil.rmtree(tmp_http, ignore_errors=True)
+
+    asyncio.run(_http())
+    js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")
+    assert "authHeaders" in js
+    assert "X-Telegram-Init-Data" in js
+    assert "upload_failed" in js
 
 
 def test_telegram_photo_compress_and_error_text() -> None:
@@ -2952,5 +3151,6 @@ if __name__ == "__main__":
     test_ai_generated_disclosure()
     test_webapp_init_data_hmac_includes_signature()
     test_webapp_autorolik_formdata_hmac()
+    test_autorolik_upload_disconnect()
     test_telegram_photo_compress_and_error_text()
     print("ok")
