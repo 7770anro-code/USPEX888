@@ -15,6 +15,7 @@ from fal_api import (
     fal_run,
     fal_submit,
     path_to_fal_url,
+    to_fal_https_url,
 )
 from fal_models import (
     FLUX_STILL,
@@ -141,8 +142,15 @@ class FalClient(VideoProvider):
         photo_lock: bool = False,
         elements: list[str] | None = None,
     ) -> Path:
+        start = await to_fal_https_url(session, start_frame)
+        converted: list[str] = []
+        for item in elements or []:
+            if item:
+                converted.append(await to_fal_https_url(session, str(item)))
+        if photo_lock and not converted:
+            converted = [start]
         model_id, payload = self._kling_body(
-            prompt, start_frame, seconds, photo_lock=photo_lock, elements=elements
+            prompt, start, seconds, photo_lock=photo_lock, elements=converted or None
         )
         data = await fal_run(session, model_id, payload, used_image=bool(start_frame), dest_id=dest)
         out = await fal_download_media(session, data, dest)
@@ -160,12 +168,14 @@ class FalClient(VideoProvider):
         references: list[str] | None = None,
         multi_ref: bool = False,
     ) -> Path:
+        start = await to_fal_https_url(session, start_frame) if start_frame else ""
+        refs = [await to_fal_https_url(session, str(r)) for r in (references or []) if r]
         model_id, payload = self._seedance_body(
             prompt,
-            start_frame,
+            start,
             seconds,
             "9:16",
-            references=references,
+            references=refs,
             multi_ref=multi_ref,
         )
         data = await fal_run(session, model_id, payload, used_image=bool(start_frame), dest_id=dest)

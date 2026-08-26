@@ -2263,6 +2263,27 @@ def test_fal_kling_and_miniapp() -> None:
         elements=["https://example.com/face.jpg"],
     )
     assert many["elements"] == [{"frontal_image_url": "https://example.com/face.jpg"}]
+    # Прод 01:20: Kling 422 — data URI в elements.frontal_image_url. Перед submit льём https.
+    kling_fn = inspect.getsource(FalClient.generate_kling)
+    assert "to_fal_https_url" in kling_fn
+    seed_fn = inspect.getsource(FalClient.generate_seedance)
+    assert "to_fal_https_url" in seed_fn
+    from fal_api import fal_side_payload, fal_run, to_fal_https_url
+
+    side = fal_side_payload({"request_id": "rid-x"}, model_id=KLING_I2V_PRO)
+    assert side["model_id"] == KLING_I2V_PRO
+    fal_run_src = inspect.getsource(fal_run)
+    assert "fal resume dead" in fal_run_src
+    assert "other model" in fal_run_src
+    router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
+    assert "skip_runway" in router_src
+    assert "skip legacy_runway after fal validation error" in router_src
+    data_uri = "data:image/jpeg;base64,xx"
+    leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
+    assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
+    https_src = inspect.getsource(to_fal_https_url)
+    assert "fal_storage_upload" in https_src
+    assert "data:" in https_src
     assert ROUTING["real_photo"][0] == "kling"
     assert ROUTING["autorolik_face"][0] == "kling"
     assert ROUTING["autorolik_wide"][0] == "seedance"

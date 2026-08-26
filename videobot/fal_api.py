@@ -215,12 +215,13 @@ def recalled_fal_urls(request_id: str) -> tuple[str, str]:
     return _FAL_JOB_URLS.get((request_id or "").strip(), ("", ""))
 
 
-def fal_side_payload(submitted: dict[str, Any] | None) -> dict[str, str]:
+def fal_side_payload(submitted: dict[str, Any] | None, *, model_id: str = "") -> dict[str, str]:
     blob = submitted if isinstance(submitted, dict) else {}
     return {
         "request_id": str(blob.get("request_id") or ""),
         "status_url": str(blob.get("status_url") or ""),
         "response_url": str(blob.get("response_url") or ""),
+        "model_id": str(blob.get("model_id") or model_id or ""),
     }
 
 
@@ -238,6 +239,7 @@ def read_fal_side(path: Path) -> dict[str, str]:
                 "request_id": str(data.get("request_id") or ""),
                 "status_url": str(data.get("status_url") or ""),
                 "response_url": str(data.get("response_url") or ""),
+                "model_id": str(data.get("model_id") or ""),
             }
         return {}
     return {"request_id": raw}
@@ -556,30 +558,47 @@ async def fal_run(
                     status_url=saved.get("status_url") or "",
                     response_url=saved.get("response_url") or "",
                 )
-                log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
-                try:
-                    return await fal_poll(
-                        session,
+                saved_model = (saved.get("model_id") or "").strip()
+                if saved_model and saved_model != model_id:
+                    log.info(
+                        "fal sidecar other model saved=%s now=%s — new submit",
+                        saved_model,
                         model_id,
-                        rid_saved,
-                        used_image=used_image,
-                        status_url=saved.get("status_url") or None,
-                        response_url=saved.get("response_url") or None,
                     )
-                except PipelineError as exc:
-                    timeout = "слишком долго" in (exc.user_message or "").lower()
-                    if not timeout:
+                    try:
+                        side.unlink()
+                    except OSError:
+                        pass
+                else:
+                    log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
+                    try:
+                        return await fal_poll(
+                            session,
+                            model_id,
+                            rid_saved,
+                            used_image=used_image,
+                            status_url=saved.get("status_url") or None,
+                            response_url=saved.get("response_url") or None,
+                        )
+                    except PipelineError as exc:
+                        timeout = "слишком долго" in (exc.user_message or "").lower()
+                        if timeout:
+                            raise
                         try:
                             side.unlink()
                         except OSError:
                             pass
-                    raise
+                        log.warning(
+                            "fal resume dead model=%s — new submit (%s)",
+                            model_id,
+                            (exc.detail or exc.user_message or "")[:180],
+                        )
     submitted = await fal_submit(session, model_id, payload)
     rid = str(submitted.get("request_id") or "")
     if side is not None and rid:
         try:
             side.write_text(
-                json.dumps(fal_side_payload(submitted), ensure_ascii=False),
+                json.dumps(fal_side_payload(submitted, model_id=model_id), ensure_ascii=False),
                 encoding="utf-8",
             )
         except OSError:
@@ -591,14 +610,23 @@ async def fal_run(
         note_runway_task(live_fal_id(model_id, rid), kind=model_id)
     except Exception:
         pass
-    return await fal_poll(
-        session,
-        model_id,
-        rid,
-        used_image=used_image,
-        status_url=submitted.get("status_url") if isinstance(submitted, dict) else None,
-        response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
-    )
+    try:
+        return await fal_poll(
+            session,
+            model_id,
+            rid,
+            used_image=used_image,
+            status_url=submitted.get("status_url") if isinstance(submitted, dict) else None,
+            response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
+        )
+    except PipelineError as exc:
+        timeout = "слишком долго" in (exc.user_message or "").lower()
+        if side is not None and not timeout:
+            try:
+                side.unlink()
+            except OSError:
+                pass
+        raise
 
 
 async def path_to_fal_url(session: aiohttp.ClientSession, path: Path) -> str:
@@ -624,6 +652,39 @@ async def path_to_fal_url(session: aiohttp.ClientSession, path: Path) -> str:
 
         return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
     return await fal_storage_upload(session, src, mime, raw)
+
+
+async def to_fal_https_url(session: aiohttp.ClientSession, image: str) -> str:
+    """Kling elements.frontal_image_url не принимает data URI — только https."""
+    import base64
+    import tempfile
+
+    blob = (image or "").strip()
+    if blob.startswith(("http://", "https://")):
+        return blob
+    if not blob.startswith("data:"):
+        raise PipelineError("Kling element нужен https URL или data URI картинки.")
+    header, sep, b64 = blob.partition(",")
+    if not sep or not b64:
+        raise PipelineError("Некорректный data URI для fal.ai.")
+    raw = base64.b64decode(b64)
+    mime = "image/jpeg"
+    suffix = ".jpg"
+    low = header.lower()
+    if "image/png" in low:
+        mime, suffix = "image/png", ".png"
+    elif "image/webp" in low:
+        mime, suffix = "image/webp", ".webp"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+        fh.write(raw)
+        tmp = Path(fh.name)
+    try:
+        return await fal_storage_upload(session, tmp, mime, raw)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 async def fal_storage_upload(
