@@ -1,7 +1,9 @@
 # VideoBot — деплой на VPS (cloud@217.28.140.122)
 
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
-Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
+Этот сервис живёт только в `/opt/videobot` + unit `videobot.service` (+ `ngrok-videobot.service` для Mini App).
+
+Выложено **2026-08-26** (ngrok Mini App): unit `ngrok-videobot.service` (`ngrok http 8088 --url=https://sweep-wanting-tusk.ngrok-free.dev`) → порт 8088. `WEBAPP_PUBLIC_URL` в прод `.env`. Рестарт `videobot.service` (PID 184037 → 184838). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. Authtoken через `ngrok config add-authtoken` в `/opt/videobot/.config/ngrok/ngrok.yml`. `@VideobotAI777_bot` в polling, кнопка «🎬 Открыть меню» — `WebAppInfo` (не callback). `/health` снаружи 200.
 
 Выложено **2026-08-25** (после «ок»: Kling/Seedance на fal.ai + Mini App): код ветки `cursor/fal-kling-miniapp-00ae` в `/opt/videobot`. Рестарт **только** `videobot.service` (PID 169141 → 182509, 23:47 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали (`FAL_API_KEY` уже был). `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App локально `127.0.0.1:8088` (`/health` 200). Без `WEBAPP_PUBLIC_URL` кнопка «🎬 Открыть меню» остаётся callback. Автоконтур стартовал (45 с → каждые 90 мин).
 
@@ -45,15 +47,17 @@ FAL_API_KEY=...             # https://fal.ai/dashboard/keys  (дефолт ка�
 
 Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). Нужен `FAL_API_KEY` или `FAL_KEY` (один ключ на Kling и Seedance), пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать, в git и чаты не класть — только в `/opt/videobot/.env` на VPS.
 
-Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
+Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL`. Публичный адрес — статический домен ngrok `https://sweep-wanting-tusk.ngrok-free.dev` → порт **8088** (unit `ngrok-videobot.service`). Authtoken: `ngrok config add-authtoken` в `HOME` пользователя `videobot` (`/opt/videobot/.config/ngrok/ngrok.yml`, chmod 600), в git не класть. Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback.
 
-```
-location /studio/ {
-    proxy_pass http://127.0.0.1:8088/;
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600;
-    client_max_body_size 42m;
-}
+```bash
+# ngrok (один раз). Токен не светить в чат/git.
+sudo -u videobot /usr/local/bin/ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+sudo cp /opt/videobot/ngrok-videobot.service /etc/systemd/system/ngrok-videobot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ngrok-videobot.service
+# в /opt/videobot/.env:
+# WEBAPP_PUBLIC_URL=https://sweep-wanting-tusk.ngrok-free.dev
+sudo systemctl restart videobot.service
 ```
 
 Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. Запасной путь `VIDEO_PROVIDER=runway`.

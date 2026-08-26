@@ -1,0 +1,5 @@
+# Скопировать в /etc/ngrok/ngrok.yml на VPS (chmod 600, владелец videobot).
+# Authtoken только на сервере — в git не класть.
+version: 3
+agent:
+  authtoken: REPLACE_WITH_NGROK_AUTHTOKEN
