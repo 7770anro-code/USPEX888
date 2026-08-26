@@ -72,6 +72,32 @@ def i2v_fallback_models(primary: str) -> list[str]:
     return chain
 
 
+# OpenAPI Kling v3 Pro: reference_image_urls = «additional … from different angles. 1–3 images».
+# Несколько URL в одном element = один персонаж @Element1, не @Element2/@Element3.
+KLING_EXTRA_ANGLE_MAX = 3
+
+
+def kling_same_person_element(
+    frontal_url: str,
+    extra_angle_urls: list[str] | None = None,
+) -> dict[str, str | list[str]]:
+    """Один персонаж: frontal + до 3 доп. ракурсов. Не путать с N отдельных Element."""
+    frontal = (frontal_url or "").strip()
+    extras: list[str] = []
+    for raw in extra_angle_urls or []:
+        url = (raw or "").strip()
+        if not url or url == frontal or url in extras:
+            continue
+        extras.append(url)
+        if len(extras) >= KLING_EXTRA_ANGLE_MAX:
+            break
+    refs = extras[:KLING_EXTRA_ANGLE_MAX] if extras else ([frontal] if frontal else [])
+    return {
+        "frontal_image_url": frontal,
+        "reference_image_urls": refs,
+    }
+
+
 def kling_i2v_payload(
     prompt: str,
     image_url: str,

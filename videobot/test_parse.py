@@ -2933,6 +2933,7 @@ def test_fal_kling_and_miniapp() -> None:
         encode_minimax_voice,
         is_minimax_voice,
         kling_i2v_payload,
+        kling_same_person_element,
         minimax_tts_payload,
         seedance_ref_payload,
     )
@@ -2941,6 +2942,20 @@ def test_fal_kling_and_miniapp() -> None:
     from provider_router import ROUTING, chain_for
     from providers.fal_client import FalClient, _split_fal_task
 
+    one = kling_same_person_element("https://example.com/a.jpg")
+    assert one["frontal_image_url"] == "https://example.com/a.jpg"
+    assert one["reference_image_urls"] == ["https://example.com/a.jpg"]
+    multi = kling_same_person_element(
+        "https://example.com/a.jpg",
+        ["https://example.com/b.jpg", "https://example.com/a.jpg", "https://example.com/c.jpg", "https://example.com/d.jpg"],
+    )
+    assert multi["frontal_image_url"] == "https://example.com/a.jpg"
+    assert multi["reference_image_urls"] == [
+        "https://example.com/b.jpg",
+        "https://example.com/c.jpg",
+        "https://example.com/d.jpg",
+    ]
+    # Прод пока кладёт каждый URL как отдельный Element — это другие персонажи, не доп. ракурсы.
     locked = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
     assert locked["generate_audio"] is False
     assert locked["elements"] == [
