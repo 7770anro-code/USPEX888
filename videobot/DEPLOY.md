@@ -45,15 +45,18 @@ FAL_API_KEY=...             # https://fal.ai/dashboard/keys  (дефолт ка�
 
 Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). Нужен `FAL_API_KEY` или `FAL_KEY` (один ключ на Kling и Seedance), пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать, в git и чаты не класть — только в `/opt/videobot/.env` на VPS.
 
-Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL` (nginx → 127.0.0.1:8088). Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback. Пример nginx (не включать без домена и сертификата):
+Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL`. Публичный адрес — статический домен ngrok `https://sweep-wanting-tusk.ngrok-free.dev/` → `127.0.0.1:8088` (unit `videobot-ngrok.service`). Authtoken только в `/etc/ngrok/ngrok.yml` (chmod 600), в git не класть. Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback.
 
-```
-location /studio/ {
-    proxy_pass http://127.0.0.1:8088/;
-    proxy_set_header Host $host;
-    proxy_read_timeout 3600;
-    client_max_body_size 42m;
-}
+```bash
+# ngrok (один раз). Токен не светить в чат/git.
+sudo install -d -o videobot -g videobot -m 700 /etc/ngrok
+# /etc/ngrok/ngrok.yml из videobot/ngrok.yml.example + authtoken
+sudo cp /opt/videobot/videobot-ngrok.service /etc/systemd/system/videobot-ngrok.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now videobot-ngrok.service
+# в /opt/videobot/.env:
+# WEBAPP_PUBLIC_URL=https://sweep-wanting-tusk.ngrok-free.dev/
+sudo systemctl restart videobot.service
 ```
 
 Опционально (не включать без slug конфига): `RUNWAY_USE_MODEL_ROUTER=1` и `RUNWAY_ROUTER_CONFIG_ID=<slug>` с https://dev.runwayml.com/model-routers. Запасной путь `VIDEO_PROVIDER=runway`.

@@ -112,7 +112,11 @@
       if (f) body.append(k, f);
     });
     showStatus("Отправил задачу. Результат придёт в чат с ботом…");
-    const resp = await fetch(path, { method: "POST", body });
+    const resp = await fetch(path, {
+      method: "POST",
+      body,
+      headers: { "ngrok-skip-browser-warning": "1" },
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       showStatus(data.error || "Не вышло. Попробуй ещё раз.", "err");

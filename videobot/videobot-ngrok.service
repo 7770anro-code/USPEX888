@@ -1,0 +1,16 @@
+[Unit]
+Description=VideoBot Mini App ngrok HTTPS tunnel
+After=network-online.target videobot.service
+Wants=network-online.target videobot.service
+
+[Service]
+Type=simple
+User=videobot
+Group=videobot
+ExecStart=/usr/local/bin/ngrok http 127.0.0.1:8088 --url=sweep-wanting-tusk.ngrok-free.dev --config=/etc/ngrok/ngrok.yml --log=stdout --log-format=logfmt
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

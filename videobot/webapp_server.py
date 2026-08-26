@@ -1,4 +1,4 @@
-"""Локальный HTTP для Telegram Mini App. Снаружи — nginx + WEBAPP_PUBLIC_URL."""
+"""Локальный HTTP для Telegram Mini App. Снаружи — ngrok + WEBAPP_PUBLIC_URL."""
 
 from __future__ import annotations
 
