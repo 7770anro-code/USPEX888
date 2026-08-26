@@ -149,6 +149,8 @@ async def render_clip(
             if "слишком долго" in (exc.user_message or "").lower():
                 # Kling/Seedance ещё IN_PROGRESS — не бросать в Runway, sidecar жив для resume.
                 raise
+            if getattr(exc, "code", "") == "fal_keep_sidecar":
+                raise
             detail = str(exc.detail or exc.user_message or "")
             status = getattr(exc, "status", None)
             if engine in ("kling", "seedance") and (

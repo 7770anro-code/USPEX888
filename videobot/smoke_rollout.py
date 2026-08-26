@@ -64,6 +64,11 @@ def smoke_routing() -> None:
     assert kling["elements"]
     assert kling["elements"][0]["frontal_image_url"] == "https://example.com/a.jpg"
     assert kling["elements"][0]["reference_image_urls"] == ["https://example.com/a.jpg"]
+    from fal_api import fal_try_resume, keep_fal_sidecar
+    from pipeline import PipelineError
+
+    assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
+    assert "fal_try_resume" in Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
     seed = seedance_i2v_payload("walk", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False

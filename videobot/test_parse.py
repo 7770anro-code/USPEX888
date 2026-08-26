@@ -1200,7 +1200,136 @@ def test_owner_resume_keeps_autorolik_artifacts() -> None:
     assert (work / "m0.mp4").stat().st_size == before["m0"]
     assert (work / "user_photo_1.jpg").stat().st_size == before["photo"]
     assert (work / "c2.mp4.fal_id").read_text(encoding="utf-8") == before["sidecar"]
+    from pipeline import build_video, file_to_data_uri
+
+    assert "credits_paused=False" not in inspect.getsource(build_video)
+    assert "credits_paused=False" not in inspect.getsource(_run_job)
+    assert "resume jpeg" in inspect.getsource(file_to_data_uri)
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fal_resume_completed_uses_status_media() -> None:
+    """COMPLETED Kling: видео на /status, GET result 405 — скачать, не новый submit."""
+    import asyncio
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import config
+    from fal_api import fal_run, fal_try_resume, keep_fal_sidecar
+    from fal_models import KLING_I2V_PRO
+    from pipeline import PipelineError
+    from providers.fal_client import FalClient
+
+    err = PipelineError("x", code="fal_keep_sidecar")
+    assert keep_fal_sidecar(err) is True
+    assert keep_fal_sidecar(PipelineError("fal.ai слишком долго генерирует. Остановил ожидание.")) is True
+    assert keep_fal_sidecar(PipelineError("нет", code="credits")) is True
+    assert keep_fal_sidecar(PipelineError("просто упало")) is False
+
+    class _FakeResp:
+        def __init__(self, status: int, body: str = "", blob: bytes = b"") -> None:
+            self.status = status
+            self._body = body
+            self._blob = blob or body.encode("utf-8")
+
+        async def text(self) -> str:
+            return self._body
+
+        async def read(self) -> bytes:
+            return self._blob
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            if "cdn.fal.ai" in str(url):
+                return _FakeResp(200, blob=b"v" * 1500)
+            if "/status" in str(url):
+                return _FakeResp(
+                    200,
+                    json.dumps(
+                        {
+                            "status": "COMPLETED",
+                            "video": {"url": "https://cdn.fal.ai/c2.mp4"},
+                        }
+                    ),
+                )
+            return _FakeResp(405, "Allow: POST")
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    old_key = config.FAL_KEY
+    config.FAL_KEY = "test-fal-key"
+    tmp = tempfile.mkdtemp()
+    dest = Path(tmp) / "c2.mp4"
+    side = dest.with_suffix(dest.suffix + ".fal_id")
+    side.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d16-d9ea-7152-aa38-05611ff45d6b",
+                "model_id": KLING_I2V_PRO,
+                "response_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d16-d9ea-7152-aa38-05611ff45d6b"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar_before = side.read_text(encoding="utf-8")
+    session = _FakeSession()
+
+    async def _go() -> None:
+        data = await fal_try_resume(
+            session, dest, used_image=True, expected_model=KLING_I2V_PRO
+        )
+        assert data is not None
+        assert (data.get("video") or {}).get("url") == "https://cdn.fal.ai/c2.mp4"
+        assert session.posts == []
+        assert side.is_file()
+        out = await fal_run(
+            session,
+            KLING_I2V_PRO,
+            {"should": "not-submit"},
+            used_image=True,
+            dest_id=dest,
+        )
+        assert (out.get("video") or {}).get("url") == "https://cdn.fal.ai/c2.mp4"
+        assert session.posts == []
+        client = FalClient(session, engine="kling")
+        path = await client.generate_kling(
+            session,
+            "prompt",
+            "data:image/jpeg;base64,xxx",
+            5,
+            dest,
+            photo_lock=True,
+            elements=["data:image/jpeg;base64,xxx"],
+        )
+        assert path == dest
+        assert dest.is_file() and dest.stat().st_size >= 1000
+        assert session.posts == []
+        assert side.read_text(encoding="utf-8") == sidecar_before
+
+    try:
+        asyncio.run(_go())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_night_policy_defaults() -> None:
@@ -2497,19 +2626,30 @@ def test_fal_kling_and_miniapp() -> None:
         }
     ]
     # Прод 01:20: Kling 422 — data URI в elements.frontal_image_url. Перед submit льём https.
+    # Resume COMPLETED: сначала fal_try_resume, без повторной загрузки фото.
     kling_fn = inspect.getsource(FalClient.generate_kling)
     assert "to_fal_https_url" in kling_fn
     assert "converted_map" in kling_fn
+    assert "fal_try_resume" in kling_fn
+    assert kling_fn.index("fal_try_resume") < kling_fn.index("to_fal_https_url")
     seed_fn = inspect.getsource(FalClient.generate_seedance)
     assert "to_fal_https_url" in seed_fn
     assert "converted_map" in seed_fn
+    assert "fal_try_resume" in seed_fn
+    assert seed_fn.index("fal_try_resume") < seed_fn.index("to_fal_https_url")
     from fal_api import fal_side_payload, fal_run, to_fal_https_url
 
     side = fal_side_payload({"request_id": "rid-x"}, model_id=KLING_I2V_PRO)
     assert side["model_id"] == KLING_I2V_PRO
+    from fal_api import fal_try_resume, keep_fal_sidecar
+
+    try_src = inspect.getsource(fal_try_resume)
+    assert "fal resume dead" in try_src
+    assert "other model" in try_src
+    assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
     fal_run_src = inspect.getsource(fal_run)
-    assert "fal resume dead" in fal_run_src
-    assert "other model" in fal_run_src
+    assert "fal_try_resume" in fal_run_src
+    assert "fal_keep_sidecar" in fal_run_src
     router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
     assert "skip_runway" in router_src
     assert "skip legacy_runway after fal validation error" in router_src
@@ -2519,6 +2659,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "is_fal_only_mode" in router_src
     assert "if fal_only:" in router_src
     assert "слишком долго" in router_src
+    assert "fal_keep_sidecar" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
@@ -3318,6 +3459,7 @@ if __name__ == "__main__":
     test_runway_model_router_optional()
     test_credits_resume_keeps_artifacts()
     test_owner_resume_keeps_autorolik_artifacts()
+    test_fal_resume_completed_uses_status_media()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()

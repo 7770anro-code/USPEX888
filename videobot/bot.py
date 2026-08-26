@@ -2363,7 +2363,6 @@ async def _run_job(
     job_key = job_key_manual(message.chat.id)
     save_checkpoint(
         work,
-        credits_paused=False,
         run={
             "idea": idea,
             "user_script": bool(user_script),
@@ -2540,9 +2539,10 @@ async def _run_job(
         except Exception:
             log.exception("unhandled")
             finish_job(job_key, failed=True, label="Сломалось на моей стороне")
+            mark_credits_pause(work)
             await message.answer(
                 "Упс, что-то сломалось на моей стороне. Нажми /start и попробуй ещё раз.",
-                reply_markup=main_menu(),
+                reply_markup=credits_pause_kb(job_key),
             )
         finally:
             if ok:

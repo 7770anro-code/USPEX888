@@ -14,6 +14,7 @@ from fal_api import (
     fal_peek_status,
     fal_run,
     fal_submit,
+    fal_try_resume,
     path_to_fal_url,
     to_fal_https_url,
 )
@@ -142,6 +143,15 @@ class FalClient(VideoProvider):
         photo_lock: bool = False,
         elements: list[str] | None = None,
     ) -> Path:
+        override = (config.FAL_VIDEO_MODEL or "").strip()
+        model_id = override if override.startswith("fal-ai/kling") else KLING_I2V_PRO
+        data = await fal_try_resume(
+            session, dest, used_image=bool(start_frame), expected_model=model_id
+        )
+        if data is not None:
+            out = await fal_download_media(session, data, dest)
+            write_runway_model(dest, model_id)
+            return out
         converted_map: dict[str, str] = {}
 
         async def https_one(raw: str) -> str:
@@ -178,6 +188,13 @@ class FalClient(VideoProvider):
         references: list[str] | None = None,
         multi_ref: bool = False,
     ) -> Path:
+        data = await fal_try_resume(
+            session, dest, used_image=bool(start_frame), expected_model=SEEDANCE_I2V
+        )
+        if data is not None:
+            out = await fal_download_media(session, data, dest)
+            write_runway_model(dest, SEEDANCE_I2V)
+            return out
         converted_map: dict[str, str] = {}
 
         async def https_one(raw: str) -> str:
