@@ -163,25 +163,81 @@
     const hookEl = document.getElementById("auto-hook");
     const list = document.getElementById("auto-scenes");
     if (!titleEl || !list) return;
-    titleEl.textContent = (script && script.title) || "Авторолик";
-    if (hookEl) hookEl.textContent = script && script.hook ? "Хук: " + script.hook : "";
+    if (titleEl.tagName === "INPUT") titleEl.value = (script && script.title) || "Авторолик";
+    else titleEl.textContent = (script && script.title) || "Авторолик";
+    if (hookEl) {
+      const hook = script && script.hook ? script.hook : "";
+      if (hookEl.tagName === "TEXTAREA" || hookEl.tagName === "INPUT") hookEl.value = hook;
+      else hookEl.textContent = hook ? "Хук: " + hook : "";
+    }
     list.innerHTML = "";
     (script && script.scenes ? script.scenes : []).forEach((s) => {
       const li = document.createElement("li");
+      li.dataset.n = String(s.n || "");
       const tag = document.createElement("span");
       tag.className = "tag";
       tag.textContent = (s.n || "") + ". " + (s.tag || "");
-      const narr = document.createElement("p");
-      narr.className = "narr";
-      narr.textContent = s.narration || "";
-      const vis = document.createElement("p");
-      vis.className = "vis";
-      vis.textContent = s.visual || "";
+      const narrLab = document.createElement("span");
+      narrLab.className = "fld";
+      narrLab.textContent = "Речь";
+      const narr = document.createElement("textarea");
+      narr.className = "narr-in";
+      narr.rows = 2;
+      narr.maxLength = 500;
+      narr.value = s.narration || "";
+      const visLab = document.createElement("span");
+      visLab.className = "fld";
+      visLab.textContent = "Кадр";
+      const vis = document.createElement("textarea");
+      vis.className = "vis-in";
+      vis.rows = 3;
+      vis.maxLength = 1500;
+      vis.value = s.visual || "";
       li.appendChild(tag);
+      li.appendChild(narrLab);
       li.appendChild(narr);
+      li.appendChild(visLab);
       li.appendChild(vis);
       list.appendChild(li);
     });
+  }
+
+  function collectScriptEdits() {
+    const scenes = [];
+    document.querySelectorAll("#auto-scenes li").forEach((li) => {
+      const n = Number(li.dataset.n || 0);
+      const narr = li.querySelector(".narr-in");
+      const vis = li.querySelector(".vis-in");
+      scenes.push({
+        n,
+        narration: narr ? narr.value : "",
+        visual: vis ? vis.value : "",
+      });
+    });
+    const titleEl = document.getElementById("auto-title");
+    const hookEl = document.getElementById("auto-hook");
+    return {
+      title: titleEl && "value" in titleEl ? titleEl.value : "",
+      hook: hookEl && "value" in hookEl ? hookEl.value : "",
+      scenes,
+    };
+  }
+
+  async function saveScriptEdits() {
+    if (!initData) return null;
+    const edits = collectScriptEdits();
+    if (!edits.scenes.length) return { ok: true };
+    const resp = await fetch("/api/autorolik/script", {
+      method: "POST",
+      body: autoForm({ script: JSON.stringify(edits) }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      showStatus(data.error || "Не сохранил правки.", "err");
+      return data;
+    }
+    showStatus(data.message || "Сохранил правки сцен.", "ok");
+    return data;
   }
 
   function renderShoot(shoot) {
@@ -248,7 +304,8 @@
       setHidden(review, false);
       setHidden(progress, true);
       setHidden(refreshWrap, false);
-      renderScript(script);
+      const already = review && !review.hidden && document.querySelector("#auto-scenes .narr-in");
+      if (!already) renderScript(script);
       stopAutoPoll();
       if (phase === "error" && pending && pending.error) {
         showStatus(pending.error, "err");
@@ -402,12 +459,22 @@
     }
   });
 
+  bind("go-auto-save", async () => {
+    if (!initData) {
+      showStatus("Открой меню из Telegram — иначе нет подписи Mini App.", "err");
+      return;
+    }
+    await saveScriptEdits();
+  });
+
   bind("go-auto-shoot", async () => {
     if (!initData) {
       showStatus("Открой меню из Telegram — иначе нет подписи Mini App.", "err");
       return;
     }
-    showStatus("Снимаю. Прогресс здесь, видео — в чат.");
+    const saved = await saveScriptEdits();
+    if (saved && saved.ok === false) return;
+    showStatus("Снимаю. Можно закрыть Telegram — ролик придёт в чат.");
     const resp = await fetch("/api/autorolik/shoot", { method: "POST", body: autoForm() });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {

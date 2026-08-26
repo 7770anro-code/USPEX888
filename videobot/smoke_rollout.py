@@ -86,18 +86,25 @@ def smoke_miniapp() -> None:
         "/api/autorolik",
         "/api/autorolik/status",
         "/api/autorolik/shoot",
+        "/api/autorolik/script",
+        "/cover.jpg",
         "/health",
     ):
         assert need in paths, need
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert html.count('class="sub"') == 7
     assert "go-auto-shoot" in html
+    assert "go-auto-save" in html
     assert "go-auto-refresh" in html
     assert "Обновить статус" in html
+    assert "cover.jpg" in html
+    cover = Path(__file__).with_name("webapp").joinpath("cover.jpg")
+    assert cover.is_file() and cover.stat().st_size > 1024
     js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")
     assert "go-auto-refresh" in js
+    assert "/api/autorolik/script" in js
     test_webapp_init_data_hmac_includes_signature()
-    _ok("miniapp", "7 карточек, HMAC, Авторолик, Обновить статус")
+    _ok("miniapp", "7 карточек, HMAC, правки сцен, обложка, Обновить статус")
 
 
 async def smoke_idea_script() -> None:

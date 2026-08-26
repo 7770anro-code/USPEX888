@@ -11,9 +11,10 @@
   <button id="tip" class="tip" type="button" hidden></button>
   <main class="shell">
     <header class="hero">
-      <p class="kicker">VideoBot</p>
+      <img class="hero-art" src="/cover.jpg" alt="" onerror="this.remove()" />
+      <p class="kicker">Успех 888</p>
       <h1>Меню</h1>
-      <p class="lede">Готовое придёт в чат с ботом.</p>
+      <p class="lede">Готовое придёт в чат — даже если закроешь приложение.</p>
     </header>
 
     <section id="home" class="home">
@@ -79,7 +80,7 @@
     <section id="panel-autorolik" class="panel">
       <button class="back" data-back type="button">← Меню</button>
       <h2>Авторолик</h2>
-      <p class="hint">До 6 фото друзей. Сценарий, «Снять» и прогресс — здесь. Готовое видео придёт в чат. FACE — Kling, WIDE — Seedance.</p>
+      <p class="hint">До 6 фото друзей. Сценарий можно править здесь по сценам. «Снять» — и ролик придёт в чат, даже если закроешь Telegram.</p>
       <div id="auto-setup">
       <label>Тема / вайб (необязательно)
         <textarea id="auto-topic" rows="2" maxlength="400" placeholder="закат, ночной город, друзья…"></textarea>
@@ -95,18 +96,23 @@
       </div>
       <div id="auto-wait" hidden>
         <p id="auto-wait-label" class="auto-wait-label">Пишу сценарий…</p>
-        <p class="hint">Можно подождать или нажать «Обновить статус» — это не запускает съёмку и не тратит кредиты.</p>
+        <p class="hint">Можно закрыть Telegram — сценарий допишется на сервере, план и кнопки придут в чат. «Обновить статус» кредиты не тратит.</p>
       </div>
       <div id="auto-review" hidden>
-        <h3 id="auto-title" class="auto-h"></h3>
-        <p id="auto-hook" class="hint"></p>
+        <label>Название
+          <input id="auto-title" class="auto-in" maxlength="80" />
+        </label>
+        <label>Хук
+          <textarea id="auto-hook" rows="2" maxlength="120"></textarea>
+        </label>
         <ol id="auto-scenes" class="scenes"></ol>
-        <label>Правки текстом
+        <button class="go alt" id="go-auto-save" type="button">Сохранить правки сцен</button>
+        <label>Или переписать весь сценарий через Grok
           <textarea id="auto-notes" rows="2" maxlength="1500" placeholder="больше дрона, меньше портретов…"></textarea>
         </label>
         <div class="row-btns">
           <button class="go" id="go-auto-shoot" type="button">Снять</button>
-          <button class="go alt" id="go-auto-edit" type="button">Правки</button>
+          <button class="go alt" id="go-auto-edit" type="button">Переписать с Grok</button>
           <button class="go alt" id="go-auto-cancel" type="button">Отмена</button>
         </div>
       </div>

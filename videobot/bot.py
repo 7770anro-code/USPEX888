@@ -710,11 +710,21 @@ async def _save_job(state: FSMContext, job: dict[str, Any]) -> None:
 
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(
-        "Привет! Я собираю вертикальное видео для TikTok.\n"
-        "Нажми кнопку — я подскажу каждый шаг.",
-        reply_markup=main_menu(),
+    from branding import BRAND_NAME, cover_path
+
+    caption = (
+        f"{BRAND_NAME}\n"
+        "AI-видео. Сценарий, лица, монтаж — один жест.\n\n"
+        "Нажми кнопку. Готовое придёт сюда, даже если закроешь приложение."
     )
+    art = cover_path()
+    if art:
+        try:
+            await message.answer_photo(FSInputFile(art), caption=caption[:1024], reply_markup=main_menu())
+            return
+        except Exception as exc:
+            log.warning("start cover: %s", exc)
+    await message.answer(caption, reply_markup=main_menu())
 
 
 async def cmd_help(message: Message, state: FSMContext) -> None:
@@ -1999,7 +2009,9 @@ async def _autorolik_write_script(
     if not ids:
         ids = list(pending.get("photo_file_ids") or [])
         job["photo_file_ids"] = ids
-    if not ids:
+    paths = [str(p) for p in (pending.get("photo_paths") or []) if p]
+    n_photos = len(ids) or len(paths)
+    if n_photos < 1:
         await message.answer("Нужно хотя бы одно фото.", reply_markup=main_menu())
         return
     topic = str(job.get("idea") or pending.get("idea") or "").strip()
@@ -2010,7 +2022,7 @@ async def _autorolik_write_script(
         async with aiohttp.ClientSession(timeout=timeout) as session:
             script = await grok_autorolik(
                 session,
-                n_photos=len(ids),
+                n_photos=n_photos,
                 idea=topic,
                 notes=notes,
                 previous=previous if isinstance(previous, dict) else None,
@@ -2018,15 +2030,17 @@ async def _autorolik_write_script(
     except PipelineError as exc:
         await message.answer(exc.user_message, reply_markup=main_menu())
         return
-    save_pending(
-        message.chat.id,
-        {
-            "script": script,
-            "photo_file_ids": ids,
-            "consent_verified": True,
-            "idea": topic,
-        },
-    )
+    payload = {
+        "phase": "review",
+        "error": "",
+        "script": script,
+        "photo_file_ids": ids,
+        "photo_paths": paths,
+        "consent_verified": True,
+        "idea": topic,
+        "source": pending.get("source") or "chat",
+    }
+    save_pending(message.chat.id, payload)
     job["script"] = script
     job["consent_verified"] = True
     await _save_job(state, job)
@@ -2041,7 +2055,8 @@ async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> 
     job = await _job(state)
     script = pending.get("script") or job.get("script")
     ids = [str(x) for x in (pending.get("photo_file_ids") or job.get("photo_file_ids") or []) if x]
-    if not isinstance(script, dict) or not ids:
+    paths = [str(p) for p in (pending.get("photo_paths") or []) if p]
+    if not isinstance(script, dict) or (not ids and not paths):
         await message.answer(
             "Сценарий или фото не нашёл. Начни Авторолик заново.",
             reply_markup=main_menu(),
@@ -2059,7 +2074,7 @@ async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> 
         idea=str(pending.get("idea") or job.get("idea") or script.get("title") or "авторолик"),
         user_script=True,
         voice_id=voice_id,
-        photo_file_id=ids[0],
+        photo_file_id=ids[0] if ids else None,
         bot=bot,
         voice_name=voice_name,
         consent_verified=True,
@@ -2076,7 +2091,8 @@ async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> 
         wipe=True,
         dynamic_pacing=True,
         route_mode="autorolik_face",
-        photo_file_ids=ids,
+        photo_file_ids=ids or None,
+        photo_paths=paths or None,
         script_override=script,
     )
     clear_pending(message.chat.id)
@@ -2293,28 +2309,28 @@ async def _run_job(
         ids = [str(photo_file_id)] + ids
     blocked = photo_start_blocked(ids[0] if ids else None, consent_verified)
     if blocked:
+        await message.answer(blocked, reply_markup=main_menu())
         if quiet:
             raise PipelineError(blocked)
-        await message.answer(blocked, reply_markup=main_menu())
         return
     if BUSY.locked():
-        if quiet:
-            raise PipelineError("⏳ Я уже снимаю другой ролик. Подожди готовое видео.")
         await message.answer(
             "⏳ Я уже снимаю другой ролик. Напиши ещё раз, когда пришлю готовое видео.",
             reply_markup=main_menu(),
         )
+        if quiet:
+            raise PipelineError("⏳ Я уже снимаю другой ролик. Подожди готовое видео.")
         return
     await BUSY.acquire()
     file_lock = JobLock()
     if not file_lock.acquire():
         BUSY.release()
-        if quiet:
-            raise PipelineError("⏳ Сейчас уже идёт съёмка. Напиши позже.")
         await message.answer(
             "⏳ Сейчас уже идёт съёмка. Напиши позже.",
             reply_markup=main_menu(),
         )
+        if quiet:
+            raise PipelineError("⏳ Сейчас уже идёт съёмка. Напиши позже.")
         return
     ok = False
     work = resume_work_dir(message.chat.id)
@@ -2486,6 +2502,8 @@ async def _run_job(
                 hint = usage + "\n\n" + hint
             if not quiet:
                 await message.answer(hint, reply_markup=result_kb(can_finalize=True))
+            else:
+                await message.answer("Готово. Ролик выше — можно закрывать Telegram.")
             ok = True
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,14 @@ log = logging.getLogger("videobot")
 
 WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
 MAX_BODY = 42 * 1024 * 1024
+_JOBS: set[asyncio.Task[Any]] = set()
+
+
+def _spawn(coro: Any) -> None:
+    """Джоба живёт на event loop, а не на HTTP-запросе Mini App. Закрытие Telegram её не отменяет."""
+    task = asyncio.create_task(coro)
+    _JOBS.add(task)
+    task.add_done_callback(_JOBS.discard)
 
 
 def _user_from_request(request: web.Request, form: Any) -> dict[str, Any]:
@@ -64,7 +73,7 @@ async def handle_quick(request: web.Request) -> web.Response:
     consent = str(form.get("consent") or "") in ("1", "true", "yes", "on")
     photo, _name, _mime = await _read_file_field(form, "photo")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "quick", idea, quality, consent, photo))
+    _spawn(_run_safe(bot, user["id"], "quick", idea, quality, consent, photo))
     return web.json_response(
         {
             "ok": True,
@@ -84,7 +93,7 @@ async def handle_vibe(request: web.Request) -> web.Response:
     if len(vibe) < 3:
         return json_error("Напиши вайб или тему: хотя бы 2–3 слова.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "vibe", vibe))
+    _spawn(_run_safe(bot, user["id"], "vibe", vibe))
     return web.json_response(
         {"ok": True, "message": "Снимаю вайб. Результат придёт в чат.", "close": True}
     )
@@ -100,7 +109,7 @@ async def handle_upscale(request: web.Request) -> web.Response:
     if not data:
         return json_error("Приложи фото или видео.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "upscale", data, filename, mime))
+    _spawn(_run_safe(bot, user["id"], "upscale", data, filename, mime))
     return web.json_response(
         {"ok": True, "message": "Topaz в работе. Файл придёт в чат с ботом.", "close": True}
     )
@@ -116,7 +125,7 @@ async def handle_interpolate(request: web.Request) -> web.Response:
     if not data:
         return json_error("Приложи видео для слоу-мо.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "interpolate", data, filename, mime))
+    _spawn(_run_safe(bot, user["id"], "interpolate", data, filename, mime))
     return web.json_response(
         {"ok": True, "message": "Делаю слоу-мо. Файл придёт в чат.", "close": True}
     )
@@ -132,7 +141,7 @@ async def handle_restore(request: web.Request) -> web.Response:
     if not data:
         return json_error("Приложи фото для реставрации.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "restore", data, filename, mime))
+    _spawn(_run_safe(bot, user["id"], "restore", data, filename, mime))
     return web.json_response(
         {"ok": True, "message": "Реставрирую фото. Картинка придёт в чат.", "close": True}
     )
@@ -150,7 +159,7 @@ async def handle_tryon(request: web.Request) -> web.Response:
     if not person or not clothes:
         return json_error("Нужны оба фото: человек и одежда.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "tryon", person, clothes, consent))
+    _spawn(_run_safe(bot, user["id"], "tryon", person, clothes, consent))
     return web.json_response(
         {"ok": True, "message": "Примерка пошла. Картинка придёт в чат.", "close": True}
     )
@@ -167,7 +176,7 @@ async def handle_clone(request: web.Request) -> web.Response:
     if not audio:
         return json_error("Приложи голосовое или аудиофайл.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "clone", audio, filename, consent))
+    _spawn(_run_safe(bot, user["id"], "clone", audio, filename, consent))
     return web.json_response(
         {"ok": True, "message": "Клонирую голос MiniMax. Напишу в чат, когда будет готово.", "close": True}
     )
@@ -216,12 +225,12 @@ async def handle_autorolik(request: web.Request) -> web.Response:
     if not consent:
         return json_error("Без согласия фото людей не использую.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "autorolik", photos, consent, topic))
+    _spawn(_run_safe(bot, user["id"], "autorolik", photos, consent, topic))
     return web.json_response(
         {
             "ok": True,
             "phase": "scripting",
-            "message": "Пишу сценарий… Оставайся здесь — подтверждение и съёмка в Mini App.",
+            "message": "Пишу сценарий. Можно закрыть Telegram — план и кнопки «Снять» придут в чат.",
             "close": False,
         }
     )
@@ -250,6 +259,54 @@ async def handle_autorolik_status(request: web.Request) -> web.Response:
     )
 
 
+async def handle_cover(_request: web.Request) -> web.StreamResponse:
+    from branding import cover_path
+
+    path = cover_path()
+    if not path:
+        raise web.HTTPNotFound()
+    return web.FileResponse(path)
+
+
+async def handle_autorolik_save(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    raw = str(form.get("script") or form.get("edits") or "").strip()
+    try:
+        edits = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        return json_error("Не разобрал правки сценария.")
+    if not isinstance(edits, dict):
+        return json_error("Не разобрал правки сценария.")
+    from autorolik import apply_manual_script_edits, load_pending, pending_view, save_pending
+
+    pending = load_pending(int(user["id"])) or {}
+    if pending.get("phase") == "shooting":
+        return json_error("Съёмка уже идёт. Правки после неё.")
+    script = pending.get("script")
+    n_photos = len(pending.get("photo_paths") or pending.get("photo_file_ids") or []) or 1
+    try:
+        updated = apply_manual_script_edits(script if isinstance(script, dict) else None, edits, n_photos=n_photos)
+    except PipelineError as exc:
+        return json_error(exc.user_message)
+    pending["script"] = updated
+    pending["phase"] = "review"
+    pending["error"] = ""
+    save_pending(int(user["id"]), pending)
+    return web.json_response(
+        {
+            "ok": True,
+            "phase": "review",
+            "message": "Сохранил правки сцен.",
+            "pending": pending_view(pending),
+            "close": False,
+        }
+    )
+
+
 async def handle_autorolik_revise(request: web.Request) -> web.Response:
     form = await request.post()
     try:
@@ -265,7 +322,7 @@ async def handle_autorolik_revise(request: web.Request) -> web.Response:
     if pending.get("phase") == "shooting":
         return json_error("Съёмка уже идёт. Правки после неё.")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "autorolik_revise", notes))
+    _spawn(_run_safe(bot, user["id"], "autorolik_revise", notes))
     return web.json_response(
         {
             "ok": True,
@@ -297,7 +354,7 @@ async def handle_autorolik_shoot(request: web.Request) -> web.Response:
     if pending.get("phase") not in ("review", "error"):
         return json_error("Сначала собери сценарий кнопкой «Собрать сценарий».")
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "autorolik_shoot"))
+    _spawn(_run_safe(bot, user["id"], "autorolik_shoot"))
     return web.json_response(
         {
             "ok": True,
@@ -330,7 +387,7 @@ async def handle_history(request: web.Request) -> web.Response:
     except WebAppAuthError as exc:
         return json_error(str(exc), 403)
     bot = request.app["bot"]
-    asyncio.create_task(_run_safe(bot, user["id"], "history"))
+    _spawn(_run_safe(bot, user["id"], "history"))
     return web.json_response(
         {"ok": True, "message": "Если есть готовый ролик — пришлю в чат.", "close": True}
     )
@@ -393,14 +450,15 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
             )
         elif kind == "autorolik_revise":
             (notes,) = args
-            await run_studio_autorolik_revise(user_id, str(notes or ""))
+            await run_studio_autorolik_revise(bot, user_id, str(notes or ""))
         elif kind == "autorolik_shoot":
             await run_studio_autorolik_shoot(bot, user_id)
         elif kind == "history":
             await run_studio_history(bot, user_id)
     except (PipelineError, Exception) as exc:
-        if str(kind).startswith("autorolik"):
-            log.warning("studio autorolik %s user=%s: %s", kind, user_id, job_error_text(exc))
+        log.warning("studio %s user=%s: %s", kind, user_id, job_error_text(exc))
+        if kind == "autorolik_shoot":
+            # MiniChat внутри _run_job уже пишет ошибку в чат.
             return
         try:
             await send_chat_text(bot, user_id, job_error_text(exc))
@@ -416,6 +474,7 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_get("/health", handle_health)
     app.router.add_get("/app.css", lambda _r: web.FileResponse(WEBAPP_DIR / "app.css"))
     app.router.add_get("/app.js", lambda _r: web.FileResponse(WEBAPP_DIR / "app.js"))
+    app.router.add_get("/cover.jpg", handle_cover)
     app.router.add_post("/api/quick", handle_quick)
     app.router.add_post("/api/vibe", handle_vibe)
     app.router.add_post("/api/upscale", handle_upscale)
@@ -425,6 +484,7 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_post("/api/clone", handle_clone)
     app.router.add_post("/api/autorolik", handle_autorolik)
     app.router.add_post("/api/autorolik/status", handle_autorolik_status)
+    app.router.add_post("/api/autorolik/script", handle_autorolik_save)
     app.router.add_post("/api/autorolik/revise", handle_autorolik_revise)
     app.router.add_post("/api/autorolik/shoot", handle_autorolik_shoot)
     app.router.add_post("/api/autorolik/cancel", handle_autorolik_cancel)

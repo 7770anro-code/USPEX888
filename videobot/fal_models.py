@@ -158,10 +158,11 @@ def video_payload(model_id: str, prompt: str, image_url: str, seconds: int) -> d
     return kling_t2v_payload(prompt, seconds)
 
 
-def flux_still_payload(prompt: str) -> dict[str, Any]:
+def flux_still_payload(prompt: str, *, image_size: str = "portrait_16_9") -> dict[str, Any]:
+    size = (image_size or "portrait_16_9").strip() or "portrait_16_9"
     return {
         "prompt": (prompt or "").strip()[:2000] or "cinematic still, vertical 9:16, photoreal",
-        "image_size": "portrait_16_9",
+        "image_size": size,
         "num_images": 1,
     }
 
