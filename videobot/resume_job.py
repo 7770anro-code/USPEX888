@@ -112,6 +112,95 @@ def credits_paused(work_dir: Path) -> bool:
     return bool(data and data.get("credits_paused"))
 
 
+def should_wipe_resume(*, wipe: bool = False, paused: bool = False) -> bool:
+    """Стереть диск только если нет credits_paused.
+
+    Mini App «Снять» передаёт wipe=True даже при зависшей досъёмке.
+    Pause на диске важнее: сценарий, озвучка и готовые клипы остаются.
+    Явный «Начать заново» сначала вызывает wipe_resume — тогда paused уже False.
+    """
+    _ = wipe
+    return not bool(paused)
+
+
+def resume_shoot_plan(work_dir: Path, n_scenes: int | None = None) -> dict[str, Any]:
+    """Что сделает «Продолжить съёмку»: какие сцены skip, какие снять, каким движком."""
+    script = load_script(work_dir)
+    n = int(n_scenes or scene_count(work_dir))
+    scenes = script.get("scenes") if isinstance(script, dict) else None
+    if not isinstance(scenes, list):
+        scenes = []
+    autorolik = str((script or {}).get("kind") or "") == "autorolik" or any(
+        isinstance(s, dict) and "face_scene" in s for s in scenes
+    )
+    route_for_scene = None
+    if autorolik:
+        from autorolik import route_for_scene as _route_for_scene
+
+        route_for_scene = _route_for_scene
+    steps: list[dict[str, Any]] = []
+    for i in range(n):
+        scene = scenes[i] if i < len(scenes) and isinstance(scenes[i], dict) else {}
+        muxed = file_ready(work_dir / f"m{i}.mp4", min_bytes=MP4_MIN_BYTES)
+        clip = file_ready(work_dir / f"c{i}.mp4", min_bytes=MP4_MIN_BYTES)
+        tts = file_ready(work_dir / f"n{i}.mp3", min_bytes=MP3_MIN_BYTES)
+        sidecar = (work_dir / f"c{i}.mp4.fal_id").is_file()
+        if muxed:
+            action = "skip_muxed"
+        elif clip:
+            action = "mux_existing_clip"
+        else:
+            action = "render_clip"
+        route = ""
+        engine = ""
+        if autorolik:
+            face = bool(scene.get("face_scene"))
+            route = route_for_scene(scene) if scene and route_for_scene else (
+                "autorolik_face" if face else "autorolik_wide"
+            )
+            engine = "kling" if route == "autorolik_face" else "seedance"
+        elif action == "render_clip":
+            route = "real_photo" if (
+                file_ready(work_dir / "user_photo.jpg", min_bytes=IMAGE_MIN_BYTES)
+                or file_ready(work_dir / "user_photo_1.jpg", min_bytes=IMAGE_MIN_BYTES)
+            ) else "synthetic_multi_scene"
+            engine = "kling" if route == "real_photo" else "seedance"
+        redo_tts = action != "skip_muxed" and not tts
+        steps.append(
+            {
+                "index": i,
+                "action": action,
+                "tts": tts,
+                "clip": clip,
+                "muxed": muxed,
+                "sidecar": sidecar,
+                "redo_tts": redo_tts,
+                "route": route,
+                "engine": engine,
+                "face_scene": scene.get("face_scene") if "face_scene" in scene else None,
+            }
+        )
+    keep = {
+        "script": script is not None,
+        "tts_keep": [i for i in range(n) if file_ready(work_dir / f"n{i}.mp3", min_bytes=MP3_MIN_BYTES)],
+        "clip_keep": [i for i in range(n) if file_ready(work_dir / f"c{i}.mp4", min_bytes=MP4_MIN_BYTES)],
+        "mux_keep": [i for i in range(n) if file_ready(work_dir / f"m{i}.mp4", min_bytes=MP4_MIN_BYTES)],
+    }
+    return {
+        "n_scenes": n,
+        "autorolik": autorolik,
+        "credits_paused": credits_paused(work_dir),
+        "has_script": script is not None,
+        "wipe": should_wipe_resume(wipe=False, paused=credits_paused(work_dir)),
+        "wipe_even_if_requested": should_wipe_resume(
+            wipe=True, paused=credits_paused(work_dir)
+        ),
+        "next_render": next_scene_to_render(work_dir, n),
+        "keep": keep,
+        "steps": steps,
+    }
+
+
 def mark_credits_pause(work_dir: Path, **fields: Any) -> dict[str, Any]:
     return save_checkpoint(work_dir, credits_paused=True, **fields)
 

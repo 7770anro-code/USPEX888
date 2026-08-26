@@ -118,6 +118,7 @@ from resume_job import (
     resume_work_dir,
     run_kwargs_from_checkpoint,
     save_checkpoint,
+    should_wipe_resume,
     wipe_resume,
 )
 from wave2 import (
@@ -2350,9 +2351,15 @@ async def _run_job(
     ok = False
     work = resume_work_dir(message.chat.id)
     paused = credits_paused(work)
-    if wipe or not paused:
+    if should_wipe_resume(wipe=wipe, paused=paused):
         wipe_resume(message.chat.id)
         work = resume_work_dir(message.chat.id)
+    elif wipe and paused:
+        log.warning(
+            "ignore wipe, keep resume dir chat=%s path=%s",
+            message.chat.id,
+            work,
+        )
     job_key = job_key_manual(message.chat.id)
     save_checkpoint(
         work,

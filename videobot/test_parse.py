@@ -992,6 +992,8 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "_user_photo_plates" in bot_src
     assert "FAL_CREDITS_MSG" in bot_src
     assert "Клипы Runway" not in bot_src
+    assert "if wipe or not paused" not in bot_src
+    assert "should_wipe_resume" in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -1065,6 +1067,139 @@ def test_credits_resume_keeps_artifacts() -> None:
 
     import shutil
 
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_owner_resume_keeps_autorolik_artifacts() -> None:
+    """Раскладка как 6748280112_resume: 8 сцен Авторолика, c0/c1+m0/m1, n0–n2, pause."""
+    import inspect
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from autorolik import route_for_scene
+    from bot import _run_job, _user_photo_plates
+    from provider_router import chain_for
+    from resume_job import (
+        credits_paused,
+        load_script,
+        mark_credits_pause,
+        resume_shoot_plan,
+        run_kwargs_from_checkpoint,
+        save_script,
+        should_wipe_resume,
+    )
+
+    assert should_wipe_resume(wipe=True, paused=True) is False
+    assert should_wipe_resume(wipe=False, paused=True) is False
+    assert should_wipe_resume(wipe=True, paused=False) is True
+    assert should_wipe_resume(wipe=False, paused=False) is True
+    run_src = inspect.getsource(_run_job)
+    assert "should_wipe_resume" in run_src
+    assert "if wipe or not paused" not in run_src
+    assert "ignore wipe, keep resume dir" in run_src
+
+    tmp = tempfile.mkdtemp()
+    work = Path(tmp)
+    faces = [True, False, True, False, True, False, True, True]
+    els = [1, 0, 2, 0, 3, 0, 4, 5]
+    scenes = []
+    for i, (face, el) in enumerate(zip(faces, els)):
+        scenes.append(
+            {
+                "narration": f"сцена {i + 1} озвучка достаточно длинная фраза здесь сейчас",
+                "visual_prompt": "warm amber grade, photoreal 9:16, no text",
+                "face_scene": face,
+                "element_index": el,
+            }
+        )
+    script = {
+        "kind": "autorolik",
+        "title": "Ті, хто вирішує",
+        "plot": "друзья решают всё в городе",
+        "hook": "Вони вирішують усе в місті",
+        "scenes": scenes,
+    }
+    save_script(work, script)
+    (work / "n0.mp3").write_bytes(b"x" * 500)
+    (work / "n1.mp3").write_bytes(b"x" * 500)
+    (work / "n2.mp3").write_bytes(b"x" * 500)
+    (work / "c0.mp4").write_bytes(b"x" * 20_000)
+    (work / "c1.mp4").write_bytes(b"x" * 20_000)
+    (work / "m0.mp4").write_bytes(b"x" * 20_000)
+    (work / "m1.mp4").write_bytes(b"x" * 20_000)
+    (work / "c2.mp4.fal_id").write_text(
+        '{"request_id": "rid-c2", "model_id": "fal-ai/kling-video/v3/pro/image-to-video"}',
+        encoding="utf-8",
+    )
+    for i in range(1, 7):
+        (work / f"user_photo_{i}.jpg").write_bytes(b"x" * 1200)
+    mark_credits_pause(
+        work,
+        run={
+            "idea": "друзья решают всё в городе",
+            "user_script": True,
+            "n_scenes": 8,
+            "kind": "autorolik",
+            "consent_verified": True,
+            "photo_file_id": "",
+            "photo_file_ids": [],
+            "voice_id": "EXAVITQu4vr4xnSDxMaL",
+            "voice_name": "Сара",
+            "dynamic_pacing": True,
+            "quality": "optimal",
+        },
+    )
+    kw = run_kwargs_from_checkpoint(work)
+    assert kw is not None
+    assert kw["kind"] == "autorolik"
+    assert kw["user_script"] is True
+    assert kw["consent_verified"] is True
+    assert not kw["photo_file_ids"]
+    assert kw["n_scenes"] == 8
+    plates = _user_photo_plates(work)
+    assert [p.name for p in plates] == [f"user_photo_{i}.jpg" for i in range(1, 7)]
+    plan = resume_shoot_plan(work)
+    assert plan["has_script"] is True
+    assert plan["autorolik"] is True
+    assert plan["credits_paused"] is True
+    assert plan["wipe"] is False
+    assert plan["wipe_even_if_requested"] is False
+    assert plan["next_render"] == 2
+    assert plan["keep"]["tts_keep"] == [0, 1, 2]
+    assert plan["keep"]["clip_keep"] == [0, 1]
+    assert plan["keep"]["mux_keep"] == [0, 1]
+    assert plan["steps"][0]["action"] == "skip_muxed"
+    assert plan["steps"][1]["action"] == "skip_muxed"
+    assert plan["steps"][2]["action"] == "render_clip"
+    assert plan["steps"][2]["sidecar"] is True
+    assert plan["steps"][2]["redo_tts"] is False
+    assert plan["steps"][2]["engine"] == "kling"
+    assert plan["steps"][3]["engine"] == "seedance"
+    assert plan["steps"][4]["engine"] == "kling"
+    assert plan["steps"][5]["engine"] == "seedance"
+    assert plan["steps"][6]["engine"] == "kling"
+    assert plan["steps"][7]["engine"] == "kling"
+    assert "legacy_runway" not in chain_for("autorolik_face")
+    assert "legacy_runway" not in chain_for("autorolik_wide")
+    assert chain_for(route_for_scene(scenes[2]))[0] == "kling"
+    assert chain_for(route_for_scene(scenes[3]))[0] == "seedance"
+    before = {
+        "script": (work / "script.json").read_text(encoding="utf-8"),
+        "n0": (work / "n0.mp3").stat().st_size,
+        "c0": (work / "c0.mp4").stat().st_size,
+        "m0": (work / "m0.mp4").stat().st_size,
+        "photo": (work / "user_photo_1.jpg").stat().st_size,
+        "sidecar": (work / "c2.mp4.fal_id").read_text(encoding="utf-8"),
+    }
+    assert should_wipe_resume(wipe=True, paused=credits_paused(work)) is False
+    assert load_script(work) is not None
+    assert (work / "script.json").read_text(encoding="utf-8") == before["script"]
+    assert (work / "n0.mp3").stat().st_size == before["n0"]
+    assert (work / "c0.mp4").stat().st_size == before["c0"]
+    assert (work / "m0.mp4").stat().st_size == before["m0"]
+    assert (work / "user_photo_1.jpg").stat().st_size == before["photo"]
+    assert (work / "c2.mp4.fal_id").read_text(encoding="utf-8") == before["sidecar"]
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -3182,6 +3317,7 @@ if __name__ == "__main__":
     test_clone_posts_voices_add()
     test_runway_model_router_optional()
     test_credits_resume_keeps_artifacts()
+    test_owner_resume_keeps_autorolik_artifacts()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()
