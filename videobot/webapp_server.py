@@ -225,6 +225,9 @@ async def handle_autorolik(request: web.Request) -> web.Response:
     if not consent:
         return json_error("Без согласия фото людей не использую.")
     bot = request.app["bot"]
+    from autorolik import set_live
+
+    set_live(int(user["id"]), "scripting")
     _spawn(_run_safe(bot, user["id"], "autorolik", photos, consent, topic))
     return web.json_response(
         {
@@ -242,19 +245,40 @@ async def handle_autorolik_status(request: web.Request) -> web.Response:
         user = _user_from_request(request, form)
     except WebAppAuthError as exc:
         return json_error(str(exc), 403)
-    from autorolik import load_pending, pending_view
+    from autorolik import live_phase, pending_view, reconcile_pending, worker_alive
     from live_status import get_job, job_key_manual, status_payload
 
-    pending = load_pending(int(user["id"]))
-    snap = get_job(job_key_manual(int(user["id"])))
+    uid = int(user["id"])
+    pending = reconcile_pending(uid)
     view = pending_view(pending)
+    phase = str(view.get("phase") or "")
+    snap = get_job(job_key_manual(uid))
+    shoot = status_payload(snap)
+    if worker_alive(uid):
+        kind = live_phase(uid)
+        if kind == "shooting" or (
+            shoot.get("active") and not shoot.get("done") and not shoot.get("failed")
+        ):
+            phase = "shooting"
+            view["phase"] = "shooting"
+        elif kind == "scripting":
+            phase = "scripting"
+            view["phase"] = "scripting"
+    message = ""
+    if phase == "stale":
+        message = view.get("error") or "Прошлый заход оборвался. Можно собрать сценарий заново."
+    elif phase == "scripting":
+        message = "Пишу сценарий…"
+    elif phase == "shooting":
+        message = str(shoot.get("label") or "Снимаю…")
     return web.json_response(
         {
             "ok": True,
             "close": False,
-            "phase": view.get("phase") or "",
+            "phase": phase,
+            "message": message,
             "pending": view,
-            "shoot": status_payload(snap),
+            "shoot": shoot,
         }
     )
 
@@ -281,9 +305,9 @@ async def handle_autorolik_save(request: web.Request) -> web.Response:
         return json_error("Не разобрал правки сценария.")
     if not isinstance(edits, dict):
         return json_error("Не разобрал правки сценария.")
-    from autorolik import apply_manual_script_edits, load_pending, pending_view, save_pending
+    from autorolik import apply_manual_script_edits, pending_view, reconcile_pending, save_pending
 
-    pending = load_pending(int(user["id"])) or {}
+    pending = reconcile_pending(int(user["id"])) or {}
     if pending.get("phase") == "shooting":
         return json_error("Съёмка уже идёт. Правки после неё.")
     script = pending.get("script")
@@ -316,12 +340,13 @@ async def handle_autorolik_revise(request: web.Request) -> web.Response:
     notes = str(form.get("notes") or form.get("text") or "").strip()
     if len(notes) < 3:
         return json_error("Напиши правку парой слов — что поменять в сценах.")
-    from autorolik import load_pending
+    from autorolik import reconcile_pending, set_live
 
-    pending = load_pending(int(user["id"])) or {}
+    pending = reconcile_pending(int(user["id"])) or {}
     if pending.get("phase") == "shooting":
         return json_error("Съёмка уже идёт. Правки после неё.")
     bot = request.app["bot"]
+    set_live(int(user["id"]), "scripting")
     _spawn(_run_safe(bot, user["id"], "autorolik_revise", notes))
     return web.json_response(
         {
@@ -339,9 +364,9 @@ async def handle_autorolik_shoot(request: web.Request) -> web.Response:
         user = _user_from_request(request, form)
     except WebAppAuthError as exc:
         return json_error(str(exc), 403)
-    from autorolik import load_pending
+    from autorolik import reconcile_pending, set_live
 
-    pending = load_pending(int(user["id"])) or {}
+    pending = reconcile_pending(int(user["id"])) or {}
     if pending.get("phase") == "shooting":
         return web.json_response(
             {
@@ -354,6 +379,7 @@ async def handle_autorolik_shoot(request: web.Request) -> web.Response:
     if pending.get("phase") not in ("review", "error"):
         return json_error("Сначала собери сценарий кнопкой «Собрать сценарий».")
     bot = request.app["bot"]
+    set_live(int(user["id"]), "shooting")
     _spawn(_run_safe(bot, user["id"], "autorolik_shoot"))
     return web.json_response(
         {
@@ -371,9 +397,9 @@ async def handle_autorolik_cancel(request: web.Request) -> web.Response:
         user = _user_from_request(request, form)
     except WebAppAuthError as exc:
         return json_error(str(exc), 403)
-    from autorolik import clear_pending, load_pending
+    from autorolik import clear_pending, reconcile_pending
 
-    pending = load_pending(int(user["id"])) or {}
+    pending = reconcile_pending(int(user["id"])) or {}
     if pending.get("phase") == "shooting":
         return json_error("Съёмку уже не остановить кнопкой. Дождись видео или ошибки.")
     clear_pending(int(user["id"]))
@@ -410,6 +436,11 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
         send_chat_text,
     )
 
+    live_phase = ""
+    if kind in ("autorolik", "autorolik_revise"):
+        live_phase = "scripting"
+    elif kind == "autorolik_shoot":
+        live_phase = "shooting"
     try:
         if kind == "quick":
             idea, quality, consent, photo = args
@@ -464,6 +495,11 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
             await send_chat_text(bot, user_id, job_error_text(exc))
         except Exception:
             log.exception("studio notify failed kind=%s user=%s", kind, user_id)
+    finally:
+        if live_phase:
+            from autorolik import clear_live
+
+            clear_live(user_id)
 
 
 def build_app(bot: Any) -> web.Application:
@@ -507,4 +543,12 @@ async def start_webapp(bot: Any) -> web.AppRunner | None:
         return None
     public = config.WEBAPP_PUBLIC_URL or f"http://{host}:{port}/"
     log.info("Mini App HTTP %s:%s public=%s", host, port, public)
+    try:
+        from autorolik import expire_all_dead_pendings
+
+        expired = expire_all_dead_pendings()
+        if expired:
+            log.warning("autorolik expired dead pendings users=%s", expired)
+    except Exception:
+        log.exception("autorolik expire_all_dead_pendings failed")
     return runner

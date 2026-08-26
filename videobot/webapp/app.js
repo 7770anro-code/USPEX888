@@ -277,6 +277,19 @@
     const refreshWrap = document.getElementById("auto-refresh-wrap");
     const script = pending && pending.script;
     const hasScenes = script && script.scenes && script.scenes.length;
+    const dead = phase === "stale" || ((phase === "error" || phase === "") && pending && pending.stale);
+    if (dead || ((phase === "error" || phase === "stale") && !hasScenes)) {
+      setHidden(setup, false);
+      setHidden(wait, true);
+      setHidden(review, true);
+      setHidden(progress, true);
+      setHidden(refreshWrap, true);
+      stopAutoPoll();
+      const topic = document.getElementById("auto-topic");
+      if (topic && pending && pending.idea && !topic.value) topic.value = pending.idea;
+      if (pending && pending.error) showStatus(pending.error, "err");
+      return;
+    }
     if (phase === "shooting" || (shoot && shoot.active && !shoot.done && !shoot.failed)) {
       setHidden(setup, true);
       setHidden(wait, true);
@@ -359,7 +372,10 @@
     if (waitLabel && phase === "scripting") {
       waitLabel.textContent = data.message || pending.error || "Пишу сценарий…";
     }
-    if (phase === "scripting") {
+    if (phase === "stale" || pending.stale) {
+      showStatus(pending.error || data.message || "Прошлый заход оборвался. Можно собрать заново.", "err");
+      markRefresh("оборвался — можно заново");
+    } else if (phase === "scripting") {
       showStatus(data.message || "Пишу сценарий…", "");
       markRefresh("пишу сценарий");
     } else if (phase === "shooting") {

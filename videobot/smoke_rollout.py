@@ -102,6 +102,7 @@ def smoke_miniapp() -> None:
     assert cover.is_file() and cover.stat().st_size > 1024
     js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")
     assert "go-auto-refresh" in js
+    assert "phase === \"stale\"" in js or "phase === 'stale'" in js
     assert "/api/autorolik/script" in js
     test_webapp_init_data_hmac_includes_signature()
     _ok("miniapp", "7 карточек, HMAC, правки сцен, обложка, Обновить статус")
