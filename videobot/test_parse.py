@@ -2203,9 +2203,10 @@ def test_fal_kling_and_miniapp() -> None:
     assert "Нажми карточку" in js
     assert "sendData" not in js
     assert "ngrok-skip-browser-warning" in js
-    unit = Path(__file__).with_name("videobot-ngrok.service").read_text(encoding="utf-8")
+    unit = Path(__file__).with_name("ngrok-videobot.service").read_text(encoding="utf-8")
     assert "sweep-wanting-tusk.ngrok-free.dev" in unit
-    assert "127.0.0.1:8088" in unit
+    assert "http 8088" in unit
+    assert "--url=https://sweep-wanting-tusk.ngrok-free.dev" in unit
     assert html.count('class="sub"') == 6
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media

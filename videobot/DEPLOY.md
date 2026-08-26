@@ -1,7 +1,7 @@
 # VideoBot — деплой на VPS (cloud@217.28.140.122)
 
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
-Этот сервис живёт только в `/opt/videobot` + unit `videobot.service` (+ `videobot-ngrok.service` для Mini App).
+Этот сервис живёт только в `/opt/videobot` + unit `videobot.service` (+ `ngrok-videobot.service` для Mini App).
 
 Выложено **2026-08-26** (ngrok Mini App): unit `videobot-ngrok.service` → `https://sweep-wanting-tusk.ngrok-free.dev/` → `127.0.0.1:8088`. `WEBAPP_PUBLIC_URL` дописан в прод `.env`. Рестарт `videobot.service` (PID 182509 → 184037) и старт ngrok. `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. Authtoken только в `/etc/ngrok/ngrok.yml`. `@VideobotAI777_bot` в polling, `/health` снаружи 200.
 
@@ -47,17 +47,16 @@ FAL_API_KEY=...             # https://fal.ai/dashboard/keys  (дефолт ка�
 
 Дефолт камеры — fal.ai (Kling 3.0 Pro / Seedance 2.5). Нужен `FAL_API_KEY` или `FAL_KEY` (один ключ на Kling и Seedance), пока `VIDEO_PROVIDER` не `runway`. Значение ключа не придумывать, в git и чаты не класть — только в `/opt/videobot/.env` на VPS.
 
-Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL`. Публичный адрес — статический домен ngrok `https://sweep-wanting-tusk.ngrok-free.dev/` → `127.0.0.1:8088` (unit `videobot-ngrok.service`). Authtoken только в `/etc/ngrok/ngrok.yml` (chmod 600), в git не класть. Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback.
+Mini App — отдельная страница в процессе бота (`WEBAPP_HOST:WEBAPP_PORT`). Telegram открывает её кнопкой `web_app` только по HTTPS `WEBAPP_PUBLIC_URL`. Публичный адрес — статический домен ngrok `https://sweep-wanting-tusk.ngrok-free.dev` → порт **8088** (unit `ngrok-videobot.service`). Authtoken: `ngrok config add-authtoken` в `HOME` пользователя `videobot` (`/opt/videobot/.config/ngrok/ngrok.yml`, chmod 600), в git не класть. Файлы и долгие джобы идут HMAC POST на `/api/*`, результат — сообщением бота в чат (`sendData` не подходит). Без URL кнопка «🎬 Открыть меню» остаётся обычным callback.
 
 ```bash
 # ngrok (один раз). Токен не светить в чат/git.
-sudo install -d -o videobot -g videobot -m 700 /etc/ngrok
-# /etc/ngrok/ngrok.yml из videobot/ngrok.yml.example + authtoken
-sudo cp /opt/videobot/videobot-ngrok.service /etc/systemd/system/videobot-ngrok.service
+sudo -u videobot /usr/local/bin/ngrok config add-authtoken "$NGROK_AUTHTOKEN"
+sudo cp /opt/videobot/ngrok-videobot.service /etc/systemd/system/ngrok-videobot.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now videobot-ngrok.service
+sudo systemctl enable --now ngrok-videobot.service
 # в /opt/videobot/.env:
-# WEBAPP_PUBLIC_URL=https://sweep-wanting-tusk.ngrok-free.dev/
+# WEBAPP_PUBLIC_URL=https://sweep-wanting-tusk.ngrok-free.dev
 sudo systemctl restart videobot.service
 ```
 
