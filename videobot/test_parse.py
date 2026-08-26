@@ -2295,6 +2295,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "Авторолик" in html
     assert "чат" in html.lower()
     assert "cover.jpg" in html
+    assert "Anro.AI" in html
     cover = Path(__file__).with_name("webapp").joinpath("cover.jpg")
     assert cover.is_file() and cover.stat().st_size > 1024
     assert inspect.getsource(start_webapp)
@@ -2596,11 +2597,19 @@ def test_autorolik_script_and_route() -> None:
         clear_live(6748280112)
         clear_live(6748280113)
         clear_live(6748280115)
-    from branding import BRAND_NAME, COVER_PROMPT, cover_candidates
+    from branding import BRAND_NAME, COVER_MARK, COVER_PROMPT, cover_candidates
+    from fal_models import FLUX_DEV, flux_still_payload
 
     assert BRAND_NAME == "Успех 888"
+    assert COVER_MARK == "Anro.AI"
     assert "no text" in COVER_PROMPT
+    assert "action" in COVER_PROMPT.lower() or "sports car" in COVER_PROMPT.lower()
     assert any(str(p).endswith("cover.jpg") for p in cover_candidates())
+    assert FLUX_DEV == "fal-ai/flux/dev"
+    still = flux_still_payload("x", image_size="landscape_16_9", steps=28, guidance=3.5)
+    assert still["output_format"] == "jpeg"
+    assert still["image_size"] == "landscape_16_9"
+    assert still["num_inference_steps"] == 28
     assert "cover_path" in bot_src
     assert "photo_paths=paths" in bot_src
     assert "Публичных лиц" in SCRIPT_SYSTEM

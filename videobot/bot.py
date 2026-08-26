@@ -710,11 +710,11 @@ async def _save_job(state: FSMContext, job: dict[str, Any]) -> None:
 
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
-    from branding import BRAND_NAME, cover_path
+    from branding import BRAND_NAME, COVER_MARK, cover_path
 
     caption = (
-        f"{BRAND_NAME}\n"
-        "AI-видео. Сценарий, лица, монтаж — один жест.\n\n"
+        f"{COVER_MARK}\n"
+        f"{BRAND_NAME} · AI-видео. Сценарий, лица, монтаж — один жест.\n\n"
         "Нажми кнопку. Готовое придёт сюда, даже если закроешь приложение."
     )
     art = cover_path()
