@@ -217,6 +217,16 @@ def credits_error(detail: str, *, status: int | None = None) -> PipelineError:
     return err
 
 
+def raise_if_user_facing(exc: PipelineError) -> None:
+    """Не подменять текст fal.ai («кредиты fal.ai») на RUNWAY_CREDITS_MSG."""
+    if getattr(exc, "code", "") == "credits":
+        raise exc
+    if is_runway_credits_fail(exc.detail):
+        raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
+    if is_runway_user_facing(exc):
+        raise
+
+
 def runway_fail_error(
     failure_code: str,
     detail: str,
@@ -1992,6 +2002,17 @@ async def enhance_reference_with_nano_banana(
 async def file_to_data_uri(path: Path, dest_jpeg: Path | None = None) -> str:
     """JPEG data URI для Runway promptImage (лимит ~5 МБ)."""
     jpeg = dest_jpeg or path.with_suffix(".ref.jpg")
+    src = Path(path)
+    if (
+        dest_jpeg is not None
+        and jpeg.is_file()
+        and jpeg.stat().st_size >= 80
+        and jpeg.resolve() != src.resolve()
+    ):
+        raw = jpeg.read_bytes()
+        if 80 <= len(raw) <= 5_000_000:
+            log.info("resume jpeg %s bytes=%s", jpeg.name, len(raw))
+            return "data:image/jpeg;base64," + base64.b64encode(raw).decode("ascii")
     await _run_ffmpeg(
         [
             "ffmpeg",
@@ -2481,7 +2502,7 @@ async def build_video(
             job_seed = int(ckpt.get("job_seed"))
         except (TypeError, ValueError):
             job_seed = random.randint(0, 2_147_483_647)
-        save_checkpoint(work_dir, job_seed=job_seed, n_scenes=total, credits_paused=False)
+        save_checkpoint(work_dir, job_seed=job_seed, n_scenes=total)
         autorolik = str(script.get("kind") or "") == "autorolik" or any(
             isinstance(s, dict) and "face_scene" in s for s in scenes
         )
@@ -2551,10 +2572,7 @@ async def build_video(
                 await _download(session, still_url, still_png)
                 anchor_image = await file_to_data_uri(still_png, work_dir / "bible_ref.jpg")
             except PipelineError as exc:
-                if is_runway_user_facing(exc):
-                    if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
-                        raise credits_error(exc.detail, status=getattr(exc, "status", None)) from exc
-                    raise
+                raise_if_user_facing(exc)
                 log.warning("shared still failed, T2V with lock: %s", exc.detail)
                 anchor_image = None
         prompt_image = anchor_image
@@ -2762,7 +2780,7 @@ async def build_video(
             muxed.append(mixed)
             tracker.video_done = n
             clip_models.append(read_runway_model(clip_path) or "?")
-            save_checkpoint(work_dir, scene_done=n, credits_paused=False, runway_models=clip_models)
+            save_checkpoint(work_dir, scene_done=n, runway_models=clip_models)
             await report(f"Клип {n} из {total} смонтирован", stage=live.STAGE_RUNWAY, scene=n)
         script["runway_models"] = clip_models
         save_script(work_dir, script)

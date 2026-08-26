@@ -956,6 +956,7 @@ def test_credits_resume_keeps_artifacts() -> None:
     from pipeline import _runway_clip_native, eleven_tts, runway_clip
     from resume_job import (
         format_resume_progress,
+        load_checkpoint,
         load_script,
         mark_credits_pause,
         next_scene_to_render,
@@ -980,6 +981,7 @@ def test_credits_resume_keeps_artifacts() -> None:
     build_src = inspect.getsource(__import__("pipeline", fromlist=["build_video"]).build_video)
     assert "load_script" in build_src
     assert "resume muxed" in build_src
+    assert "raise_if_user_facing" in build_src
     bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
     assert "resume:go" in bot_src
     assert "credits_pause_kb" in bot_src
@@ -988,6 +990,10 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "В Mini App заново заходить не нужно" in bot_src
     assert "mark_credits_pause(work)" in bot_src
     assert "_user_photo_plates" in bot_src
+    assert "FAL_CREDITS_MSG" in bot_src
+    assert "Клипы Runway" not in bot_src
+    assert "if wipe or not paused" not in bot_src
+    assert "should_wipe_resume" in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -1037,11 +1043,20 @@ def test_credits_resume_keeps_artifacts() -> None:
     text = format_resume_progress(work, 4)
     assert "4/4" in text
     assert "3/4" in text
+    assert "Клипы Runway" not in text
+    assert "Клипы:" in text
     kw = run_kwargs_from_checkpoint(work)
     assert kw is not None
     assert kw["idea"] == "лестница микро"
     assert kw["photo_file_ids"] == ["fid-a", "fid-b"]
     assert kw["kind"] == "autorolik"
+    assert kw.get("route_mode") is None
+    ckpt_run = dict((load_checkpoint(work) or {}).get("run") or {})
+    ckpt_run["route_mode"] = "real_photo"
+    save_checkpoint(work, run=ckpt_run)
+    kw2 = run_kwargs_from_checkpoint(work)
+    assert kw2 is not None
+    assert kw2["route_mode"] == "real_photo"
     from bot import _user_photo_plates
 
     (work / "user_photo_2.jpg").write_bytes(b"x" * 100)
@@ -1053,6 +1068,587 @@ def test_credits_resume_keeps_artifacts() -> None:
     import shutil
 
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_owner_resume_keeps_autorolik_artifacts() -> None:
+    """Раскладка как 6748280112_resume: 8 сцен Авторолика, c0/c1+m0/m1, n0–n2, pause."""
+    import inspect
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    from autorolik import route_for_scene
+    from bot import _run_job, _user_photo_plates
+    from provider_router import chain_for
+    from resume_job import (
+        credits_paused,
+        load_script,
+        mark_credits_pause,
+        resume_shoot_plan,
+        run_kwargs_from_checkpoint,
+        save_script,
+        should_wipe_resume,
+    )
+
+    assert should_wipe_resume(wipe=True, paused=True) is False
+    assert should_wipe_resume(wipe=False, paused=True) is False
+    assert should_wipe_resume(wipe=True, paused=False) is True
+    assert should_wipe_resume(wipe=False, paused=False) is True
+    run_src = inspect.getsource(_run_job)
+    assert "should_wipe_resume" in run_src
+    assert "if wipe or not paused" not in run_src
+    assert "ignore wipe, keep resume dir" in run_src
+
+    tmp = tempfile.mkdtemp()
+    work = Path(tmp)
+    faces = [True, False, True, False, True, False, True, True]
+    els = [1, 0, 2, 0, 3, 0, 4, 5]
+    scenes = []
+    for i, (face, el) in enumerate(zip(faces, els)):
+        scenes.append(
+            {
+                "narration": f"сцена {i + 1} озвучка достаточно длинная фраза здесь сейчас",
+                "visual_prompt": "warm amber grade, photoreal 9:16, no text",
+                "face_scene": face,
+                "element_index": el,
+            }
+        )
+    script = {
+        "kind": "autorolik",
+        "title": "Ті, хто вирішує",
+        "plot": "друзья решают всё в городе",
+        "hook": "Вони вирішують усе в місті",
+        "scenes": scenes,
+    }
+    save_script(work, script)
+    (work / "n0.mp3").write_bytes(b"x" * 500)
+    (work / "n1.mp3").write_bytes(b"x" * 500)
+    (work / "n2.mp3").write_bytes(b"x" * 500)
+    (work / "c0.mp4").write_bytes(b"x" * 20_000)
+    (work / "c1.mp4").write_bytes(b"x" * 20_000)
+    (work / "m0.mp4").write_bytes(b"x" * 20_000)
+    (work / "m1.mp4").write_bytes(b"x" * 20_000)
+    (work / "c2.mp4.fal_id").write_text(
+        '{"request_id": "rid-c2", "model_id": "fal-ai/kling-video/v3/pro/image-to-video"}',
+        encoding="utf-8",
+    )
+    for i in range(1, 7):
+        (work / f"user_photo_{i}.jpg").write_bytes(b"x" * 1200)
+    mark_credits_pause(
+        work,
+        run={
+            "idea": "друзья решают всё в городе",
+            "user_script": True,
+            "n_scenes": 8,
+            "kind": "autorolik",
+            "consent_verified": True,
+            "photo_file_id": "",
+            "photo_file_ids": [],
+            "voice_id": "EXAVITQu4vr4xnSDxMaL",
+            "voice_name": "Сара",
+            "dynamic_pacing": True,
+            "quality": "optimal",
+        },
+    )
+    kw = run_kwargs_from_checkpoint(work)
+    assert kw is not None
+    assert kw["kind"] == "autorolik"
+    assert kw["user_script"] is True
+    assert kw["consent_verified"] is True
+    assert not kw["photo_file_ids"]
+    assert kw["n_scenes"] == 8
+    plates = _user_photo_plates(work)
+    assert [p.name for p in plates] == [f"user_photo_{i}.jpg" for i in range(1, 7)]
+    plan = resume_shoot_plan(work)
+    assert plan["has_script"] is True
+    assert plan["autorolik"] is True
+    assert plan["credits_paused"] is True
+    assert plan["wipe"] is False
+    assert plan["wipe_even_if_requested"] is False
+    assert plan["next_render"] == 2
+    assert plan["keep"]["tts_keep"] == [0, 1, 2]
+    assert plan["keep"]["clip_keep"] == [0, 1]
+    assert plan["keep"]["mux_keep"] == [0, 1]
+    assert plan["steps"][0]["action"] == "skip_muxed"
+    assert plan["steps"][1]["action"] == "skip_muxed"
+    assert plan["steps"][2]["action"] == "render_clip"
+    assert plan["steps"][2]["sidecar"] is True
+    assert plan["steps"][2]["redo_tts"] is False
+    assert plan["steps"][2]["engine"] == "kling"
+    assert plan["steps"][3]["engine"] == "seedance"
+    assert plan["steps"][4]["engine"] == "kling"
+    assert plan["steps"][5]["engine"] == "seedance"
+    assert plan["steps"][6]["engine"] == "kling"
+    assert plan["steps"][7]["engine"] == "kling"
+    assert "legacy_runway" not in chain_for("autorolik_face")
+    assert "legacy_runway" not in chain_for("autorolik_wide")
+    assert chain_for(route_for_scene(scenes[2]))[0] == "kling"
+    assert chain_for(route_for_scene(scenes[3]))[0] == "seedance"
+    before = {
+        "script": (work / "script.json").read_text(encoding="utf-8"),
+        "n0": (work / "n0.mp3").stat().st_size,
+        "c0": (work / "c0.mp4").stat().st_size,
+        "m0": (work / "m0.mp4").stat().st_size,
+        "photo": (work / "user_photo_1.jpg").stat().st_size,
+        "sidecar": (work / "c2.mp4.fal_id").read_text(encoding="utf-8"),
+    }
+    assert should_wipe_resume(wipe=True, paused=credits_paused(work)) is False
+    assert load_script(work) is not None
+    assert (work / "script.json").read_text(encoding="utf-8") == before["script"]
+    assert (work / "n0.mp3").stat().st_size == before["n0"]
+    assert (work / "c0.mp4").stat().st_size == before["c0"]
+    assert (work / "m0.mp4").stat().st_size == before["m0"]
+    assert (work / "user_photo_1.jpg").stat().st_size == before["photo"]
+    assert (work / "c2.mp4.fal_id").read_text(encoding="utf-8") == before["sidecar"]
+    from pipeline import build_video, file_to_data_uri
+
+    assert "credits_paused=False" not in inspect.getsource(build_video)
+    assert "credits_paused=False" not in inspect.getsource(_run_job)
+    assert "resume jpeg" in inspect.getsource(file_to_data_uri)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fal_resume_completed_uses_status_media() -> None:
+    """COMPLETED Kling: видео на /status, GET result 405 — скачать, не новый submit."""
+    import asyncio
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import config
+    from fal_api import fal_run, fal_try_resume, keep_fal_sidecar
+    from fal_models import KLING_I2V_PRO
+    from pipeline import PipelineError
+    from providers.fal_client import FalClient
+
+    err = PipelineError("x", code="fal_keep_sidecar")
+    assert keep_fal_sidecar(err) is True
+    assert keep_fal_sidecar(PipelineError("fal.ai слишком долго генерирует. Остановил ожидание.")) is True
+    assert keep_fal_sidecar(PipelineError("нет", code="credits")) is True
+    assert keep_fal_sidecar(PipelineError("просто упало")) is False
+    stamped_422 = PipelineError(
+        "fal.ai: Invalid reference index 1 for image. Only 0 images provided.",
+        'HTTP 422: {"detail":[{"type":"input_value_error","msg":"Invalid reference index 1"}]}',
+        code="fal_keep_sidecar",
+    )
+    stamped_422.status = 422
+    assert keep_fal_sidecar(stamped_422) is False
+
+    class _FakeResp:
+        def __init__(self, status: int, body: str = "", blob: bytes = b"") -> None:
+            self.status = status
+            self._body = body
+            self._blob = blob or body.encode("utf-8")
+
+        async def text(self) -> str:
+            return self._body
+
+        async def read(self) -> bytes:
+            return self._blob
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            if "cdn.fal.ai" in str(url):
+                return _FakeResp(200, blob=b"v" * 1500)
+            if "/status" in str(url):
+                return _FakeResp(
+                    200,
+                    json.dumps(
+                        {
+                            "status": "COMPLETED",
+                            "video": {"url": "https://cdn.fal.ai/c2.mp4"},
+                        }
+                    ),
+                )
+            return _FakeResp(405, "Allow: POST")
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    old_key = config.FAL_KEY
+    config.FAL_KEY = "test-fal-key"
+    tmp = tempfile.mkdtemp()
+    dest = Path(tmp) / "c2.mp4"
+    side = dest.with_suffix(dest.suffix + ".fal_id")
+    side.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d16-d9ea-7152-aa38-05611ff45d6b",
+                "model_id": KLING_I2V_PRO,
+                "response_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d16-d9ea-7152-aa38-05611ff45d6b"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    sidecar_before = side.read_text(encoding="utf-8")
+    session = _FakeSession()
+
+    async def _go() -> None:
+        data = await fal_try_resume(
+            session, dest, used_image=True, expected_model=KLING_I2V_PRO
+        )
+        assert data is not None
+        assert (data.get("video") or {}).get("url") == "https://cdn.fal.ai/c2.mp4"
+        assert session.posts == []
+        assert side.is_file()
+        out = await fal_run(
+            session,
+            KLING_I2V_PRO,
+            {"should": "not-submit"},
+            used_image=True,
+            dest_id=dest,
+        )
+        assert (out.get("video") or {}).get("url") == "https://cdn.fal.ai/c2.mp4"
+        assert session.posts == []
+        client = FalClient(session, engine="kling")
+        path = await client.generate_kling(
+            session,
+            "prompt",
+            "data:image/jpeg;base64,xxx",
+            5,
+            dest,
+            photo_lock=True,
+            elements=["data:image/jpeg;base64,xxx"],
+        )
+        assert path == dest
+        assert dest.is_file() and dest.stat().st_size >= 1000
+        assert session.posts == []
+        assert side.read_text(encoding="utf-8") == sidecar_before
+
+    try:
+        asyncio.run(_go())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fal_resume_dead_other_family_unlinks() -> None:
+    """FAILED Kling sidecar на WIDE-клипе: poll, снять, Seedance может слать заново."""
+    import asyncio
+    import json
+    import tempfile
+    from pathlib import Path
+
+    import config
+    from fal_api import fal_try_resume
+    from fal_models import KLING_I2V_PRO, SEEDANCE_I2V
+
+    class _FakeResp:
+        def __init__(self, status: int, body: str = "") -> None:
+            self.status = status
+            self._body = body
+
+        async def text(self) -> str:
+            return self._body
+
+        async def read(self) -> bytes:
+            return self._body.encode("utf-8")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args: object) -> bool:
+            return False
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            return _FakeResp(
+                200,
+                json.dumps(
+                    {
+                        "status": "FAILED",
+                        "error": "Invalid reference index 1 for image. Only 0 images provided.",
+                    }
+                ),
+            )
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    old_key = config.FAL_KEY
+    config.FAL_KEY = "test-fal-key"
+    tmp = tempfile.mkdtemp()
+    dest = Path(tmp) / "c3.mp4"
+    side = dest.with_suffix(dest.suffix + ".fal_id")
+    side.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d72-83b0-7703-91a7-76d6948a6774",
+                "model_id": KLING_I2V_PRO,
+                "status_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774/status"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = _FakeSession()
+
+    async def _go() -> None:
+        data = await fal_try_resume(
+            session, dest, used_image=True, expected_model=SEEDANCE_I2V
+        )
+        assert data is None
+        assert session.posts == []
+        assert session.gets
+        assert not side.is_file()
+
+    try:
+        asyncio.run(_go())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # Прод 13:11 МСК: GET /status = COMPLETED, GET /response = 422 — не keep_sidecar.
+    tmp2 = tempfile.mkdtemp()
+    dest2 = Path(tmp2) / "c3.mp4"
+    side2 = dest2.with_suffix(dest2.suffix + ".fal_id")
+    side2.write_text(
+        json.dumps(
+            {
+                "request_id": "01a03d72-83b0-7703-91a7-76d6948a6774",
+                "model_id": KLING_I2V_PRO,
+                "status_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774/status"
+                ),
+                "response_url": (
+                    "https://queue.fal.run/fal-ai/kling-video/v3/pro/image-to-video"
+                    "/requests/01a03d72-83b0-7703-91a7-76d6948a6774"
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _CompletedThen422:
+        def __init__(self) -> None:
+            self.posts: list[str] = []
+            self.gets: list[str] = []
+
+        def get(self, url: str, **kwargs: object) -> _FakeResp:
+            self.gets.append(str(url))
+            if "/status" in str(url):
+                return _FakeResp(200, json.dumps({"status": "COMPLETED"}))
+            return _FakeResp(
+                422,
+                json.dumps(
+                    {
+                        "detail": [
+                            {
+                                "loc": ["body"],
+                                "msg": "Invalid reference index 1 for image. Only 0 images provided.",
+                                "type": "input_value_error",
+                            }
+                        ]
+                    }
+                ),
+            )
+
+        def post(self, url: str, **kwargs: object) -> _FakeResp:
+            self.posts.append(str(url))
+            return _FakeResp(200, json.dumps({"request_id": "should-not-submit"}))
+
+    session2 = _CompletedThen422()
+    config.FAL_KEY = "test-fal-key"
+
+    async def _completed_422() -> None:
+        data = await fal_try_resume(
+            session2, dest2, used_image=True, expected_model=SEEDANCE_I2V
+        )
+        assert data is None
+        assert session2.posts == []
+        assert not side2.is_file()
+
+    try:
+        asyncio.run(_completed_422())
+    finally:
+        config.FAL_KEY = old_key
+        import shutil
+
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+
+def test_seedance_wide_likeness_retries_kling() -> None:
+    """WIDE 422 likeness Seedance → Kling I2V без @Image1, still как start_image. FACE Kling likeness — ошибка."""
+    import asyncio
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import AsyncMock, patch
+
+    import config
+    from pipeline import PipelineError
+    from prompt_templates import video_prompt_for
+    from prompt_templates.kling import ELEMENT_TOKEN, strip_seedance_image_refs
+    from provider_router import render_clip
+
+    still = "https://example.com/wide_still.jpg"
+    face = "https://example.com/face.jpg"
+    seed_prompt = video_prompt_for(
+        "seedance",
+        "wide street",
+        "establishing no face",
+        photo_lock=False,
+        character_lock=False,
+    )
+    assert "@Image1" in seed_prompt
+    assert "@Image" not in strip_seedance_image_refs(seed_prompt)
+    person = PipelineError(
+        "fal.ai отклонил кадр с живым человеком (политика партнёра).",
+        "HTTP 422 partner_validation_failed likeness",
+        code="moderation_person",
+    )
+
+    async def _wide(route_mode: str) -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c3.mp4"
+        inst = AsyncMock()
+        inst.generate_seedance = AsyncMock(side_effect=person)
+
+        async def kling_ok(*_a, **_k):
+            dest.write_bytes(b"k" * 12_000)
+            return dest
+
+        inst.generate_kling = AsyncMock(side_effect=kling_ok)
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                out = await render_clip(
+                    None,
+                    seed_prompt,
+                    5,
+                    dest,
+                    prompt_image=still,
+                    route_mode=route_mode,
+                    photo_lock=False,
+                )
+            assert out == dest
+            assert dest.stat().st_size >= 10_000
+            assert inst.generate_seedance.await_count == 1
+            assert inst.generate_kling.await_count == 1
+            seed_args = inst.generate_seedance.await_args.args
+            assert seed_args[1] == seed_prompt
+            assert "@Image1" in seed_args[1]
+            assert seed_args[2] == still
+            kling_args, kling_kw = inst.generate_kling.await_args
+            kling_prompt = kling_args[1]
+            kling_frame = kling_args[2]
+            assert "@Image" not in kling_prompt
+            assert ELEMENT_TOKEN not in kling_prompt
+            assert "wide street" in kling_prompt or "establishing" in kling_prompt
+            assert kling_frame == still
+            assert kling_kw.get("photo_lock") is False
+            assert not kling_kw.get("elements")
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    async def _wide_seedance_ok() -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c5.mp4"
+        inst = AsyncMock()
+
+        async def seed_ok(*_a, **_k):
+            dest.write_bytes(b"s" * 12_000)
+            return dest
+
+        inst.generate_seedance = AsyncMock(side_effect=seed_ok)
+        inst.generate_kling = AsyncMock(side_effect=AssertionError("WIDE Seedance ok — Kling must not run"))
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                out = await render_clip(
+                    None,
+                    seed_prompt,
+                    5,
+                    dest,
+                    prompt_image=still,
+                    route_mode="autorolik_wide",
+                    photo_lock=False,
+                )
+            assert out == dest
+            assert inst.generate_seedance.await_count == 1
+            assert inst.generate_kling.await_count == 0
+            assert inst.generate_seedance.await_args.args[1] == seed_prompt
+            assert "@Image1" in inst.generate_seedance.await_args.args[1]
+            assert inst.generate_seedance.await_args.args[2] == still
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    async def _face_kling_still_raises() -> None:
+        tmp = tempfile.mkdtemp()
+        dest = Path(tmp) / "c4.mp4"
+        inst = AsyncMock()
+        inst.generate_seedance = AsyncMock(side_effect=AssertionError("FACE must skip seedance"))
+        inst.generate_kling = AsyncMock(side_effect=person)
+        old = config.FAL_KEY
+        config.FAL_KEY = "test-fal-key"
+        try:
+            with patch("provider_router.FalClient", return_value=inst):
+                try:
+                    await render_clip(
+                        None,
+                        "face close-up",
+                        5,
+                        dest,
+                        prompt_image=face,
+                        route_mode="autorolik_face",
+                        photo_lock=True,
+                        elements=[face],
+                    )
+                    raise AssertionError("FACE Kling likeness must raise")
+                except PipelineError as exc:
+                    assert exc.code == "moderation_person"
+            assert inst.generate_seedance.await_count == 0
+            assert inst.generate_kling.await_count == 1
+            face_args, face_kw = inst.generate_kling.await_args
+            assert face_args[2] == face
+            assert face_kw.get("photo_lock") is True
+            assert face_kw.get("elements") == [face]
+        finally:
+            config.FAL_KEY = old
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    asyncio.run(_wide("autorolik_wide"))
+    asyncio.run(_wide("synthetic_multi_scene"))
+    asyncio.run(_wide("night_pipeline"))
+    asyncio.run(_wide_seedance_ok())
+    asyncio.run(_face_kling_still_raises())
 
 
 def test_night_policy_defaults() -> None:
@@ -1987,8 +2583,9 @@ def test_nano_banana_and_dynamic_pacing() -> None:
     assert "dynamic_pacing" in q
     vibe = inspect.getsource(_run_synth_vibe)
     assert "dynamic_pacing=True" in vibe
-    assert "clip_sec=5" in vibe
+    assert "~5 сек" in vibe
     assert "photo_file_id=None" in vibe
+    assert "Kling/Seedance" in vibe
 
     text = cost_text(
         {"n_scenes": 6, "quality": "optimal", "idea": "кофе", "dynamic_pacing": True}
@@ -2068,6 +2665,25 @@ def test_fal_kling_and_miniapp() -> None:
     assert kling["duration"] == "5"
     assert kling["generate_audio"] is False
     assert kling["start_image_url"].startswith("https://")
+    from prompt_templates import video_prompt_for
+    from prompt_templates.kling import ELEMENT_TOKEN, strip_seedance_image_refs
+
+    seed_wide = video_prompt_for(
+        "seedance", "amber dusk", "drone over city", photo_lock=False, character_lock=False
+    )
+    assert "@Image1" in seed_wide
+    kling_wide = kling_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert kling_wide["start_image_url"] == "https://example.com/wide_still.jpg"
+    assert "@Image" not in kling_wide["prompt"]
+    assert ELEMENT_TOKEN not in kling_wide["prompt"]
+    assert "elements" not in kling_wide
+    assert "drone over city" in kling_wide["prompt"] or "amber dusk" in kling_wide["prompt"]
+    assert strip_seedance_image_refs("@Element1 is the same person. walk") == (
+        "@Element1 is the same person. walk"
+    )
+    seed_keep = seedance_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image1" in seed_keep["prompt"]
+    assert seed_keep["image_url"] == "https://example.com/wide_still.jpg"
     seed = seedance_i2v_payload("a quiet street", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False
@@ -2109,6 +2725,8 @@ def test_fal_kling_and_miniapp() -> None:
     )
     assert person.code == "moderation_person"
     assert "живого человека" in person.user_message
+    assert "Kling I2V" in person.user_message
+    assert "Нажми" not in person.user_message
     assert "не смог выполнить задачу" not in person.user_message
     kling_el = fal_fail_error(
         'HTTP 422: {"detail":[{"type":"value_error","loc":["body","elements",0],'
@@ -2348,24 +2966,58 @@ def test_fal_kling_and_miniapp() -> None:
         }
     ]
     # Прод 01:20: Kling 422 — data URI в elements.frontal_image_url. Перед submit льём https.
+    # Resume COMPLETED: сначала fal_try_resume, без повторной загрузки фото.
     kling_fn = inspect.getsource(FalClient.generate_kling)
     assert "to_fal_https_url" in kling_fn
     assert "converted_map" in kling_fn
+    assert "fal_try_resume" in kling_fn
+    assert "strip_seedance_image_refs" in kling_fn
+    assert "start_image_url" in kling_fn or "start_image_url" in inspect.getsource(
+        FalClient._kling_body
+    )
+    assert kling_fn.index("fal_try_resume") < kling_fn.index("to_fal_https_url")
     seed_fn = inspect.getsource(FalClient.generate_seedance)
     assert "to_fal_https_url" in seed_fn
     assert "converted_map" in seed_fn
+    assert "fal_try_resume" in seed_fn
+    assert "strip_seedance_image_refs" not in seed_fn
+    assert seed_fn.index("fal_try_resume") < seed_fn.index("to_fal_https_url")
     from fal_api import fal_side_payload, fal_run, to_fal_https_url
 
     side = fal_side_payload({"request_id": "rid-x"}, model_id=KLING_I2V_PRO)
     assert side["model_id"] == KLING_I2V_PRO
+    from fal_api import fal_try_resume, keep_fal_sidecar
+
+    try_src = inspect.getsource(fal_try_resume)
+    assert "fal resume dead" in try_src
+    assert "other model" in try_src
+    assert "poll saved" in try_src
+    assert "leave sidecar, skip resume" not in try_src
+    assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
+    keep_src = inspect.getsource(keep_fal_sidecar)
+    assert "is_fal_validation_fail" in keep_src
+    stamped = PipelineError(
+        "fal.ai: Invalid reference index 1",
+        "HTTP 422 input_value_error",
+        code="fal_keep_sidecar",
+    )
+    stamped.status = 422
+    assert keep_fal_sidecar(stamped) is False
     fal_run_src = inspect.getsource(fal_run)
-    assert "fal resume dead" in fal_run_src
-    assert "other model" in fal_run_src
+    assert "fal_try_resume" in fal_run_src
+    assert "fal_keep_sidecar" in fal_run_src
     router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
     assert "skip_runway" in router_src
     assert "skip legacy_runway after fal validation error" in router_src
     assert "skip seedance for FACE" in router_src
     assert 'route_mode in ("autorolik_face", "real_photo")' in router_src
+    assert "FAL_ONLY_MODES" in router_src
+    assert "is_fal_only_mode" in router_src
+    assert "if fal_only:" in router_src
+    assert "слишком долго" in router_src
+    assert "fal_keep_sidecar" in router_src
+    assert "seedance likeness — retry this clip with Kling" in router_src
+    assert "strip_seedance_image_refs" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
@@ -2379,8 +3031,35 @@ def test_fal_kling_and_miniapp() -> None:
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
-    assert "legacy_runway" in ROUTING["real_photo"]
-    assert chain_for("real_photo")[0] in ("kling", "seedance", "legacy_runway")
+    assert "legacy_runway" not in ROUTING["real_photo"]
+    assert "legacy_runway" not in ROUTING["synthetic_multi_scene"]
+    assert "legacy_runway" not in ROUTING["night_pipeline"]
+    assert "legacy_runway" not in ROUTING["montage_generate"]
+    assert "legacy_runway" not in ROUTING["autorolik_face"]
+    assert "legacy_runway" not in ROUTING["autorolik_wide"]
+    assert chain_for("real_photo") == ["kling", "seedance"]
+    assert chain_for("synthetic_multi_scene") == ["seedance", "kling"]
+    assert chain_for("night_pipeline") == ["seedance", "kling"]
+    assert chain_for("autorolik_face") == ["kling", "seedance"]
+    old_prov = config.VIDEO_PROVIDER
+    config.VIDEO_PROVIDER = "runway"
+    try:
+        assert "legacy_runway" not in chain_for("real_photo")
+        assert "legacy_runway" not in chain_for("night_pipeline")
+        assert "legacy_runway" not in chain_for("autorolik_face")
+        assert chain_for("autorolik_face")[0] == "kling"
+    finally:
+        config.VIDEO_PROVIDER = old_prov
+    from fal_api import FAL_CREDITS_MSG
+    from pipeline import raise_if_user_facing
+
+    fal_credits = PipelineError(FAL_CREDITS_MSG, "insufficient credits", code="credits")
+    try:
+        raise_if_user_facing(fal_credits)
+        raise AssertionError("credits must re-raise")
+    except PipelineError as kept:
+        assert kept.user_message == FAL_CREDITS_MSG
+        assert "Runway" not in kept.user_message
     kling_p = video_prompt_for("kling", "red coat", "walk", photo_lock=True)
     assert ELEMENT_TOKEN in kling_p
     seed_p = video_prompt_for("seedance", "red coat", "walk", photo_lock=False)
@@ -3137,6 +3816,10 @@ if __name__ == "__main__":
     test_clone_posts_voices_add()
     test_runway_model_router_optional()
     test_credits_resume_keeps_artifacts()
+    test_owner_resume_keeps_autorolik_artifacts()
+    test_fal_resume_completed_uses_status_media()
+    test_fal_resume_dead_other_family_unlinks()
+    test_seedance_wide_likeness_retries_kling()
     test_night_policy_defaults()
     test_legacy_night_schema_migrates()
     test_live_status_runway_fields()

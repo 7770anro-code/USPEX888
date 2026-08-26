@@ -1,4 +1,4 @@
-"""Маршрутизация Kling → Seedance → legacy Runway. Одна правка ROUTING — и Runway выключается."""
+"""Маршрутизация Kling / Seedance. Старый пайплайн без Runway; Авторолик может оставить тихий хвост."""
 
 from __future__ import annotations
 
@@ -15,29 +15,53 @@ from providers.legacy.runway_client import RunwayProvider
 
 log = logging.getLogger("videobot")
 
-# Убрать "legacy_runway" из списков — всегда только Kling+Seedance.
+# Съёмка ролика (1 клик / своё фото / ночь / вайб / Авторолик) — только fal.ai.
+# legacy Runway остаётся в файле providers/legacy/ для VIDEO_PROVIDER=runway и Act Two.
+FAL_ONLY_MODES = frozenset(
+    {
+        "real_photo",
+        "synthetic_multi_scene",
+        "night_pipeline",
+        "montage_generate",
+        "autorolik_face",
+        "autorolik_wide",
+    }
+)
+
 ROUTING: dict[str, list[str]] = {
-    "real_photo": ["kling", "seedance", "legacy_runway"],
-    "synthetic_multi_scene": ["seedance", "kling", "legacy_runway"],
-    "night_pipeline": ["seedance", "kling", "legacy_runway"],
-    "montage_generate": ["seedance", "kling", "legacy_runway"],
-    "autorolik_face": ["kling", "seedance", "legacy_runway"],
-    "autorolik_wide": ["seedance", "kling", "legacy_runway"],
+    "real_photo": ["kling", "seedance"],
+    "synthetic_multi_scene": ["seedance", "kling"],
+    "night_pipeline": ["seedance", "kling"],
+    "montage_generate": ["seedance", "kling"],
+    "autorolik_face": ["kling", "seedance"],
+    "autorolik_wide": ["seedance", "kling"],
 }
 
 MODE_DEFAULT = "synthetic_multi_scene"
 
 
+def is_fal_only_mode(mode: str) -> bool:
+    raw = (mode or "").strip() or MODE_DEFAULT
+    return raw in FAL_ONLY_MODES
+
+
 def chain_for(mode: str) -> list[str]:
     raw = (mode or "").strip() or MODE_DEFAULT
     names = list(ROUTING.get(raw) or ROUTING[MODE_DEFAULT])
-    if config.video_provider() == "runway":
+    fal_only = is_fal_only_mode(raw)
+    if fal_only:
+        names = [n for n in names if n != "legacy_runway"]
+    elif config.video_provider() == "runway":
         return ["legacy_runway"]
     force = (config.FAL_VIDEO_MODEL or "").strip().lower()
     if "kling" in force:
         names = ["kling"] + [n for n in names if n != "kling"]
     elif "seedance" in force:
         names = ["seedance"] + [n for n in names if n != "seedance"]
+    if fal_only:
+        names = [n for n in names if n != "legacy_runway"]
+        if not names:
+            names = ["kling", "seedance"] if raw == "real_photo" else ["seedance", "kling"]
     return names
 
 
@@ -70,9 +94,12 @@ async def render_clip(
     """Все кнопки генерации идут сюда, не в конкретный вендор."""
     last: PipelineError | None = None
     skip_runway = False
+    fal_only = is_fal_only_mode(route_mode)
     for engine in chain_for(route_mode):
         try:
             if engine == "legacy_runway":
+                if fal_only:
+                    continue
                 if skip_runway:
                     log.warning("skip legacy_runway after fal validation error")
                     continue
@@ -98,6 +125,7 @@ async def render_clip(
                 if photo_lock or elements or route_mode in ("autorolik_face", "real_photo"):
                     log.warning("skip seedance for FACE/photo_lock — partner rejects likenesses")
                     continue
+                # WIDE happy-path: промпт как есть, с @Image1. Стрип только у Kling.
                 return await client.generate_seedance(
                     session,
                     prompt,
@@ -108,9 +136,18 @@ async def render_clip(
                     multi_ref=route_mode in ("night_pipeline", "synthetic_multi_scene", "montage_generate")
                     and bool(references and len(references) > 1),
                 )
+            from prompt_templates.kling import strip_seedance_image_refs
+
+            # Kling I2V: still/фото = start_image_url. @ImageN — слоты Seedance, не Kling.
+            kling_prompt = strip_seedance_image_refs(prompt)
+            if kling_prompt != (prompt or "").strip():
+                log.warning(
+                    "kling I2V: stripped Seedance @Image tokens; start_image=%s",
+                    "yes" if frame else "missing",
+                )
             return await client.generate_kling(
                 session,
-                prompt,
+                kling_prompt,
                 frame,
                 seconds,
                 dest,
@@ -119,6 +156,11 @@ async def render_clip(
             )
         except PipelineError as exc:
             last = exc
+            if "слишком долго" in (exc.user_message or "").lower():
+                # Kling/Seedance ещё IN_PROGRESS — не бросать в Runway, sidecar жив для resume.
+                raise
+            if getattr(exc, "code", "") == "fal_keep_sidecar":
+                raise
             detail = str(exc.detail or exc.user_message or "")
             status = getattr(exc, "status", None)
             if engine in ("kling", "seedance") and (
@@ -130,6 +172,13 @@ async def render_clip(
             if getattr(exc, "code", "") in ("credits", "moderation", "moderation_person"):
                 log.warning("provider %s user-facing fail, try next: %s", engine, exc.code)
                 if getattr(exc, "code", "") == "moderation_person":
+                    # WIDE: Seedance режет likeness — та же сцена через Kling I2V.
+                    # FACE: Seedance и так skip, Kling likeness остаётся ошибкой.
+                    if engine == "seedance":
+                        log.warning(
+                            "seedance likeness — retry this clip with Kling"
+                        )
+                        continue
                     raise
                 if getattr(exc, "code", "") == "credits":
                     continue
@@ -138,6 +187,8 @@ async def render_clip(
             continue
     if last:
         raise last
+    if fal_only:
+        raise PipelineError("Камера сейчас недоступна. Нужен FAL_KEY.")
     raise PipelineError("Камера сейчас недоступна. Нужен FAL_KEY (или RUNWAY_API_KEY как запас).")
 
 
@@ -149,9 +200,12 @@ async def generate_still(
     route_mode: str = MODE_DEFAULT,
 ) -> str:
     last: PipelineError | None = None
+    fal_only = is_fal_only_mode(route_mode)
     for engine in chain_for(route_mode):
         try:
             if engine == "legacy_runway":
+                if fal_only:
+                    continue
                 if not config.RUNWAY_API_KEY:
                     continue
                 from pipeline import _text_to_image_url_native

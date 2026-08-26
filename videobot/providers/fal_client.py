@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import aiohttp
+
+log = logging.getLogger("videobot")
 
 import config
 from fal_api import (
@@ -14,6 +17,7 @@ from fal_api import (
     fal_peek_status,
     fal_run,
     fal_submit,
+    fal_try_resume,
     path_to_fal_url,
     to_fal_https_url,
 )
@@ -142,6 +146,15 @@ class FalClient(VideoProvider):
         photo_lock: bool = False,
         elements: list[str] | None = None,
     ) -> Path:
+        override = (config.FAL_VIDEO_MODEL or "").strip()
+        model_id = override if override.startswith("fal-ai/kling") else KLING_I2V_PRO
+        data = await fal_try_resume(
+            session, dest, used_image=bool(start_frame), expected_model=model_id
+        )
+        if data is not None:
+            out = await fal_download_media(session, data, dest)
+            write_runway_model(dest, model_id)
+            return out
         converted_map: dict[str, str] = {}
 
         async def https_one(raw: str) -> str:
@@ -153,14 +166,21 @@ class FalClient(VideoProvider):
             return converted_map[key]
 
         start = await https_one(start_frame)
+        if not start:
+            raise PipelineError("Kling 3.0 I2V нужен start_image_url (кадр или still).")
         converted: list[str] = []
         for item in elements or []:
             if item:
                 converted.append(await https_one(str(item)))
         if photo_lock and not converted:
             converted = [start]
+        from prompt_templates.kling import strip_seedance_image_refs
+
+        kling_prompt = strip_seedance_image_refs(prompt)
+        if kling_prompt != (prompt or "").strip():
+            log.warning("kling I2V: stripped Seedance @Image tokens before submit")
         model_id, payload = self._kling_body(
-            prompt, start, seconds, photo_lock=photo_lock, elements=converted or None
+            kling_prompt, start, seconds, photo_lock=photo_lock, elements=converted or None
         )
         data = await fal_run(session, model_id, payload, used_image=bool(start_frame), dest_id=dest)
         out = await fal_download_media(session, data, dest)
@@ -178,6 +198,13 @@ class FalClient(VideoProvider):
         references: list[str] | None = None,
         multi_ref: bool = False,
     ) -> Path:
+        data = await fal_try_resume(
+            session, dest, used_image=bool(start_frame), expected_model=SEEDANCE_I2V
+        )
+        if data is not None:
+            out = await fal_download_media(session, data, dest)
+            write_runway_model(dest, SEEDANCE_I2V)
+            return out
         converted_map: dict[str, str] = {}
 
         async def https_one(raw: str) -> str:

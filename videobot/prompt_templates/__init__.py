@@ -1,6 +1,6 @@
 """Промпты I2V: Kling Element Reference, Seedance multi-ref, legacy Runway."""
 
-from prompt_templates.kling import kling_video_prompt
+from prompt_templates.kling import kling_video_prompt, strip_seedance_image_refs
 from prompt_templates.seedance import seedance_video_prompt
 from prompt_templates.runway import runway_video_prompt
 

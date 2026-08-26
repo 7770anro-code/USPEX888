@@ -40,15 +40,26 @@ def smoke_routing() -> None:
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
-    for mode, chain in ROUTING.items():
-        assert chain[-1] == "legacy_runway", mode
-        assert "kling" in chain and "seedance" in chain
     assert ROUTING["autorolik_face"][0] == "kling"
     assert ROUTING["autorolik_wide"][0] == "seedance"
+    for mode in (
+        "real_photo",
+        "synthetic_multi_scene",
+        "night_pipeline",
+        "montage_generate",
+        "autorolik_face",
+        "autorolik_wide",
+    ):
+        assert "legacy_runway" not in ROUTING[mode], mode
+        assert "kling" in ROUTING[mode] and "seedance" in ROUTING[mode]
+        assert "legacy_runway" not in chain_for(mode), mode
     assert chain_for("real_photo")[0] == "kling"
     assert chain_for("night_pipeline")[0] == "seedance"
     assert chain_for("autorolik_face")[0] == "kling"
     assert chain_for("autorolik_wide")[0] == "seedance"
+    assert chain_for("autorolik_wide")[1] == "kling"
+    router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
+    assert "seedance likeness — retry this clip with Kling" in router_src
     night_src = Path(__file__).with_name("night_video.py").read_text(encoding="utf-8")
     assert 'route_mode="night_pipeline"' in night_src
     kling = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
@@ -56,6 +67,32 @@ def smoke_routing() -> None:
     assert kling["elements"]
     assert kling["elements"][0]["frontal_image_url"] == "https://example.com/a.jpg"
     assert kling["elements"][0]["reference_image_urls"] == ["https://example.com/a.jpg"]
+    from prompt_templates import video_prompt_for
+
+    seed_wide = video_prompt_for(
+        "seedance", "city dusk", "drone", photo_lock=False, character_lock=False
+    )
+    assert "@Image1" in seed_wide
+    k_wide = kling_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image" not in k_wide["prompt"]
+    assert k_wide["start_image_url"] == "https://example.com/wide_still.jpg"
+    assert "elements" not in k_wide
+    seed_keep = seedance_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image1" in seed_keep["prompt"]
+    from fal_api import fal_try_resume, keep_fal_sidecar
+    from pipeline import PipelineError
+
+    assert keep_fal_sidecar(PipelineError("x", code="fal_keep_sidecar")) is True
+    stamped = PipelineError(
+        "fal.ai: Invalid reference index 1",
+        "HTTP 422 input_value_error",
+        code="fal_keep_sidecar",
+    )
+    stamped.status = 422
+    assert keep_fal_sidecar(stamped) is False
+    fal_src = Path(__file__).with_name("fal_api.py").read_text(encoding="utf-8")
+    assert "fal_try_resume" in fal_src
+    assert "poll saved" in fal_src
     seed = seedance_i2v_payload("walk", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False
@@ -65,7 +102,7 @@ def smoke_routing() -> None:
         assert "Bearer" not in auth
     _ok(
         "routing",
-        "real_photo=Kling, synth/night/montage=Seedance, один FAL_API_KEY, Runway тихий хвост",
+        "1клик/фото/ночь/вайб/авторолик=Kling+Seedance без Runway",
     )
 
 

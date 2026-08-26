@@ -2,9 +2,30 @@
 
 from __future__ import annotations
 
+import re
+
 from pipeline import compose_runway_prompt
 
 ELEMENT_TOKEN = "@Element1"
+
+# Seedance пишет @ImageN = роль слота. Kling I2V это читает как индекс референса
+# и даёт 422 «Invalid reference index 1 … Only 0 images provided».
+_SEEDANCE_IMAGE_ROLE = re.compile(
+    r"@Image\d+\s*(?:=|is)\s+.*?\."
+    r"(?:\s+Do not invent another character\.)?"
+    r"(?:\s+Face is not the subject\.)?"
+    r"(?:\s+Do not lock identity to a person\.)?",
+    re.IGNORECASE | re.DOTALL,
+)
+_SEEDANCE_IMAGE_TOKEN = re.compile(r"@Image\d+\b", re.IGNORECASE)
+
+
+def strip_seedance_image_refs(prompt: str) -> str:
+    """Убрать Seedance @ImageN из промпта. @Element1 (Kling FACE) не трогаем."""
+    text = prompt or ""
+    text = _SEEDANCE_IMAGE_ROLE.sub(" ", text)
+    text = _SEEDANCE_IMAGE_TOKEN.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def kling_video_prompt(

@@ -2,6 +2,14 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-26 (21):** WIDE Seedance likeness → Kling (`8ba3011`). Рестарт только `videobot.service` (PID 199353 → **200283**, 09:38 UTC). USPEX 193645 и VECTOR 193636 без изменений. Resume n3/c2/m2 на месте. `/health` 200. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK. Live fal-кредиты не жгли.
+
+**Деплой 2026-08-26 (20):** COMPLETED Kling sidecar не пересоздаётся (`9a43d23`). Рестарт только `videobot.service` (PID 198912 → **199353**, 09:07 UTC). USPEX 193645 и VECTOR 193636 без изменений. `.env`/`data/`/resume mtime не менялись. На живом диске: skip m0/m1, сцена 2 Kling (n2 + sidecar), 3/5 Seedance, 4/6/7 Kling; wipe=false. `/health` 200. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK. Live fal-кредиты не жгли.
+
+**Деплой 2026-08-26 (19):** «Продолжить съёмку» не стирает 6748280112 (`f8341ac`). Рестарт только `videobot.service` (PID 198281 → 198912, 08:57 UTC). USPEX 193645 и VECTOR 193636 без изменений. `.env`/`data/`/resume mtime не менялись. На живом диске: skip m0/m1, сцена 2 Kling sidecar **COMPLETED**, 3/5 Seedance, 4/6/7 Kling; wipe=false даже при Mini App «Снять». `/health` 200. `python3 test_parse.py` — ok.
+
+**Деплой 2026-08-26 (18):** старый пайплайн + Авторолик без Runway (`8e9ffd4`). Рестарт только `videobot.service` (PID 197014 → 198281, 08:48 UTC). USPEX 193645 и VECTOR 193636 без изменений. `.env`/`data/` не трогали. Resume `6748280112_resume` на месте (`credits_paused`, 8 сцен, script+озвучка+c0/c1, `c2.mp4.fal_id`). `/health` 200, polling `@VideobotAI777_bot`. Неподписанный POST `/api/autorolik` → 403. На прод `chain_for(real_photo|autorolik_face)` = Kling→Seedance без `legacy_runway`. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK. Live fal-кредиты не жгли.
+
 **Деплой 2026-08-26 (17):** обрыв загрузки фото Авторолика (`17f85a1`). Рестарт только `videobot.service` (PID 195294 → 197014, 07:34 UTC). USPEX 193645 и VECTOR 193636 без изменений. `python3 test_parse.py` — ok. `smoke_rollout.py` без `--live` — SMOKE OK. Live fal-кредиты не жгли.
 
 **Деплой 2026-08-26 (15):** resume «Продолжить съёмку» (`4300f0c`). Рестарт только `videobot.service` (PID 189659 → 190318, 04:57 UTC). USPEX 91832 и VECTOR 67680 без изменений. На диске resume: 8 сцен, 1 озвучка, 6 фото, 0 клипов, `credits_paused=true`. `python3 test_parse.py` — ok.

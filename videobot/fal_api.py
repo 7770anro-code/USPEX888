@@ -21,8 +21,9 @@ FAL_CREDITS_MSG = (
     "и попробуйте снова. Ключ: https://fal.ai/dashboard/keys"
 )
 FAL_PERSON_MSG = (
-    "fal.ai отклонил фото живого человека (политика партнёра). "
-    "Лица друзей снимает Kling Element, не Seedance. Нажми «Снять» ещё раз."
+    "fal.ai отклонил кадр живого человека (политика партнёра). "
+    "Общий план сам уходит на Kling I2V (кадр как start_image); "
+    "лица друзей — Kling Element. Если ошибка осталась, это отказ Kling, не Seedance."
 )
 FAL_STORAGE_INIT = "https://rest.alpha.fal.ai/storage/upload/initiate"
 
@@ -62,6 +63,21 @@ def _fal_json_msg(detail: str) -> str:
     if isinstance(data.get("error"), str):
         return str(data.get("error") or "")[:280]
     return ""
+
+
+def is_fal_validation_fail(detail: str = "", *, status: int | None = None) -> bool:
+    """422 на валидации тела — джобы нет, GPU не шёл, sidecar можно снять."""
+    if status == 422:
+        return True
+    blob = (detail or "").lower()
+    return any(
+        w in blob
+        for w in (
+            "input_value_error",
+            "invalid reference index",
+            "value_error",
+        )
+    )
 
 
 def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
@@ -476,22 +492,48 @@ async def fal_poll(
             )
             raise fal_fail_error(detail, used_image=used_image)
         if status_u in FAL_DONE:
+            status_media = extract_fal_media_url(data or {})
             code, result, raw, used = await _fal_get_json(
                 session, result_urls, used_image=used_image, timeout_sec=60
             )
-            if code >= 400:
-                raise fal_fail_error(
-                    _clip(f"HTTP {code}: {raw}"), used_image=used_image
-                )
-            if used:
+            if used and code < 400:
                 remember_fal_urls(rid, response_url=used)
-            if not isinstance(result, dict):
-                raise PipelineError("fal.ai вернул не JSON результата.", _clip(raw, 240))
-            if result.get("error"):
-                raise fal_fail_error(
+            merged: dict[str, Any] = dict(data or {})
+            if isinstance(result, dict):
+                merged.update(result)
+            media = extract_fal_media_url(merged) or status_media
+            if media:
+                if code >= 400:
+                    log.warning(
+                        "fal result GET HTTP %s after COMPLETED — using status media request_id=%s",
+                        code,
+                        rid,
+                    )
+                return merged if extract_fal_media_url(merged) else (data or merged)
+            if isinstance(result, dict) and result.get("error"):
+                err = fal_fail_error(
                     _clip(str(result.get("error")), 300), used_image=used_image
                 )
-            return result
+                if err.code != "credits" and not is_fal_validation_fail(
+                    f"{err.detail or ''} {result.get('error')}", status=getattr(err, "status", None)
+                ):
+                    err.code = err.code or "fal_keep_sidecar"
+                raise err
+            if code >= 400:
+                err = fal_fail_error(
+                    _clip(f"HTTP {code}: {raw}"), used_image=used_image
+                )
+                err.status = code
+                if err.code != "credits" and not is_fal_validation_fail(
+                    f"{err.detail or ''} {raw}", status=code
+                ):
+                    err.code = err.code or "fal_keep_sidecar"
+                raise err
+            raise PipelineError(
+                "fal.ai не вернул файл в результате.",
+                _clip(raw, 240),
+                code="fal_keep_sidecar",
+            )
         await asyncio_sleep()
     raise PipelineError(
         "fal.ai слишком долго генерирует. Остановил ожидание.",
@@ -573,6 +615,94 @@ async def asyncio_sleep() -> None:
     await asyncio.sleep(max(2.0, float(config.FAL_POLL_SEC or FAL_POLL_SEC)))
 
 
+def fal_model_family(model_id: str) -> str:
+    raw = (model_id or "").strip().lower()
+    if "kling" in raw:
+        return "kling"
+    if "seedance" in raw:
+        return "seedance"
+    return raw
+
+
+def keep_fal_sidecar(exc: BaseException) -> bool:
+    """COMPLETED/timeout/credits — sidecar жив. 422 validation — мёртвая, новый submit."""
+    if not isinstance(exc, PipelineError):
+        return False
+    if getattr(exc, "code", "") == "credits":
+        return True
+    blob = f"{exc.detail or ''} {exc.user_message or ''}"
+    if is_fal_validation_fail(blob, status=getattr(exc, "status", None)):
+        return False
+    if getattr(exc, "code", "") == "fal_keep_sidecar":
+        return True
+    return "слишком долго" in (exc.user_message or "").lower()
+
+
+async def fal_try_resume(
+    session: aiohttp.ClientSession,
+    dest_id: Path | None,
+    *,
+    used_image: bool = False,
+    expected_model: str = "",
+) -> dict[str, Any] | None:
+    """Poll sidecar без нового submit. None — нет джобы / мёртвая (sidecar снят)."""
+    if dest_id is None:
+        return None
+    side = dest_id.with_suffix(dest_id.suffix + ".fal_id")
+    if not side.is_file():
+        return None
+    saved = read_fal_side(side)
+    rid_saved = (saved.get("request_id") or "").strip()
+    if not rid_saved:
+        return None
+    saved_model = (saved.get("model_id") or "").strip()
+    expected = (expected_model or "").strip()
+    if (
+        saved_model
+        and expected
+        and fal_model_family(saved_model) != fal_model_family(expected)
+    ):
+        # Мёртвый Kling sidecar после WIDE fallback не должен блокировать
+        # Seedance (и наоборот). Poll сохранённой камеры: COMPLETED — забрать,
+        # FAILED — снять sidecar и дать текущей камере новый submit.
+        log.info(
+            "fal sidecar other model saved=%s now=%s — poll saved",
+            saved_model,
+            expected,
+        )
+    model_id = saved_model or expected
+    if not model_id:
+        return None
+    remember_fal_urls(
+        rid_saved,
+        status_url=saved.get("status_url") or "",
+        response_url=saved.get("response_url") or "",
+    )
+    log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
+    try:
+        return await fal_poll(
+            session,
+            model_id,
+            rid_saved,
+            used_image=used_image,
+            status_url=saved.get("status_url") or None,
+            response_url=saved.get("response_url") or None,
+        )
+    except PipelineError as exc:
+        if keep_fal_sidecar(exc):
+            raise
+        try:
+            side.unlink()
+        except OSError:
+            pass
+        log.warning(
+            "fal resume dead model=%s — new submit (%s)",
+            model_id,
+            (exc.detail or exc.user_message or "")[:180],
+        )
+        return None
+
+
 async def fal_run(
     session: aiohttp.ClientSession,
     model_id: str,
@@ -582,53 +712,26 @@ async def fal_run(
     dest_id: Path | None = None,
 ) -> dict[str, Any]:
     """Submit + poll. dest_id — sidecar с request_id для resume."""
-    side = None
-    if dest_id is not None:
-        side = dest_id.with_suffix(dest_id.suffix + ".fal_id")
-        if side.is_file():
-            saved = read_fal_side(side)
-            rid_saved = (saved.get("request_id") or "").strip()
-            if rid_saved:
-                remember_fal_urls(
-                    rid_saved,
-                    status_url=saved.get("status_url") or "",
-                    response_url=saved.get("response_url") or "",
-                )
-                saved_model = (saved.get("model_id") or "").strip()
-                if saved_model and saved_model != model_id:
-                    log.info(
-                        "fal sidecar other model saved=%s now=%s — new submit",
-                        saved_model,
-                        model_id,
-                    )
-                    try:
-                        side.unlink()
-                    except OSError:
-                        pass
-                else:
-                    log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
-                    try:
-                        return await fal_poll(
-                            session,
-                            model_id,
-                            rid_saved,
-                            used_image=used_image,
-                            status_url=saved.get("status_url") or None,
-                            response_url=saved.get("response_url") or None,
-                        )
-                    except PipelineError as exc:
-                        timeout = "слишком долго" in (exc.user_message or "").lower()
-                        if timeout:
-                            raise
-                        try:
-                            side.unlink()
-                        except OSError:
-                            pass
-                        log.warning(
-                            "fal resume dead model=%s — new submit (%s)",
-                            model_id,
-                            (exc.detail or exc.user_message or "")[:180],
-                        )
+    side = dest_id.with_suffix(dest_id.suffix + ".fal_id") if dest_id is not None else None
+    resumed = await fal_try_resume(
+        session, dest_id, used_image=used_image, expected_model=model_id
+    )
+    if resumed is not None:
+        return resumed
+    if side is not None and side.is_file():
+        saved = read_fal_side(side)
+        rid_saved = (saved.get("request_id") or "").strip()
+        saved_model = (saved.get("model_id") or "").strip()
+        if (
+            rid_saved
+            and saved_model
+            and fal_model_family(saved_model) != fal_model_family(model_id)
+        ):
+            raise PipelineError(
+                "fal.ai ещё держит готовый клип другой камеры. Не пересоздаю.",
+                f"saved={saved_model} now={model_id}",
+                code="fal_keep_sidecar",
+            )
     submitted = await fal_submit(session, model_id, payload)
     rid = str(submitted.get("request_id") or "")
     if side is not None and rid:
@@ -656,8 +759,7 @@ async def fal_run(
             response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
         )
     except PipelineError as exc:
-        timeout = "слишком долго" in (exc.user_message or "").lower()
-        if side is not None and not timeout:
+        if side is not None and not keep_fal_sidecar(exc):
             try:
                 side.unlink()
             except OSError:

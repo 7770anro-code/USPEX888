@@ -118,6 +118,7 @@ from resume_job import (
     resume_work_dir,
     run_kwargs_from_checkpoint,
     save_checkpoint,
+    should_wipe_resume,
     wipe_resume,
 )
 from wave2 import (
@@ -622,7 +623,14 @@ def credits_pause_kb(job_key: str = "") -> InlineKeyboardMarkup:
 
 def credits_pause_text(chat_id: int, *, headline: str = "") -> str:
     work = resume_work_dir(chat_id)
-    head = (headline or RUNWAY_CREDITS_MSG).strip()
+    if headline:
+        head = headline.strip()
+    elif config.video_provider() == "runway":
+        head = RUNWAY_CREDITS_MSG
+    else:
+        from fal_api import FAL_CREDITS_MSG
+
+        head = FAL_CREDITS_MSG
     return (
         f"{head}\n\n"
         f"{format_resume_progress(work)}\n\n"
@@ -828,9 +836,10 @@ async def on_edit_callback(query: CallbackQuery, state: FSMContext) -> None:
             "Авто-монтаж — выбери источник.\n\n"
             "📤 Своё видео — как раньше: план клипов через xAI API, режет ffmpeg, Runway не тратится.\n"
             "✨ Описать вайб/тему — сниму ОРИГИНАЛЬНЫЙ синтетический ролик с нуля "
-            "(тот же пайплайн, что ночной контур: IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Runway → голос). "
+            "(тот же пайплайн, что ночной контур: IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → "
+            "Kling/Seedance на fal.ai → голос). "
             "Интернет не ищу, чужие фильмы и ролики не скачиваю. Название фильма — только ориентир стиля. "
-            "Это тратит кредиты Runway и ElevenLabs. Хронометраж ≈30 сек. "
+            "Это тратит баланс fal.ai и ElevenLabs. Хронометраж ≈30 сек. "
             "Субтитры — текст озвучки через ffmpeg.\n\n"
             "Можно сразу прислать видео или написать вайб текстом.",
             reply_markup=edit_auto_source_kb(),
@@ -1041,11 +1050,10 @@ async def _run_synth_vibe(message: Message, state: FSMContext, brief: str) -> No
             reply_markup=credits_pause_kb(job_key_manual(message.chat.id)),
         )
         return
-    cost = estimate_cost(n_scenes=n, clip_sec=5, quality=quality, text=brief, need_still=True)
     await message.answer(
         "Снимаю оригинальный синтетический ролик, интернет не ищу, чужие клипы не качаю.\n"
         f"≈{n} коротких сцен (~5 сек), цель 20–30 сек, качество «Оптимально». "
-        f"Оценка Runway ≈{cost.get('runway')} кр.\n"
+        "Камера — Kling/Seedance на fal.ai, не Runway.\n"
         "Субтитры — текст озвучки (ffmpeg drawtext)."
     )
     await _run_job(
@@ -2343,13 +2351,18 @@ async def _run_job(
     ok = False
     work = resume_work_dir(message.chat.id)
     paused = credits_paused(work)
-    if wipe or not paused:
+    if should_wipe_resume(wipe=wipe, paused=paused):
         wipe_resume(message.chat.id)
         work = resume_work_dir(message.chat.id)
+    elif wipe and paused:
+        log.warning(
+            "ignore wipe, keep resume dir chat=%s path=%s",
+            message.chat.id,
+            work,
+        )
     job_key = job_key_manual(message.chat.id)
     save_checkpoint(
         work,
-        credits_paused=False,
         run={
             "idea": idea,
             "user_script": bool(user_script),
@@ -2371,6 +2384,7 @@ async def _run_job(
             "preset_brief": preset_brief or "",
             "kind": kind or "motivational",
             "dynamic_pacing": bool(dynamic_pacing),
+            "route_mode": (route_mode or "").strip(),
         },
     )
     try:
@@ -2525,9 +2539,10 @@ async def _run_job(
         except Exception:
             log.exception("unhandled")
             finish_job(job_key, failed=True, label="Сломалось на моей стороне")
+            mark_credits_pause(work)
             await message.answer(
                 "Упс, что-то сломалось на моей стороне. Нажми /start и попробуй ещё раз.",
-                reply_markup=main_menu(),
+                reply_markup=credits_pause_kb(job_key),
             )
         finally:
             if ok:
