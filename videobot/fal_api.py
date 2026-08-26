@@ -20,6 +20,10 @@ FAL_CREDITS_MSG = (
     "На fal.ai закончились кредиты. Пополните баланс в кабинете fal.ai "
     "и попробуйте снова. Ключ: https://fal.ai/dashboard/keys"
 )
+FAL_PERSON_MSG = (
+    "fal.ai отклонил фото живого человека (политика партнёра). "
+    "Лица друзей снимает Kling Element, не Seedance. Нажми «Снять» ещё раз."
+)
 FAL_STORAGE_INIT = "https://rest.alpha.fal.ai/storage/upload/initiate"
 
 FAL_QUEUE = "https://queue.fal.run"
@@ -41,23 +45,55 @@ def fal_headers(*, json_body: bool = True) -> dict[str, str]:
     return headers
 
 
+def _fal_json_msg(detail: str) -> str:
+    raw = detail or ""
+    start = raw.find("{")
+    if start < 0:
+        return ""
+    try:
+        data = json.loads(raw[start:])
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    items = data.get("detail")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return str(items[0].get("msg") or items[0].get("type") or "")[:280]
+    if isinstance(data.get("error"), str):
+        return str(data.get("error") or "")[:280]
+    return ""
+
+
 def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
     from pipeline import (
-        RUNWAY_PERSON_MSG,
         RUNWAY_SAFETY_MSG,
         is_runway_credits_fail,
+        is_runway_person_moderation,
     )
 
-    blob = (detail or "").lower()
+    extra = _fal_json_msg(detail)
+    blob = f"{detail or ''} {extra}".lower()
     if is_runway_credits_fail(detail) or any(
         w in blob for w in ("insufficient", "out of credit", "payment required", "balance")
     ):
         err = PipelineError(FAL_CREDITS_MSG, detail, code="credits")
         return err
-    if any(w in blob for w in ("moderat", "safety", "nsfw", "content policy", "blocked")):
-        if used_image:
-            return PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
+    person = is_runway_person_moderation("", detail) or any(
+        w in blob
+        for w in (
+            "content_policy",
+            "likeness",
+            "real people",
+            "partner_validation",
+            "private information",
+        )
+    )
+    if person or any(w in blob for w in ("moderat", "safety", "nsfw", "content policy", "blocked")):
+        if used_image or person:
+            return PipelineError(FAL_PERSON_MSG, detail, code="moderation_person")
         return PipelineError(RUNWAY_SAFETY_MSG, detail, code="moderation")
+    if extra:
+        return PipelineError(f"fal.ai: {extra}", detail)
     return PipelineError("fal.ai не смог выполнить задачу.", detail)
 
 

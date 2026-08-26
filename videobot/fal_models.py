@@ -94,7 +94,9 @@ def kling_i2v_payload(
     if photo_lock and not urls and image_url:
         urls = [image_url]
     if urls:
-        body["elements"] = [{"frontal_image_url": u} for u in urls]
+        body["elements"] = [
+            {"frontal_image_url": u, "reference_image_urls": [u]} for u in urls
+        ]
         if "@Element1" not in body["prompt"] and "@element" not in body["prompt"].lower():
             body["prompt"] = "@Element1 is the same person, same face and clothes. " + body["prompt"]
     return body

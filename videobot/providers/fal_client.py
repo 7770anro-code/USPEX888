@@ -142,11 +142,21 @@ class FalClient(VideoProvider):
         photo_lock: bool = False,
         elements: list[str] | None = None,
     ) -> Path:
-        start = await to_fal_https_url(session, start_frame)
+        converted_map: dict[str, str] = {}
+
+        async def https_one(raw: str) -> str:
+            key = (raw or "").strip()
+            if not key:
+                return ""
+            if key not in converted_map:
+                converted_map[key] = await to_fal_https_url(session, key)
+            return converted_map[key]
+
+        start = await https_one(start_frame)
         converted: list[str] = []
         for item in elements or []:
             if item:
-                converted.append(await to_fal_https_url(session, str(item)))
+                converted.append(await https_one(str(item)))
         if photo_lock and not converted:
             converted = [start]
         model_id, payload = self._kling_body(
@@ -168,8 +178,18 @@ class FalClient(VideoProvider):
         references: list[str] | None = None,
         multi_ref: bool = False,
     ) -> Path:
-        start = await to_fal_https_url(session, start_frame) if start_frame else ""
-        refs = [await to_fal_https_url(session, str(r)) for r in (references or []) if r]
+        converted_map: dict[str, str] = {}
+
+        async def https_one(raw: str) -> str:
+            key = (raw or "").strip()
+            if not key:
+                return ""
+            if key not in converted_map:
+                converted_map[key] = await to_fal_https_url(session, key)
+            return converted_map[key]
+
+        start = await https_one(start_frame) if start_frame else ""
+        refs = [await https_one(str(r)) for r in (references or []) if r]
         model_id, payload = self._seedance_body(
             prompt,
             start,

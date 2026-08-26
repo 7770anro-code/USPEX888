@@ -984,6 +984,8 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "resume:go" in bot_src
     assert "credits_pause_kb" in bot_src
     assert "resume_work_dir" in bot_src
+    assert "shoot_fail_text" in bot_src
+    assert "В Mini App заново заходить не нужно" in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -2080,6 +2082,22 @@ def test_fal_kling_and_miniapp() -> None:
     cred = fal_fail_error("insufficient credits on account")
     assert cred.code == "credits"
     assert cred.user_message == FAL_CREDITS_MSG
+    person = fal_fail_error(
+        'HTTP 422: {"detail":[{"loc":["body","image_urls"],'
+        '"msg":"The images or videos provided may contain likenesses of real people '
+        'or other private information that cannot be processed.",'
+        '"type":"content_policy_violation"}]}',
+        used_image=True,
+    )
+    assert person.code == "moderation_person"
+    assert "живого человека" in person.user_message
+    assert "не смог выполнить задачу" not in person.user_message
+    kling_el = fal_fail_error(
+        'HTTP 422: {"detail":[{"type":"value_error","loc":["body","elements",0],'
+        '"msg":"Value error, Either frontal_image_url and reference_image_urls or video_url must be provided."}]}'
+    )
+    assert "reference_image_urls" in kling_el.user_message
+    assert kling_el.user_message.startswith("fal.ai:")
 
     old_key = config.FAL_KEY
     config.FAL_KEY = "test-fal-key"
@@ -2251,7 +2269,12 @@ def test_fal_kling_and_miniapp() -> None:
 
     locked = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
     assert locked["generate_audio"] is False
-    assert locked["elements"] == [{"frontal_image_url": "https://example.com/a.jpg"}]
+    assert locked["elements"] == [
+        {
+            "frontal_image_url": "https://example.com/a.jpg",
+            "reference_image_urls": ["https://example.com/a.jpg"],
+        }
+    ]
     assert ELEMENT_TOKEN in locked["prompt"]
     ref = seedance_ref_payload("go", ["https://a", "https://b"], 8)
     assert ref["duration"] == "8"
@@ -2262,12 +2285,19 @@ def test_fal_kling_and_miniapp() -> None:
         5,
         elements=["https://example.com/face.jpg"],
     )
-    assert many["elements"] == [{"frontal_image_url": "https://example.com/face.jpg"}]
+    assert many["elements"] == [
+        {
+            "frontal_image_url": "https://example.com/face.jpg",
+            "reference_image_urls": ["https://example.com/face.jpg"],
+        }
+    ]
     # Прод 01:20: Kling 422 — data URI в elements.frontal_image_url. Перед submit льём https.
     kling_fn = inspect.getsource(FalClient.generate_kling)
     assert "to_fal_https_url" in kling_fn
+    assert "converted_map" in kling_fn
     seed_fn = inspect.getsource(FalClient.generate_seedance)
     assert "to_fal_https_url" in seed_fn
+    assert "converted_map" in seed_fn
     from fal_api import fal_side_payload, fal_run, to_fal_https_url
 
     side = fal_side_payload({"request_id": "rid-x"}, model_id=KLING_I2V_PRO)
@@ -2278,9 +2308,12 @@ def test_fal_kling_and_miniapp() -> None:
     router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
     assert "skip_runway" in router_src
     assert "skip legacy_runway after fal validation error" in router_src
+    assert "skip seedance for FACE" in router_src
+    assert 'route_mode in ("autorolik_face", "real_photo")' in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
+    assert leaked["elements"][0]["reference_image_urls"][0].startswith("data:")
     https_src = inspect.getsource(to_fal_https_url)
     assert "fal_storage_upload" in https_src
     assert "data:" in https_src

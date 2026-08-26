@@ -628,6 +628,17 @@ def credits_pause_text(chat_id: int, *, headline: str = "") -> str:
     )
 
 
+def shoot_fail_text(chat_id: int, *, headline: str) -> str:
+    work = resume_work_dir(chat_id)
+    head = (headline or "Съёмка остановилась.").strip()
+    return (
+        f"{head}\n\n"
+        f"{format_resume_progress(work)}\n\n"
+        "Прогресс на диске. Нажми «Продолжить съёмку» — сценарий и озвучку заново не спишем, "
+        "доснимем с места остановки. В Mini App заново заходить не нужно."
+    )
+
+
 def tune_text(job: dict[str, Any]) -> str:
     voice = voice_by_index(int(job.get("voice_idx") or 1))
     preset = PRESETS.get(job.get("preset_id") or "")
@@ -2417,14 +2428,12 @@ async def _run_job(
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
             finish_job(job_key, failed=True, label=exc.user_message)
+            mark_credits_pause(work)
             if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
-                mark_credits_pause(work)
-                await message.answer(
-                    credits_pause_text(message.chat.id, headline=exc.user_message),
-                    reply_markup=credits_pause_kb(job_key),
-                )
+                text = credits_pause_text(message.chat.id, headline=exc.user_message)
             else:
-                await message.answer(exc.user_message, reply_markup=main_menu())
+                text = shoot_fail_text(message.chat.id, headline=exc.user_message)
+            await message.answer(text, reply_markup=credits_pause_kb(job_key))
         except Exception:
             log.exception("unhandled")
             finish_job(job_key, failed=True, label="Сломалось на моей стороне")

@@ -95,6 +95,9 @@ async def render_clip(
             client = FalClient(session, engine=engine)
             frame = prompt_image or ""
             if engine == "seedance":
+                if photo_lock or elements or route_mode in ("autorolik_face", "real_photo"):
+                    log.warning("skip seedance for FACE/photo_lock — partner rejects likenesses")
+                    continue
                 return await client.generate_seedance(
                     session,
                     prompt,
