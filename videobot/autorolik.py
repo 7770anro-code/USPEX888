@@ -29,6 +29,9 @@ STALE_SCRIPT_MSG = (
 STALE_SHOOT_MSG = (
     "Прошлая съёмка оборвалась. Сценарий на месте — можно править и снять, или собрать заново."
 )
+UPLOAD_FAIL_MSG = (
+    "Загрузка фото оборвалась — сценарий не запустился. Открой Авторолик и собери ещё раз."
+)
 _live: dict[int, dict[str, Any]] = {}
 ELEMENT_RE = re.compile(r"@Element\s*(\d+)|@element_(\d+)", re.I)
 
@@ -312,6 +315,28 @@ def apply_manual_script_edits(script: dict[str, Any] | None, edits: dict[str, An
     return parse_autorolik_script(json.dumps(data, ensure_ascii=False), n_photos=n)
 
 
+def mark_upload_failed(user_id: int, idea: str = "") -> dict[str, Any]:
+    """Обрыв Mini App до _spawn: не scripting, чтобы UI не ждал мёртвого воркера."""
+    uid = int(user_id)
+    clear_live(uid)
+    prev = load_pending(uid) or {}
+    tomb = {
+        "phase": "error",
+        "error": UPLOAD_FAIL_MSG,
+        "script": None,
+        "idea": str(idea or prev.get("idea") or ""),
+        "photo_paths": [],
+        "photo_file_ids": [],
+        "consent_verified": False,
+        "source": str(prev.get("source") or "miniapp"),
+        "stale": False,
+        "upload_failed": True,
+    }
+    save_pending(uid, tomb)
+    log.warning("autorolik upload failed user=%s", uid)
+    return tomb
+
+
 def pending_view(pending: dict[str, Any] | None) -> dict[str, Any]:
     data = pending if isinstance(pending, dict) else {}
     photos = data.get("photo_paths") or data.get("photo_file_ids") or []
@@ -322,6 +347,7 @@ def pending_view(pending: dict[str, Any] | None) -> dict[str, Any]:
         "idea": str(data.get("idea") or ""),
         "n_photos": n_photos,
         "stale": bool(data.get("stale")),
+        "upload_failed": bool(data.get("upload_failed")),
         "script": script_view(data.get("script") if isinstance(data.get("script"), dict) else None),
     }
 

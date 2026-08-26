@@ -15,6 +15,8 @@ import config
 from pipeline import PipelineError
 from webapp_auth import WebAppAuthError, validate_init_data
 
+_PHOTO_FIELDS = frozenset({"photo", "photos", *(f"photo{i}" for i in range(1, 7))})
+
 log = logging.getLogger("videobot")
 
 WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
@@ -38,8 +40,100 @@ def _user_from_request(request: web.Request, form: Any) -> dict[str, Any]:
     return validate_init_data(init_data, config.VIDEOBOT_TELEGRAM_TOKEN)
 
 
-def json_error(message: str, status: int = 400) -> web.Response:
-    return web.json_response({"ok": False, "error": message}, status=status)
+def json_error(message: str, status: int = 400, **extra: Any) -> web.Response:
+    payload: dict[str, Any] = {"ok": False, "error": message}
+    payload.update(extra)
+    return web.json_response(payload, status=status)
+
+
+def _is_client_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError, asyncio.CancelledError)):
+        return True
+    name = type(exc).__name__.lower()
+    if "disconnect" in name or "connection" in name:
+        return True
+    msg = str(exc).lower()
+    return "connection lost" in msg or "connection reset" in msg or "client disconnected" in msg
+
+
+def _user_from_header(request: web.Request) -> dict[str, Any] | None:
+    raw = request.headers.get("X-Telegram-Init-Data") or ""
+    if not raw.strip():
+        return None
+    try:
+        return validate_init_data(raw, config.VIDEOBOT_TELEGRAM_TOKEN)
+    except WebAppAuthError:
+        return None
+
+
+def _consent_from_fields(fields: dict[str, str]) -> bool:
+    return str(fields.get("consent") or "") in ("1", "true", "yes", "on")
+
+
+async def _consume_autorolik_part(
+    part: Any, fields: dict[str, str], photos: list[bytes]
+) -> None:
+    name = str(getattr(part, "name", None) or "")
+    filename = getattr(part, "filename", None)
+    if filename or name in _PHOTO_FIELDS or name.startswith("photo"):
+        data = await part.read(decode=False)
+        blob = data or b""
+        if blob:
+            photos.append(blob)
+        return
+    text = await part.text()
+    if name:
+        fields[name] = str(text or "")
+
+
+async def collect_autorolik_parts(reader: Any) -> tuple[dict[str, str], list[bytes], bool]:
+    """Читает multipart по частям. Обрыв клиента → уже полученные поля/фото, disconnected=True."""
+    fields: dict[str, str] = {}
+    photos: list[bytes] = []
+    try:
+        while True:
+            part = await reader.next()
+            if part is None:
+                break
+            await _consume_autorolik_part(part, fields, photos)
+    except Exception as exc:
+        if not _is_client_disconnect(exc):
+            raise
+        log.warning("autorolik multipart disconnect after fields=%s photos=%s: %s",
+                    list(fields), len(photos), type(exc).__name__)
+        return fields, photos, True
+    return fields, photos, False
+
+
+def _fields_photos_from_form(form: Any) -> tuple[dict[str, str], list[bytes]]:
+    fields: dict[str, str] = {}
+    if form is None:
+        return fields, []
+    for key in ("initData", "init_data", "topic", "idea", "consent"):
+        if key in form:
+            fields[key] = str(form.get(key) or "")
+    return fields, []
+
+
+async def ingest_autorolik_body(
+    request: web.Request,
+) -> tuple[dict[str, str], list[bytes], bool]:
+    """Стрим multipart. Если клиент закрыл Mini App на фото — не 500, а частичный результат."""
+    ctype = str(request.content_type or "")
+    try:
+        if "multipart" in ctype:
+            reader = await request.multipart()
+            fields, photos, disconnected = await collect_autorolik_parts(reader)
+            return fields, photos, disconnected
+        form = await request.post()
+        fields, _ = _fields_photos_from_form(form)
+        photos = await _read_photos(form)
+        return fields, photos, False
+    except Exception as exc:
+        if not _is_client_disconnect(exc):
+            raise
+        log.warning("autorolik body disconnect: %s", type(exc).__name__)
+        return {}, [], True
 
 
 async def handle_index(_request: web.Request) -> web.FileResponse:
@@ -210,33 +304,48 @@ async def _read_photos(form: Any) -> list[bytes]:
 
 
 async def handle_autorolik(request: web.Request) -> web.Response:
-    form = await request.post()
-    try:
-        user = _user_from_request(request, form)
-    except WebAppAuthError as exc:
-        return json_error(str(exc), 403)
-    consent = str(form.get("consent") or "") in ("1", "true", "yes", "on")
-    topic = str(form.get("topic") or form.get("idea") or "").strip()
-    photos = await _read_photos(form)
+    from autorolik import UPLOAD_FAIL_MSG, mark_upload_failed, set_live
+
+    user = _user_from_header(request)
+    fields, photos, disconnected = await ingest_autorolik_body(request)
+    if user is None:
+        try:
+            user = _user_from_request(request, fields)
+        except WebAppAuthError as exc:
+            return json_error(str(exc), 403)
+    consent = _consent_from_fields(fields)
+    topic = str(fields.get("topic") or fields.get("idea") or "").strip()
+    uid = int(user["id"])
     if len(photos) > 6:
-        return json_error("Максимум 6 фото.")
+        photos = photos[:6]
+    if photos and consent:
+        bot = request.app["bot"]
+        set_live(uid, "scripting")
+        _spawn(_run_safe(bot, uid, "autorolik", photos, consent, topic))
+        if disconnected:
+            log.warning("autorolik spawned after partial upload user=%s photos=%s", uid, len(photos))
+        return web.json_response(
+            {
+                "ok": True,
+                "phase": "scripting",
+                "message": "Пишу сценарий. Можно закрыть Telegram — план и кнопки «Снять» придут в чат.",
+                "close": False,
+            }
+        )
+    if disconnected:
+        mark_upload_failed(uid, topic)
+        return json_error(
+            UPLOAD_FAIL_MSG,
+            409,
+            upload_failed=True,
+            phase="error",
+            retry=True,
+        )
     if not photos:
         return json_error("Нужно хотя бы одно фото.")
     if not consent:
         return json_error("Без согласия фото людей не использую.")
-    bot = request.app["bot"]
-    from autorolik import set_live
-
-    set_live(int(user["id"]), "scripting")
-    _spawn(_run_safe(bot, user["id"], "autorolik", photos, consent, topic))
-    return web.json_response(
-        {
-            "ok": True,
-            "phase": "scripting",
-            "message": "Пишу сценарий. Можно закрыть Telegram — план и кнопки «Снять» придут в чат.",
-            "close": False,
-        }
-    )
+    return json_error("Не вышло собрать сценарий. Попробуй ещё раз.")
 
 
 async def handle_autorolik_status(request: web.Request) -> web.Response:
@@ -267,6 +376,8 @@ async def handle_autorolik_status(request: web.Request) -> web.Response:
     message = ""
     if phase == "stale":
         message = view.get("error") or "Прошлый заход оборвался. Можно собрать сценарий заново."
+    elif view.get("upload_failed") or (phase == "error" and view.get("error")):
+        message = str(view.get("error") or "")
     elif phase == "scripting":
         message = "Пишу сценарий…"
     elif phase == "shooting":

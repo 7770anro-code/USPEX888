@@ -116,8 +116,18 @@
     Object.entries(files || {}).forEach(([k, f]) => {
       if (f) body.append(k, f);
     });
-    showStatus("Отправил задачу. Результат придёт в чат с ботом…");
-    const resp = await fetch(path, { method: "POST", body });
+    if (files && Object.keys(files).filter((k) => files[k]).length) {
+      showStatus("Загружаю фото… Пока не появится подтверждение, Mini App лучше не закрывать.");
+    } else {
+      showStatus("Отправил задачу. Результат придёт в чат с ботом…");
+    }
+    let resp;
+    try {
+      resp = await fetch(path, { method: "POST", body, headers: authHeaders() });
+    } catch (err) {
+      showStatus("Загрузка оборвалась — сценарий не запустился. Попробуй ещё раз.", "err");
+      return null;
+    }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       showStatus(data.error || "Не вышло. Попробуй ещё раз.", "err");
@@ -128,6 +138,12 @@
       setTimeout(() => tg.close(), 1200);
     }
     return data;
+  }
+
+  function authHeaders() {
+    const headers = {};
+    if (initData) headers["X-Telegram-Init-Data"] = initData;
+    return headers;
   }
 
   function autoForm(extra) {
@@ -230,6 +246,7 @@
     const resp = await fetch("/api/autorolik/script", {
       method: "POST",
       body: autoForm({ script: JSON.stringify(edits) }),
+      headers: authHeaders(),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
@@ -277,7 +294,7 @@
     const refreshWrap = document.getElementById("auto-refresh-wrap");
     const script = pending && pending.script;
     const hasScenes = script && script.scenes && script.scenes.length;
-    const dead = phase === "stale" || ((phase === "error" || phase === "") && pending && pending.stale);
+    const dead = phase === "stale" || (pending && pending.upload_failed) || ((phase === "error" || phase === "") && pending && pending.stale);
     if (dead || ((phase === "error" || phase === "stale") && !hasScenes)) {
       setHidden(setup, false);
       setHidden(wait, true);
@@ -359,7 +376,11 @@
 
   async function refreshAutorolik() {
     if (!initData) return;
-    const resp = await fetch("/api/autorolik/status", { method: "POST", body: autoForm() });
+    const resp = await fetch("/api/autorolik/status", {
+      method: "POST",
+      body: autoForm(),
+      headers: authHeaders(),
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       if (data.error) showStatus(data.error, "err");
@@ -368,6 +389,8 @@
     const pending = data.pending || {};
     const shoot = data.shoot || {};
     const phase = data.phase || pending.phase || "";
+    const script = pending.script;
+    const hasScenes = script && script.scenes && script.scenes.length;
     const waitLabel = document.getElementById("auto-wait-label");
     if (waitLabel && phase === "scripting") {
       waitLabel.textContent = data.message || pending.error || "Пишу сценарий…";
@@ -375,6 +398,9 @@
     if (phase === "stale" || pending.stale) {
       showStatus(pending.error || data.message || "Прошлый заход оборвался. Можно собрать заново.", "err");
       markRefresh("оборвался — можно заново");
+    } else if (pending.upload_failed || (phase === "error" && pending.error && !hasScenes)) {
+      showStatus(pending.error || data.message || "Загрузка фото оборвалась — сценарий не запустился. Попробуй ещё раз.", "err");
+      markRefresh("загрузка оборвалась");
     } else if (phase === "scripting") {
       showStatus(data.message || "Пишу сценарий…", "");
       markRefresh("пишу сценарий");
@@ -452,8 +478,13 @@
     files.forEach((f, i) => {
       photos["photo" + (i + 1)] = f;
     });
+    showStatus("Загружаю фото… Пока не появится «Пишу сценарий», Mini App лучше не закрывать.");
     const started = await postJob("/api/autorolik", { topic, consent: "1" }, photos);
-    if (!started) return;
+    if (!started) {
+      const fail = "Загрузка фото оборвалась — сценарий не запустился. Попробуй ещё раз.";
+      showAutoPhase("error", { phase: "error", error: fail, upload_failed: true }, {});
+      return;
+    }
     showAutoPhase("scripting", { phase: "scripting" }, {});
     startAutoPoll();
     await refreshAutorolik();
@@ -491,7 +522,11 @@
     const saved = await saveScriptEdits();
     if (saved && saved.ok === false) return;
     showStatus("Снимаю. Можно закрыть Telegram — ролик придёт в чат.");
-    const resp = await fetch("/api/autorolik/shoot", { method: "POST", body: autoForm() });
+    const resp = await fetch("/api/autorolik/shoot", {
+      method: "POST",
+      body: autoForm(),
+      headers: authHeaders(),
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       showStatus(data.error || "Не вышло снять.", "err");
@@ -511,6 +546,7 @@
     const resp = await fetch("/api/autorolik/revise", {
       method: "POST",
       body: autoForm({ notes }),
+      headers: authHeaders(),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
@@ -522,7 +558,11 @@
   });
 
   bind("go-auto-cancel", async () => {
-    const resp = await fetch("/api/autorolik/cancel", { method: "POST", body: autoForm() });
+    const resp = await fetch("/api/autorolik/cancel", {
+      method: "POST",
+      body: autoForm(),
+      headers: authHeaders(),
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false) {
       showStatus(data.error || "Не вышло отменить.", "err");
