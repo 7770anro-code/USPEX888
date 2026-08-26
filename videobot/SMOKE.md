@@ -2,6 +2,8 @@
 
 Повторный сквозной прогон **после** трёх крупных изменений: фон внутри живого бота, ручная нарезка/склейка, авто-монтаж через xAI. Постинг в соцсети **не выполнялся**.
 
+**Деплой 2026-08-26 (12):** hotfix Kling `elements` https (`fd8bca4`). Рестарт только `videobot.service` (PID 186541 → 187107). USPEX 91832 и VECTOR 67680 без изменений. Съёмка 01:20 и 01:22: Kling submit + HTTP 422 (`frontal_image_url` = data URI), Seedance не submit (poll того же request_id), Runway 400 no credits. Готового I2V не было — GPU-инференс скорее всего не шёл.
+
 **Деплой 2026-08-26 (11):** hotfix sendPhoto >10 МБ (`c6ebae3`): сжатие превью ffmpeg. Рестарт только `videobot.service` (PID 186193 → 186541). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. Прод-попытки 01:01 и 01:03 упали на Telegram Bad Request (11 308 176 байт / лимит 10 485 760) **до** Grok и **до** fal. Kling/Seedance не вызывались.
 
 **Деплой 2026-08-26 (10):** hotfix HMAC Mini App (`73ef903`): `signature` входит в hash. Рестарт только `videobot.service` (PID 185597 → 186193). USPEX 91832 и VECTOR 67680 без изменений. `.env` и `data/` не трогали. `videobot-night.timer` не ставили. На прод-коде HMAC с signature + официальный вектор Telegram — ok. Неподписанный POST `/api/autorolik` → 403. `/health` 200. `@VideobotAI777_bot` в polling.

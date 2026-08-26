@@ -3,6 +3,8 @@
 Изоляция: **не трогать** `/opt/uspex`, `/opt/vector`, `uspex.service`, `vector.service`.
 Этот сервис живёт только в `/opt/videobot` + unit `videobot.service`.
 
+Выложено **2026-08-26** (hotfix Kling elements https, commit `fd8bca4`): `frontal_image_url` через fal storage, не data URI; 422 не резьмится как Seedance/Runway. Рестарт **только** `videobot.service` (PID 186541 → 187107, 01:27 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. Съёмка 01:20/01:22: Kling HTTP 422 (data URI в elements), Seedance не слался (resume того же job), Runway 400 no credits. Готового клипа fal не было.
+
 Выложено **2026-08-26** (hotfix sendPhoto >10 МБ, commit `c6ebae3`): ffmpeg-сжатие превью до лимита Telegram. Рестарт **только** `videobot.service` (PID 186193 → 186541, 01:08 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `/health` 200. На прод-коде compress + маппинг «too big for a photo» — ok. Kling/Seedance на упавшей попытке 01:01/01:03 **не вызывались**.
 
 Выложено **2026-08-26** (hotfix HMAC Mini App, commit `73ef903`): `signature` снова в data-check-string. Рестарт **только** `videobot.service` (PID 185597 → 186193, 00:59 UTC). `uspex.service` PID 91832 и `vector.service` PID 67680 не менялись. `.env` и `data/` не перезаписывали. `videobot-night.timer` не ставили. `@VideobotAI777_bot` в polling, Mini App `/health` 200. На прод-коде: HMAC с `signature` ок, официальный вектор Telegram ок, неподписанный `POST /api/autorolik` → 403.
