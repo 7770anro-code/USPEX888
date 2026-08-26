@@ -93,6 +93,10 @@
       </label>
       <button class="go" id="go-autorolik" type="button">Собрать сценарий</button>
       </div>
+      <div id="auto-wait" hidden>
+        <p id="auto-wait-label" class="auto-wait-label">Пишу сценарий…</p>
+        <p class="hint">Можно подождать или нажать «Обновить статус» — это не запускает съёмку и не тратит кредиты.</p>
+      </div>
       <div id="auto-review" hidden>
         <h3 id="auto-title" class="auto-h"></h3>
         <p id="auto-hook" class="hint"></p>
@@ -109,6 +113,10 @@
       <div id="auto-progress" hidden>
         <p id="auto-progress-label" class="hint"></p>
         <ol id="auto-progress-scenes" class="scenes"></ol>
+      </div>
+      <div id="auto-refresh-wrap" hidden>
+        <p id="auto-refresh-meta" class="hint"></p>
+        <button class="go alt" id="go-auto-refresh" type="button">Обновить статус</button>
       </div>
     </section>
 

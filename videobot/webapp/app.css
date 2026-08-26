@@ -213,6 +213,17 @@ legend {
   font-size: 1.15rem;
   margin: 0.2rem 0 0.35rem;
 }
+.auto-wait-label {
+  font: 650 1.05rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  color: var(--ink);
+  margin: 0.15rem 0 0.45rem;
+}
+#auto-refresh-wrap {
+  margin-top: 0.55rem;
+}
+#auto-refresh-meta {
+  margin-bottom: 0.4rem;
+}
 .tip {
   appearance: none;
   display: block;

@@ -2264,6 +2264,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/autorolik/status" in js
     assert "/api/autorolik/shoot" in js
     assert "go-auto-shoot" in js
+    assert "go-auto-refresh" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
     assert "--live" in smoke
@@ -2275,6 +2276,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert "go-autorolik" in html
     assert "go-auto-shoot" in html
     assert "go-auto-edit" in html
+    assert "go-auto-refresh" in html
+    assert "Обновить статус" in html
+    assert "auto-wait" in html
     assert "Авторолик" in html
     assert "готовое видео придёт в чат" in html.lower() or "Готовое видео придёт в чат" in html
     assert inspect.getsource(start_webapp)
