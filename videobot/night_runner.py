@@ -52,7 +52,7 @@ from night_store import (
 )
 from night_time import today_msk
 from night_video import estimate_job, render_idea
-from pipeline import PipelineError, ensure_ffmpeg
+from pipeline import PipelineError, ensure_ffmpeg, with_ai_generated_caption
 
 log = logging.getLogger("videobot.night")
 
@@ -143,7 +143,8 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
         (dest.parent / "script.json").write_text(
             json.dumps(script, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        (dest.parent / "caption.txt").write_text(str(idea.get("caption") or ""), encoding="utf-8")
+        cap = with_ai_generated_caption(str(script.get("caption") or idea.get("caption") or ""))
+        (dest.parent / "caption.txt").write_text(cap, encoding="utf-8")
         # путь в БД сразу — постинг отдельный шаг, рестарт не перегенерирует
         mark_video_ready(
             int(job["id"]),
@@ -151,6 +152,7 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
             runway_credits=int(cost.get("runway") or 0),
             eleven_chars=int(cost.get("eleven_chars") or 0),
         )
+        update_job(int(job["id"]), caption=cap)
         if require_confirm():
             update_job(int(job["id"]), status=WAIT_CONFIRM)
         finish_job(job_key, label="Готово, ждёт да/нет в /night" if require_confirm() else "Готово")

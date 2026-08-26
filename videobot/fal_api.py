@@ -20,6 +20,10 @@ FAL_CREDITS_MSG = (
     "На fal.ai закончились кредиты. Пополните баланс в кабинете fal.ai "
     "и попробуйте снова. Ключ: https://fal.ai/dashboard/keys"
 )
+FAL_PERSON_MSG = (
+    "fal.ai отклонил фото живого человека (политика партнёра). "
+    "Лица друзей снимает Kling Element, не Seedance. Нажми «Снять» ещё раз."
+)
 FAL_STORAGE_INIT = "https://rest.alpha.fal.ai/storage/upload/initiate"
 
 FAL_QUEUE = "https://queue.fal.run"
@@ -41,23 +45,55 @@ def fal_headers(*, json_body: bool = True) -> dict[str, str]:
     return headers
 
 
+def _fal_json_msg(detail: str) -> str:
+    raw = detail or ""
+    start = raw.find("{")
+    if start < 0:
+        return ""
+    try:
+        data = json.loads(raw[start:])
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    items = data.get("detail")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return str(items[0].get("msg") or items[0].get("type") or "")[:280]
+    if isinstance(data.get("error"), str):
+        return str(data.get("error") or "")[:280]
+    return ""
+
+
 def fal_fail_error(detail: str, *, used_image: bool = False) -> PipelineError:
     from pipeline import (
-        RUNWAY_PERSON_MSG,
         RUNWAY_SAFETY_MSG,
         is_runway_credits_fail,
+        is_runway_person_moderation,
     )
 
-    blob = (detail or "").lower()
+    extra = _fal_json_msg(detail)
+    blob = f"{detail or ''} {extra}".lower()
     if is_runway_credits_fail(detail) or any(
         w in blob for w in ("insufficient", "out of credit", "payment required", "balance")
     ):
         err = PipelineError(FAL_CREDITS_MSG, detail, code="credits")
         return err
-    if any(w in blob for w in ("moderat", "safety", "nsfw", "content policy", "blocked")):
-        if used_image:
-            return PipelineError(RUNWAY_PERSON_MSG, detail, code="moderation_person")
+    person = is_runway_person_moderation("", detail) or any(
+        w in blob
+        for w in (
+            "content_policy",
+            "likeness",
+            "real people",
+            "partner_validation",
+            "private information",
+        )
+    )
+    if person or any(w in blob for w in ("moderat", "safety", "nsfw", "content policy", "blocked")):
+        if used_image or person:
+            return PipelineError(FAL_PERSON_MSG, detail, code="moderation_person")
         return PipelineError(RUNWAY_SAFETY_MSG, detail, code="moderation")
+    if extra:
+        return PipelineError(f"fal.ai: {extra}", detail)
     return PipelineError("fal.ai не смог выполнить задачу.", detail)
 
 
@@ -215,12 +251,13 @@ def recalled_fal_urls(request_id: str) -> tuple[str, str]:
     return _FAL_JOB_URLS.get((request_id or "").strip(), ("", ""))
 
 
-def fal_side_payload(submitted: dict[str, Any] | None) -> dict[str, str]:
+def fal_side_payload(submitted: dict[str, Any] | None, *, model_id: str = "") -> dict[str, str]:
     blob = submitted if isinstance(submitted, dict) else {}
     return {
         "request_id": str(blob.get("request_id") or ""),
         "status_url": str(blob.get("status_url") or ""),
         "response_url": str(blob.get("response_url") or ""),
+        "model_id": str(blob.get("model_id") or model_id or ""),
     }
 
 
@@ -238,6 +275,7 @@ def read_fal_side(path: Path) -> dict[str, str]:
                 "request_id": str(data.get("request_id") or ""),
                 "status_url": str(data.get("status_url") or ""),
                 "response_url": str(data.get("response_url") or ""),
+                "model_id": str(data.get("model_id") or ""),
             }
         return {}
     return {"request_id": raw}
@@ -556,30 +594,47 @@ async def fal_run(
                     status_url=saved.get("status_url") or "",
                     response_url=saved.get("response_url") or "",
                 )
-                log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
-                try:
-                    return await fal_poll(
-                        session,
+                saved_model = (saved.get("model_id") or "").strip()
+                if saved_model and saved_model != model_id:
+                    log.info(
+                        "fal sidecar other model saved=%s now=%s — new submit",
+                        saved_model,
                         model_id,
-                        rid_saved,
-                        used_image=used_image,
-                        status_url=saved.get("status_url") or None,
-                        response_url=saved.get("response_url") or None,
                     )
-                except PipelineError as exc:
-                    timeout = "слишком долго" in (exc.user_message or "").lower()
-                    if not timeout:
+                    try:
+                        side.unlink()
+                    except OSError:
+                        pass
+                else:
+                    log.info("fal resume poll request_id=%s file=%s", rid_saved, dest_id.name)
+                    try:
+                        return await fal_poll(
+                            session,
+                            model_id,
+                            rid_saved,
+                            used_image=used_image,
+                            status_url=saved.get("status_url") or None,
+                            response_url=saved.get("response_url") or None,
+                        )
+                    except PipelineError as exc:
+                        timeout = "слишком долго" in (exc.user_message or "").lower()
+                        if timeout:
+                            raise
                         try:
                             side.unlink()
                         except OSError:
                             pass
-                    raise
+                        log.warning(
+                            "fal resume dead model=%s — new submit (%s)",
+                            model_id,
+                            (exc.detail or exc.user_message or "")[:180],
+                        )
     submitted = await fal_submit(session, model_id, payload)
     rid = str(submitted.get("request_id") or "")
     if side is not None and rid:
         try:
             side.write_text(
-                json.dumps(fal_side_payload(submitted), ensure_ascii=False),
+                json.dumps(fal_side_payload(submitted, model_id=model_id), ensure_ascii=False),
                 encoding="utf-8",
             )
         except OSError:
@@ -591,14 +646,23 @@ async def fal_run(
         note_runway_task(live_fal_id(model_id, rid), kind=model_id)
     except Exception:
         pass
-    return await fal_poll(
-        session,
-        model_id,
-        rid,
-        used_image=used_image,
-        status_url=submitted.get("status_url") if isinstance(submitted, dict) else None,
-        response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
-    )
+    try:
+        return await fal_poll(
+            session,
+            model_id,
+            rid,
+            used_image=used_image,
+            status_url=submitted.get("status_url") if isinstance(submitted, dict) else None,
+            response_url=submitted.get("response_url") if isinstance(submitted, dict) else None,
+        )
+    except PipelineError as exc:
+        timeout = "слишком долго" in (exc.user_message or "").lower()
+        if side is not None and not timeout:
+            try:
+                side.unlink()
+            except OSError:
+                pass
+        raise
 
 
 async def path_to_fal_url(session: aiohttp.ClientSession, path: Path) -> str:
@@ -624,6 +688,39 @@ async def path_to_fal_url(session: aiohttp.ClientSession, path: Path) -> str:
 
         return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
     return await fal_storage_upload(session, src, mime, raw)
+
+
+async def to_fal_https_url(session: aiohttp.ClientSession, image: str) -> str:
+    """Kling elements.frontal_image_url не принимает data URI — только https."""
+    import base64
+    import tempfile
+
+    blob = (image or "").strip()
+    if blob.startswith(("http://", "https://")):
+        return blob
+    if not blob.startswith("data:"):
+        raise PipelineError("Kling element нужен https URL или data URI картинки.")
+    header, sep, b64 = blob.partition(",")
+    if not sep or not b64:
+        raise PipelineError("Некорректный data URI для fal.ai.")
+    raw = base64.b64decode(b64)
+    mime = "image/jpeg"
+    suffix = ".jpg"
+    low = header.lower()
+    if "image/png" in low:
+        mime, suffix = "image/png", ".png"
+    elif "image/webp" in low:
+        mime, suffix = "image/webp", ".webp"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+        fh.write(raw)
+        tmp = Path(fh.name)
+    try:
+        return await fal_storage_upload(session, tmp, mime, raw)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 async def fal_storage_upload(

@@ -984,6 +984,8 @@ def test_credits_resume_keeps_artifacts() -> None:
     assert "resume:go" in bot_src
     assert "credits_pause_kb" in bot_src
     assert "resume_work_dir" in bot_src
+    assert "shoot_fail_text" in bot_src
+    assert "В Mini App заново заходить не нужно" in bot_src
 
     tmp = tempfile.mkdtemp()
     work = Path(tmp)
@@ -2080,6 +2082,22 @@ def test_fal_kling_and_miniapp() -> None:
     cred = fal_fail_error("insufficient credits on account")
     assert cred.code == "credits"
     assert cred.user_message == FAL_CREDITS_MSG
+    person = fal_fail_error(
+        'HTTP 422: {"detail":[{"loc":["body","image_urls"],'
+        '"msg":"The images or videos provided may contain likenesses of real people '
+        'or other private information that cannot be processed.",'
+        '"type":"content_policy_violation"}]}',
+        used_image=True,
+    )
+    assert person.code == "moderation_person"
+    assert "живого человека" in person.user_message
+    assert "не смог выполнить задачу" not in person.user_message
+    kling_el = fal_fail_error(
+        'HTTP 422: {"detail":[{"type":"value_error","loc":["body","elements",0],'
+        '"msg":"Value error, Either frontal_image_url and reference_image_urls or video_url must be provided."}]}'
+    )
+    assert "reference_image_urls" in kling_el.user_message
+    assert kling_el.user_message.startswith("fal.ai:")
 
     old_key = config.FAL_KEY
     config.FAL_KEY = "test-fal-key"
@@ -2149,11 +2167,17 @@ def test_fal_kling_and_miniapp() -> None:
     except WebAppAuthError:
         pass
 
-    from bot import main, main_menu, more_kb, on_consent, on_w2_menu
+    from bot import _drop_remote_voice, main, main_menu, more_kb, on_consent, on_w2_menu
     from webapp_server import build_app, start_webapp
+    import asyncio
+
+    drop_src = inspect.getsource(_drop_remote_voice)
+    assert "is_minimax_voice" in drop_src
+    assert "delete_eleven_voice" in drop_src
 
     menu_labels = [btn.text for row in main_menu().inline_keyboard for btn in row]
     assert "🎬 Открыть меню" in menu_labels
+    assert "🎞 Авторолик" in menu_labels
     more = [b.callback_data for row in more_kb().inline_keyboard for b in row]
     assert "more:tryon" in more
     assert "more:upscale" in more
@@ -2176,6 +2200,7 @@ def test_fal_kling_and_miniapp() -> None:
         if "formatter" in info:
             paths.add(info["formatter"])
     assert "/api/quick" in paths
+    assert "/api/autorolik" in paths
     assert "/api/upscale" in paths
     assert "/api/tryon" in paths
     assert "/api/clone" in paths
@@ -2183,6 +2208,20 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/restore" in paths
     assert "/api/history" in paths
     assert "/api/vibe" in paths
+
+    async def _unsigned_post_is_403() -> None:
+        from aiohttp.test_utils import TestClient, TestServer
+
+        async with TestClient(TestServer(app)) as client:
+            resp = await client.post("/api/quick")
+            assert resp.status == 403
+            data = await resp.json()
+            assert data.get("ok") is False
+            resp2 = await client.post("/api/autorolik")
+            assert resp2.status == 403
+
+    asyncio.run(_unsigned_post_is_403())
+
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
     assert "telegram-web-app.js" in html
     assert "go-tryon" in html
@@ -2195,6 +2234,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "data-go" in js
     assert "/api/interpolate" in js
     assert "/api/history" in js
+    assert "/api/autorolik" in js
     assert "vb_onboard_v1" in js
     smoke = Path(__file__).with_name("smoke_rollout.py").read_text(encoding="utf-8")
     assert "--live" in smoke
@@ -2202,7 +2242,9 @@ def test_fal_kling_and_miniapp() -> None:
     assert 'TIPS' in js or "home:" in js
     assert "Нажми карточку" in js
     assert "sendData" not in js
-    assert html.count('class="sub"') == 6
+    assert html.count('class="sub"') == 7
+    assert "go-autorolik" in html
+    assert "Авторолик" in html
     assert inspect.getsource(start_webapp)
     from studio import clone_user_audio, upscale_media
 
@@ -2227,12 +2269,57 @@ def test_fal_kling_and_miniapp() -> None:
 
     locked = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
     assert locked["generate_audio"] is False
-    assert locked["elements"] == [{"frontal_image_url": "https://example.com/a.jpg"}]
+    assert locked["elements"] == [
+        {
+            "frontal_image_url": "https://example.com/a.jpg",
+            "reference_image_urls": ["https://example.com/a.jpg"],
+        }
+    ]
     assert ELEMENT_TOKEN in locked["prompt"]
     ref = seedance_ref_payload("go", ["https://a", "https://b"], 8)
     assert ref["duration"] == "8"
     assert "@Image1" in ref["prompt"]
+    many = kling_i2v_payload(
+        "walk @Element1",
+        "https://example.com/a.jpg",
+        5,
+        elements=["https://example.com/face.jpg"],
+    )
+    assert many["elements"] == [
+        {
+            "frontal_image_url": "https://example.com/face.jpg",
+            "reference_image_urls": ["https://example.com/face.jpg"],
+        }
+    ]
+    # Прод 01:20: Kling 422 — data URI в elements.frontal_image_url. Перед submit льём https.
+    kling_fn = inspect.getsource(FalClient.generate_kling)
+    assert "to_fal_https_url" in kling_fn
+    assert "converted_map" in kling_fn
+    seed_fn = inspect.getsource(FalClient.generate_seedance)
+    assert "to_fal_https_url" in seed_fn
+    assert "converted_map" in seed_fn
+    from fal_api import fal_side_payload, fal_run, to_fal_https_url
+
+    side = fal_side_payload({"request_id": "rid-x"}, model_id=KLING_I2V_PRO)
+    assert side["model_id"] == KLING_I2V_PRO
+    fal_run_src = inspect.getsource(fal_run)
+    assert "fal resume dead" in fal_run_src
+    assert "other model" in fal_run_src
+    router_src = Path(__file__).with_name("provider_router.py").read_text(encoding="utf-8")
+    assert "skip_runway" in router_src
+    assert "skip legacy_runway after fal validation error" in router_src
+    assert "skip seedance for FACE" in router_src
+    assert 'route_mode in ("autorolik_face", "real_photo")' in router_src
+    data_uri = "data:image/jpeg;base64,xx"
+    leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
+    assert leaked["elements"][0]["frontal_image_url"].startswith("data:")
+    assert leaked["elements"][0]["reference_image_urls"][0].startswith("data:")
+    https_src = inspect.getsource(to_fal_https_url)
+    assert "fal_storage_upload" in https_src
+    assert "data:" in https_src
     assert ROUTING["real_photo"][0] == "kling"
+    assert ROUTING["autorolik_face"][0] == "kling"
+    assert ROUTING["autorolik_wide"][0] == "seedance"
     assert ROUTING["synthetic_multi_scene"][0] == "seedance"
     assert ROUTING["night_pipeline"][0] == "seedance"
     assert ROUTING["montage_generate"][0] == "seedance"
@@ -2258,9 +2345,374 @@ def test_fal_kling_and_miniapp() -> None:
     assert rid == "rid-1"
     mux_src = inspect.getsource(__import__("pipeline", fromlist=["mux_scene"]).mux_scene)
     assert "lip_sync" in mux_src or "_maybe_kling_lipsync" in mux_src
+    seed_wide = video_prompt_for(
+        "seedance", "amber dusk", "drone over city", photo_lock=False, character_lock=False
+    )
+    assert "Face is not the subject" in seed_wide
     bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "menu:auto" in bot_src
+    assert "Авторолик" in bot_src
     assert "poll_status" in bot_src
     assert "note_fal_poll" in bot_src
+
+
+def test_autorolik_script_and_route() -> None:
+    import inspect
+    from pathlib import Path
+
+    from autorolik import (
+        MAX_PHOTOS,
+        MAX_SCENES,
+        MIN_SCENES,
+        WIDE_CAMERA,
+        clamp_element,
+        kling_api_prompt,
+        parse_autorolik_script,
+        photos_kb,
+        route_for_scene,
+        scene_camera,
+        SCRIPT_SYSTEM,
+        LOCKED_GRADE,
+        decide_face_scene,
+    )
+    from pipeline import PipelineError, build_video
+    from provider_router import chain_for
+
+    raw = """
+    {
+      "title": "Янтарь",
+      "hook": "Город не спит",
+      "caption": "друзья",
+      "continuity": "warm amber",
+      "scenes": [
+        {"narration": "Мы выходим из машины на закате и город уже горит.", "visual_prompt": "man steps out of a car at sunset, rack focus to face", "face_scene": true, "element_index": 2},
+        {"narration": "Дрон над площадью, вертолёты в дымке, медленный наезд.", "visual_prompt": "drone over city monument helicopters haze slow push-in", "face_scene": false, "element_index": 0},
+        {"narration": "Колонна фар в тумане режет боковой трекинг низко.", "visual_prompt": "low angle lateral track of convoy headlights in fog", "face_scene": false},
+        {"narration": "Он смотрит в камеру сквозь боке фар клуба.", "visual_prompt": "@Element3 close-up club backlight", "face_scene": true, "element_index": 9}
+      ]
+    }
+    """
+    parsed = parse_autorolik_script(raw, n_photos=3)
+    assert parsed["kind"] == "autorolik"
+    assert MIN_SCENES <= len(parsed["scenes"]) <= MAX_SCENES
+    assert parsed["scenes"][0]["face_scene"] is True
+    assert parsed["scenes"][0]["element_index"] == 2
+    assert "@Element2" in parsed["scenes"][0]["visual_prompt"]
+    assert parsed["scenes"][1]["face_scene"] is False
+    assert parsed["scenes"][1]["element_index"] == 0
+    assert parsed["scenes"][3]["element_index"] == 3
+    assert route_for_scene(parsed["scenes"][0]) == "autorolik_face"
+    assert route_for_scene(parsed["scenes"][1]) == "autorolik_wide"
+    assert route_for_scene(False) == "autorolik_wide"
+    assert chain_for("autorolik_face")[0] == "kling"
+    assert chain_for("autorolik_wide")[0] == "seedance"
+    assert "drone" in scene_camera(False).lower() or "lateral" in WIDE_CAMERA.lower()
+    assert "rack focus" in WIDE_CAMERA.lower()
+    rewritten = kling_api_prompt("@Element3 close-up", element_index=3)
+    assert "@Element1" in rewritten
+    assert "@Element3" not in rewritten
+    assert clamp_element(0, 4, face=False) == 0
+    assert clamp_element(99, 4, face=True) == 4
+    assert MAX_PHOTOS == 6
+    kb = photos_kb(count=6)
+    labels = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "auto:next" in labels
+    three = '{"scenes":[{"narration":"a","visual_prompt":"x","face_scene":true},{"narration":"b","visual_prompt":"y","face_scene":false},{"narration":"c","visual_prompt":"z","face_scene":true}]}'
+    try:
+        parse_autorolik_script(three, n_photos=1)
+        raise AssertionError("need 4 scenes")
+    except PipelineError:
+        pass
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "седьмое не беру" in bot_src
+    assert "MAX_PHOTOS" in bot_src
+    pipe = inspect.getsource(build_video)
+    assert "autorolik_wide" in pipe
+    assert "kling_api_prompt" in pipe
+    assert "script_override" in pipe
+    assert "element_images" in pipe
+    assert "character_lock=False" in pipe
+    studio_src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
+    assert "run_studio_autorolik" in studio_src
+    assert "review_kb" in studio_src
+    assert "Публичных лиц" in SCRIPT_SYSTEM
+    assert "политики" in SCRIPT_SYSTEM
+    assert "подлежащее" in SCRIPT_SYSTEM
+    assert "мельком" in SCRIPT_SYSTEM
+    assert "со спины" in SCRIPT_SYSTEM
+    assert "цветокор" in SCRIPT_SYSTEM
+    assert decide_face_scene(True, "drone over a hazy city monument slow push-in", omitted=False) is False
+    assert decide_face_scene(True, "friend from behind walking into fog", omitted=False) is False
+    assert decide_face_scene(True, "close-up of @Element1 at sunset, shallow DOF", omitted=False) is True
+    mistag = """
+    {"title":"x","hook":"h","scenes":[
+      {"narration":"Дрон над площадью медленно едет в дымке заката.", "visual_prompt":"drone over city monument haze slow push-in", "face_scene": true, "element_index": 1},
+      {"narration":"Друг крупно доворачивает лицо к камере на закате.", "visual_prompt":"close-up rack focus to face shallow DOF", "face_scene": true, "element_index": 1},
+      {"narration":"Колонна машин в тумане режет боковой трекинг фарами.", "visual_prompt":"low angle convoy in fog from behind", "face_scene": true},
+      {"narration":"Толпа силуэтами в контровом свете зала не узнаётся.", "visual_prompt":"crowd silhouettes in a backlit hall", "face_scene": true}
+    ]}
+    """
+    safe = parse_autorolik_script(mistag, n_photos=2)
+    assert safe["scenes"][0]["face_scene"] is False
+    assert "@Element" not in safe["scenes"][0]["visual_prompt"]
+    assert safe["scenes"][1]["face_scene"] is True
+    assert safe["scenes"][2]["face_scene"] is False
+    assert safe["scenes"][3]["face_scene"] is False
+    assert "warm sunset amber" in (safe.get("continuity") or LOCKED_GRADE)
+
+
+def test_ai_generated_disclosure() -> None:
+    import asyncio
+    import inspect
+    import tempfile
+    from pathlib import Path
+
+    from pipeline import (
+        AI_GENERATED_LABEL,
+        apply_ai_generated_disclosure,
+        build_video,
+        needs_ai_generated_mark,
+        with_ai_generated_caption,
+        _run_ffmpeg,
+    )
+
+    assert AI_GENERATED_LABEL == "AI generated"
+    assert with_ai_generated_caption("привет") == "привет\nAI generated"
+    assert with_ai_generated_caption("x\nAI generated") == "x\nAI generated"
+    assert needs_ai_generated_mark(photo_lock=True) is True
+    assert needs_ai_generated_mark(element_images=[Path("/tmp/a.jpg")]) is True
+    assert needs_ai_generated_mark(script={"kind": "autorolik"}) is True
+    assert needs_ai_generated_mark(route_mode="night_pipeline") is True
+    assert needs_ai_generated_mark(route_mode="real_photo") is True
+    assert needs_ai_generated_mark(route_mode="synthetic_multi_scene") is False
+    build_src = inspect.getsource(build_video)
+    assert "apply_ai_generated_disclosure" in build_src
+    bot_src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+    assert "apply_ai_generated_disclosure" in bot_src
+    assert "with_ai_generated_caption" in bot_src
+    night_src = Path(__file__).with_name("night_runner.py").read_text(encoding="utf-8")
+    assert "with_ai_generated_caption" in night_src
+
+    async def _burn() -> None:
+        tmp = Path(tempfile.mkdtemp())
+        src = tmp / "in.mp4"
+        await _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=720x1280:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo",
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(src),
+            ]
+        )
+        out, script = await apply_ai_generated_disclosure(
+            src, tmp / "out.mp4", {"caption": "пост"}, required=True
+        )
+        assert out.is_file() and out.stat().st_size > 1000
+        assert script["caption"] == "пост\nAI generated"
+        assert script["ai_generated"] is True
+        skipped, same = await apply_ai_generated_disclosure(src, tmp / "skip.mp4", {"caption": "x"}, required=False)
+        assert skipped == src
+        assert same.get("ai_generated") is not True
+
+    asyncio.run(_burn())
+
+
+def _sign_init_data(pairs: dict[str, str], token: str) -> str:
+    import hmac
+    import hashlib
+    from urllib.parse import urlencode
+
+    data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    digest = hmac.new(secret, data_check.encode("utf-8"), hashlib.sha256).hexdigest()
+    return urlencode({**pairs, "hash": digest})
+
+
+def test_webapp_init_data_hmac_includes_signature() -> None:
+    """Bot API 7.2+: hash покрывает signature. Выкидывать его из HMAC — прод-баг «Подпись не совпала»."""
+    import time
+
+    from webapp_auth import WebAppAuthError, validate_init_data
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    auth_date = str(int(time.time()))
+    base = {"auth_date": auth_date, "query_id": "AA", "user": user}
+    # Как живой Telegram iOS: signature есть, и hash посчитан вместе с ним.
+    with_sig = {
+        **base,
+        "signature": "zL-ucjNyREiHDE8aihFwpfR9aggP2xiAo3NSpfe-p7IbCisNlDKlo7Kb6G4D0Ao2mBrSgEk4maLSdv6MLIlADQ",
+    }
+    parsed = validate_init_data(_sign_init_data(with_sig, token), token)
+    assert parsed["id"] == 42
+
+    # Старые клиенты без signature тоже проходят.
+    parsed_legacy = validate_init_data(_sign_init_data(base, token), token)
+    assert parsed_legacy["id"] == 42
+
+    # Регрессия PR #10: hash без signature, поле signature дописали отдельно — HMAC не сходится.
+    broken = _sign_init_data(base, token) + "&signature=not-part-of-hmac"
+    try:
+        validate_init_data(broken, token)
+        raise AssertionError("hash without signature must fail once signature is present")
+    except WebAppAuthError as exc:
+        assert "не совпала" in str(exc)
+
+    # Опубликованный вектор Telegram (без signature, старый auth_date).
+    # Токен из документации Bot API, не прод-секрет.
+    official = (
+        "query_id=AAHdF6IQAAAAAN0XohDhrOrc"
+        "&user=%7B%22id%22%3A279058397%2C%22first_name%22%3A%22Vladislav%22%2C%22last_name%22%3A%22Kibenko%22%2C%22username%22%3A%22vdkfrost%22%2C%22language_code%22%3A%22ru%22%2C%22is_premium%22%3Atrue%7D"
+        "&auth_date=1662771648"
+        "&hash=c501b71e775f74ce10e377dea85a7ea24ecd640b223ea86dfe453e0eaed2e2b2"
+    )
+    official_token = "5768337691:AAH5YkoiEuPk8-FZa32hStHTqXiLPtAEhx8"
+    official_user = validate_init_data(official, official_token, now=1662771648 + 10)
+    assert official_user["id"] == 279058397
+
+    stale = _sign_init_data(base, token)
+    try:
+        validate_init_data(stale, token, now=float(auth_date) + 200_000)
+        raise AssertionError("stale auth_date must fail")
+    except WebAppAuthError as exc:
+        assert "устарел" in str(exc)
+
+
+def test_webapp_autorolik_formdata_hmac() -> None:
+    """Тот же initData через multipart /api/autorolik: HMAC 200, без KeyError photos."""
+    import asyncio
+    import time
+    from io import BytesIO
+
+    import config
+    from aiohttp import FormData
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from webapp_server import build_app
+
+    token = "123456:TESTTOKEN"
+    user = '{"id":42,"first_name":"Ann"}'
+    with_sig = {
+        "auth_date": str(int(time.time())),
+        "query_id": "AA",
+        "user": user,
+        "signature": "zL-ucjNyREiHDE8aihFwpfR9aggP2xiAo3NSpfe-p7IbCisNlDKlo7Kb6G4D0Ao2mBrSgEk4maLSdv6MLIlADQ",
+    }
+    signed = _sign_init_data(with_sig, token)
+
+    class _StubBot:
+        async def send_message(self, *_a, **_k):
+            return None
+
+    async def _autorolik_hmac_ok() -> None:
+        old = config.VIDEOBOT_TELEGRAM_TOKEN
+        config.VIDEOBOT_TELEGRAM_TOKEN = token
+        app = build_app(bot=_StubBot())
+        body = FormData()
+        body.add_field("initData", signed)
+        body.add_field("topic", "вечер в городе")
+        body.add_field("consent", "1")
+        body.add_field(
+            "photo1",
+            BytesIO(b"\xff\xd8\xff\xd9"),
+            filename="a.jpg",
+            content_type="image/jpeg",
+        )
+        try:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post("/api/autorolik", data=body)
+                data = await resp.json()
+                assert resp.status != 403, data
+                assert data.get("ok") is True
+        finally:
+            config.VIDEOBOT_TELEGRAM_TOKEN = old
+
+    asyncio.run(_autorolik_hmac_ok())
+
+
+def test_telegram_photo_compress_and_error_text() -> None:
+    """Прод 01:01: sendPhoto 11.3 МБ / лимит 10 МБ → generic «Не вышло». Сжимаем и мапим ошибку."""
+    import inspect
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from aiogram.exceptions import TelegramBadRequest
+
+    from pipeline import PipelineError
+    from studio import (
+        TELEGRAM_PHOTO_SAFE_BYTES,
+        compress_telegram_photo,
+        job_error_text,
+        send_photo_get_id,
+    )
+
+    msg = (
+        "Telegram server says - Bad Request: file of size 11308176 bytes is too big "
+        "for a photo; the maximum size is 10485760 bytes"
+    )
+    try:
+        raise TelegramBadRequest(method="sendPhoto", message=msg)
+    except TypeError:
+        exc = TelegramBadRequest(message=msg)  # type: ignore[call-arg]
+    except TelegramBadRequest as raised:
+        exc = raised
+    text = job_error_text(exc)
+    assert "10 МБ" in text
+    assert "Не вышло" not in text
+
+    generic = job_error_text(RuntimeError("boom"))
+    assert "Не вышло" in generic
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        big = root / "big.jpg"
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=6000x4000:duration=1:rate=1",
+                "-frames:v",
+                "1",
+                "-q:v",
+                "1",
+                str(big),
+            ],
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        assert proc.returncode == 0, (proc.stderr or b"")[-400:]
+        assert big.exists() and big.stat().st_size > 1000
+        out = compress_telegram_photo(big, root / "out.jpg")
+        assert out.exists()
+        assert out.stat().st_size <= TELEGRAM_PHOTO_SAFE_BYTES
+        if big.stat().st_size > TELEGRAM_PHOTO_SAFE_BYTES:
+            assert out.stat().st_size < big.stat().st_size
+
+    src = Path(__file__).with_name("studio.py").read_text(encoding="utf-8")
+    assert "compress_telegram_photo" in src
+    assert "send_photo_get_id" in src
+    assert "p{i}_raw.jpg" in src
+    assert inspect.getsource(send_photo_get_id)
+    assert issubclass(PipelineError, Exception)
 
 
 if __name__ == "__main__":
@@ -2311,4 +2763,9 @@ if __name__ == "__main__":
     test_serial_reveal_show()
     test_nano_banana_and_dynamic_pacing()
     test_fal_kling_and_miniapp()
+    test_autorolik_script_and_route()
+    test_ai_generated_disclosure()
+    test_webapp_init_data_hmac_includes_signature()
+    test_webapp_autorolik_formdata_hmac()
+    test_telegram_photo_compress_and_error_text()
     print("ok")

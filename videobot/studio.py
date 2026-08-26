@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.types import FSInputFile
 
 import config
@@ -36,6 +39,9 @@ from wave2 import (
 log = logging.getLogger("videobot")
 
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+# Telegram sendPhoto: 10 МБ. Берём запас, плюс ширина+высота ≤ 10000.
+TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+TELEGRAM_PHOTO_SAFE_BYTES = 9 * 1024 * 1024
 
 
 def studio_work(user_id: int, kind: str) -> Path:
@@ -53,6 +59,69 @@ def write_upload(dest: Path, data: bytes, name: str) -> Path:
     if dest.stat().st_size < 32:
         raise PipelineError("Файл слишком маленький.")
     return dest
+
+
+def compress_telegram_photo(src: Path, dest: Path) -> Path:
+    """JPEG для sendPhoto: длинная сторона ≤2048, файл < 9 МБ. Без Pillow."""
+    dest = dest.with_suffix(".jpg")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    last_err = ""
+    for max_side, quality in ((2048, 3), (1600, 4), (1280, 5), (960, 7)):
+        vf = f"scale={max_side}:{max_side}:force_original_aspect_ratio=decrease"
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(src),
+                "-vf",
+                vf,
+                "-frames:v",
+                "1",
+                "-q:v",
+                str(quality),
+                str(dest),
+            ],
+            capture_output=True,
+            timeout=90,
+            check=False,
+        )
+        if proc.returncode != 0:
+            last_err = (proc.stderr or b"").decode("utf-8", "replace")[-400]
+            continue
+        size = dest.stat().st_size if dest.exists() else 0
+        if 32 <= size <= TELEGRAM_PHOTO_SAFE_BYTES:
+            log.info(
+                "telegram photo compress in=%s out=%s side=%s q=%s",
+                src.stat().st_size,
+                size,
+                max_side,
+                quality,
+            )
+            return dest
+        last_err = f"still {size} bytes after side={max_side} q={quality}"
+    raise PipelineError(
+        "Фото слишком тяжёлое для Telegram (лимит 10 МБ на превью в чат). "
+        "Сожми JPEG или выбери другое и снова «Собрать сценарий».",
+        last_err,
+    )
+
+
+async def send_photo_get_id(bot: Bot, user_id: int, path: Path, caption: str) -> str:
+    try:
+        sent = await bot.send_photo(int(user_id), FSInputFile(path), caption=caption[:900])
+    except TelegramBadRequest as exc:
+        text = str(getattr(exc, "message", "") or exc)
+        log.warning("send_photo rejected size=%s err=%s", path.stat().st_size if path.exists() else 0, text[:240])
+        if "too big" in text.lower():
+            raise PipelineError(
+                "Одно из фото тяжелее 10 МБ — Telegram не принимает такое как фото. "
+                "Сожми или выбери другое и снова «Собрать сценарий»."
+            ) from exc
+        raise PipelineError("Telegram не принял это фото. Попробуй JPEG или PNG.") from exc
+    if not sent.photo:
+        raise PipelineError("Не смог загрузить фото в чат.")
+    return str(sent.photo[-1].file_id)
 
 
 async def send_chat_text(bot: Bot, user_id: int, text: str) -> None:
@@ -155,10 +224,9 @@ async def run_studio_quick(
         if not consent:
             raise PipelineError("Без согласия фото человека не использую.")
         work = studio_work(user_id, "quick")
-        pic = write_upload(work / "user_photo.jpg", photo_bytes, "user_photo.jpg")
-        sent = await bot.send_photo(int(user_id), FSInputFile(pic), caption="Фото для ролика")
-        if sent.photo:
-            photo_id = sent.photo[-1].file_id
+        raw = write_upload(work / "user_photo_raw.jpg", photo_bytes, "user_photo.jpg")
+        pic = await asyncio.to_thread(compress_telegram_photo, raw, work / "user_photo.jpg")
+        photo_id = await send_photo_get_id(bot, user_id, pic, "Фото для ролика")
     voice = voice_by_index(1)
     await _run_job(
         status,
@@ -352,6 +420,64 @@ async def run_studio_restore(bot: Bot, user_id: int, data: bytes, filename: str,
         shutil.rmtree(work, ignore_errors=True)
 
 
+async def run_studio_autorolik(
+    bot: Bot,
+    user_id: int,
+    photos: list[bytes],
+    *,
+    consent: bool,
+    topic: str = "",
+) -> None:
+    from autorolik import (
+        MAX_PHOTOS,
+        format_script_preview,
+        grok_autorolik,
+        review_kb,
+        save_pending,
+    )
+
+    if not consent:
+        raise PipelineError("Без согласия фото людей не использую.")
+    blobs = [p for p in (photos or []) if p]
+    if not blobs:
+        raise PipelineError("Нужно хотя бы одно фото друга.")
+    if len(blobs) > MAX_PHOTOS:
+        raise PipelineError(f"Максимум {MAX_PHOTOS} фото.")
+    work = studio_work(user_id, "autorolik")
+    ids: list[str] = []
+    try:
+        for i, data in enumerate(blobs, start=1):
+            raw = write_upload(work / f"p{i}_raw.jpg", data, f"p{i}.jpg")
+            pic = await asyncio.to_thread(compress_telegram_photo, raw, work / f"p{i}.jpg")
+            file_id = await send_photo_get_id(
+                bot,
+                user_id,
+                pic,
+                f"Фото {i}/{len(blobs)} для Авторолика",
+            )
+            ids.append(file_id)
+        await send_chat_text(
+            bot,
+            user_id,
+            "⏳ Пишу сценарий Авторолика. Снимать буду после кнопки «Снять» в чате.",
+        )
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            script = await grok_autorolik(session, n_photos=len(ids), idea=topic)
+        save_pending(
+            int(user_id),
+            {
+                "script": script,
+                "photo_file_ids": ids,
+                "consent_verified": True,
+                "idea": (topic or "").strip(),
+            },
+        )
+        await bot.send_message(int(user_id), format_script_preview(script)[:3500], reply_markup=review_kb())
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 async def run_studio_history(bot: Bot, user_id: int) -> None:
     src = get_last_video(int(user_id))
     if not src:
@@ -364,5 +490,14 @@ async def run_studio_history(bot: Bot, user_id: int) -> None:
 def job_error_text(exc: BaseException) -> str:
     if isinstance(exc, PipelineError):
         return exc.user_message
+    if isinstance(exc, TelegramAPIError):
+        text = str(getattr(exc, "message", "") or exc)
+        log.warning("studio telegram api: %s", text[:240])
+        if "too big for a photo" in text.lower():
+            return (
+                "Одно из фото тяжелее 10 МБ — Telegram не принимает такое как фото. "
+                "Сожми или выбери другое и снова «Собрать сценарий»."
+            )
+        return "Telegram не принял файл. Попробуй JPEG или PNG поменьше."
     log.exception("studio job")
     return "Не вышло. Попробуй ещё раз из меню Mini App или кнопок бота."

@@ -9,7 +9,7 @@
 1. **Grok** (`grok-4.5`, fallback fast) — JSON: `continuity` + 4–6 сцен. Пресет добавляет хук, темп и CTA в бриф. «⚡️ Видео за 1 клик» и авто-вайб: 6 коротких сцен, речь 12–18 слов, клипы ~5 сек, итого 20–30 сек.
 2. **Озвучка** — ElevenLabs пресеты или клон **MiniMax** (`fal-ai/minimax/voice-clone` → `fal-ai/minimax/speech-02-hd`). Клон выбирается в списке голосов вместо пресета.
 3. **fal.ai** (дефолт, `VIDEO_PROVIDER=fal`, ключ `FAL_KEY` или `FAL_API_KEY`) — очередь `https://queue.fal.run`, заголовок `Authorization: Key $FAL_KEY`, без SDK.
-   - Маршрутизация в `provider_router.ROUTING`: своё фото → Kling → Seedance → legacy Runway; синтетика / ночь / вайб монтажа → Seedance → Kling → legacy Runway. Убрать `"legacy_runway"` из списка — Runway выключается.
+   - Маршрутизация в `provider_router.ROUTING`: своё фото → Kling → Seedance → legacy Runway; синтетика / ночь / вайб монтажа / Авторолик WIDE → Seedance → Kling → legacy Runway; Авторолик FACE → Kling → Seedance → legacy Runway. Убрать `"legacy_runway"` из списка — Runway выключается.
    - Качество в UI: **Быстро** = Seedance 2.5 I2V (`bytedance/seedance-2.5/image-to-video`); **Оптимально** = Kling 3.0 Pro I2V (`fal-ai/kling-video/v3/pro/image-to-video`).
    - Вертикаль `9:16`. Duration — **строка**. `generate_audio=false` (нативная речь плохо с рус/укр). TTS клеим сами.
    - Kling Element Reference: `elements=[{frontal_image_url}]` + `@Element1` в промпте (взаимно исключается с `generate_audio`).
@@ -26,22 +26,24 @@
 
 ## Режимы (/start)
 
+- **Авторолик** — до 6 фото друзей + согласие → Grok пишет 4–8 сцен UKRAINIAN CORE. `face_scene`: подлежащее = друг крупно/узнаваемо → Kling `@ElementN`; подлежащее = город/машины/толпа/предмет или друг мельком/со спины/частично → Seedance (безопаснее). Один тёплый/контровый цветокор на все сцены, чтобы смена движка не читалась. Сначала подтверждаешь/правишь сценарий в чате, потом съёмка. Голос — Сара или уже сохранённый клон.
 - **Видео за 1 клик** — короткая тема (хук/сценарий/камера сами) → опционально своё фото (**та же кнопка согласия** `consent:yes`) и голос (можно пропустить — Сара) → настройки → оценка стоимости. 6 коротких клипов, ~20–30 сек.
 - **Своё фото + текст + голос** — сценарий, фото, **та же кнопка согласия** (`consent:yes`), голос, стоимость. Своё фото тоже прогоняется через Nano Banana, если есть `GEMINI_API_KEY`.
 - **Оживить фото** — Act Two (`model=act_two` на Runway): фото + короткое видео мимики. Без `RUNWAY_API_KEY` пункт объясняет, что сейчас камера на fal.ai. Согласие на фото — **та же кнопка**, что в custom-режиме.
 - **Клонировать мой голос** — отдельное согласие (не фото) → запись/файл ≥10 с → MiniMax `fal-ai/minimax/voice-clone` (`custom_voice_id` с префиксом `mm:` в SQLite). В списке голосов вместо пресета ElevenLabs. Запас: ElevenLabs IVC, если нет `FAL_KEY`.
-- **Открыть меню** — Telegram Mini App (`webapp/`), шесть категорий:
+- **Открыть меню** — Telegram Mini App (`webapp/`), семь категорий:
   1. 🎬 Создать видео — существующие режимы
-  2. ✂️ Монтаж — существующий (вайб / своё видео в чате)
-  3. ✨ Улучшить — Topaz 4K (`fal-ai/topaz/upscale/*`), слоу-мо (`topaz/interpolate/video`), реставрация фото (`topaz/restore/image`)
-  4. 👗 Примерка — `google/virtual-try-on` (фото человека + одежда), то же согласие `consent:yes`
-  5. 🎙 Мой голос — MiniMax clone
-  6. 📊 Мои видео — последний готовый ролик в чат
+  2. 🎞 Авторолик — до 6 фото, сценарий в чате, Kling FACE / Seedance WIDE
+  3. ✂️ Монтаж — существующий (вайб / своё видео в чате)
+  4. ✨ Улучшить — Topaz 4K (`fal-ai/topaz/upscale/*`), слоу-мо (`topaz/interpolate/video`), реставрация фото (`topaz/restore/image`)
+  5. 👗 Примерка — `google/virtual-try-on` (фото человека + одежда), то же согласие `consent:yes`
+  6. 🎙 Мой голос — MiniMax clone
+  7. 📊 Мои видео — последний готовый ролик в чат
   Отдельная страница `webapp/` (HTML/JS), кнопка `web_app`. Общение: HMAC `initData` + HTTP API бота (файлы и долгие джобы). `sendData()` не используем — лимит маленького JSON и закрывает WebApp. Под карточкой одна строка-подсказка; на первом запуске и первом заходе в режим — короткий тултип. Без `WEBAPP_PUBLIC_URL` (HTTPS) кнопка остаётся callback.
 - **Нарезка и монтаж** (`/edit`): **ручной** — таймкоды/порядок и ffmpeg; **авто** — описание → план клипов через xAI API (не браузер grok.com) → ffmpeg. fal.ai/Runway/ElevenLabs не вызываются.
 - **Пресеты** — Вирусный TikTok / Реклама товара / Мем / Личный бренд (+ Кино-история). Пользователь пишет только тему.
 
-Фото человека: пайплайн **не стартует** без `consent_verified` (`photo_start_blocked` / `CONSENT_REQUIRED_MSG`).
+Фото человека: пайплайн **не стартует** без `consent_verified` (`photo_start_blocked` / `CONSENT_REQUIRED_MSG`). Публичных лиц в Авторолик не подставляем — только друзья с согласия. На роликах с реальным фото и в ночном пайплайне один постпродакшн-шаг `apply_ai_generated_disclosure`: оверлей **AI generated** в углу кадра + та же строка в caption поста.
 
 Ошибки API — текстом в чат. Деплой: [DEPLOY.md](DEPLOY.md).
 

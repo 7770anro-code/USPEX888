@@ -1691,6 +1691,7 @@ async def runway_clip(
     route_mode: str = "synthetic_multi_scene",
     photo_lock: bool = False,
     references: list[str] | None = None,
+    elements: list[str] | None = None,
 ) -> Path:
     from provider_router import render_clip
 
@@ -1708,6 +1709,7 @@ async def runway_clip(
         route_mode=route_mode,
         photo_lock=photo_lock,
         references=references,
+        elements=elements,
     )
 
 
@@ -2276,6 +2278,55 @@ async def apply_watermark(
     return dest
 
 
+AI_GENERATED_LABEL = "AI generated"
+_AI_PERSON_ROUTES = frozenset(
+    {"real_photo", "autorolik_face", "autorolik_wide", "night_pipeline"}
+)
+
+
+def with_ai_generated_caption(caption: str) -> str:
+    blob = (caption or "").strip()
+    if re.search(r"\bAI generated\b", blob, re.I):
+        return blob
+    if blob:
+        return f"{blob}\n{AI_GENERATED_LABEL}"
+    return AI_GENERATED_LABEL
+
+
+def needs_ai_generated_mark(
+    *,
+    photo_lock: bool = False,
+    element_images: list | None = None,
+    script: dict[str, Any] | None = None,
+    route_mode: str = "",
+) -> bool:
+    """Реальное фото человека или ночной пайплайн — обязательная пометка AIGC."""
+    if photo_lock:
+        return True
+    if element_images:
+        return True
+    if str((script or {}).get("kind") or "") == "autorolik":
+        return True
+    return (route_mode or "").strip() in _AI_PERSON_ROUTES
+
+
+async def apply_ai_generated_disclosure(
+    src: Path,
+    dest: Path,
+    script: dict[str, Any] | None = None,
+    *,
+    required: bool,
+) -> tuple[Path, dict[str, Any]]:
+    """Один постпродакшн-шаг: текст в углу кадра + строка в caption. Его вызывают все режимы."""
+    data = dict(script or {})
+    if not required:
+        return src, data
+    data["caption"] = with_ai_generated_caption(str(data.get("caption") or ""))
+    data["ai_generated"] = True
+    out = await apply_watermark(src, dest, text=AI_GENERATED_LABEL)
+    return out, data
+
+
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
         raise PipelineError("На сервере нет программы склейки видео (ffmpeg).")
@@ -2303,6 +2354,8 @@ async def build_video(
     photo_lock: bool | None = None,
     dynamic_pacing: bool = False,
     route_mode: str | None = None,
+    script_override: dict[str, Any] | None = None,
+    element_images: list[Path] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     from presets import StageProgress
     import live_status as live
@@ -2356,6 +2409,18 @@ async def build_video(
         if resumed:
             log.info("resume script.json scenes=%s dir=%s", len(script["scenes"]), work_dir)
             await report("Сценарий уже есть — не пишу заново", stage=live.STAGE_SCRIPT)
+        elif script_override:
+            script = dict(script_override)
+            script.setdefault("kind", "autorolik")
+            script["plot"] = idea
+            if hook:
+                script["hook"] = hook
+            script["ratio"] = ratio
+            script["style"] = style
+            if not isinstance(script.get("scenes"), list) or not script["scenes"]:
+                raise PipelineError("В Авторолике нет сцен.")
+            save_script(work_dir, script)
+            await report("Сценарий Авторолика подтверждён", stage=live.STAGE_SCRIPT)
         else:
             if (
                 not user_script
@@ -2417,10 +2482,23 @@ async def build_video(
         except (TypeError, ValueError):
             job_seed = random.randint(0, 2_147_483_647)
         save_checkpoint(work_dir, job_seed=job_seed, n_scenes=total, credits_paused=False)
+        autorolik = str(script.get("kind") or "") == "autorolik" or any(
+            isinstance(s, dict) and "face_scene" in s for s in scenes
+        )
+        element_uris: list[str] = []
+        for ei, plate in enumerate(element_images or []):
+            if isinstance(plate, Path) and plate.exists():
+                element_uris.append(await file_to_data_uri(plate, work_dir / f"el{ei}.jpg"))
+            elif isinstance(plate, str) and str(plate).startswith(("data:", "http")):
+                element_uris.append(str(plate))
         still_png = work_dir / "bible_still.png"
         banana_png = work_dir / "banana_still.png"
         anchor_image: str | None = None
-        if isinstance(reference_image, Path) and reference_image.exists():
+        if autorolik and element_uris:
+            await report("FACE = фото друзей (Kling), WIDE = still без лица", stage=live.STAGE_STILL)
+            anchor_image = element_uris[0]
+            script["nano_banana"] = False
+        elif isinstance(reference_image, Path) and reference_image.exists():
             await report("Готовлю фото как первый кадр…", stage=live.STAGE_STILL)
             source = reference_image
             if file_ready(banana_png, min_bytes=max(IMAGE_MIN_BYTES, NANO_BANANA_MIN_BYTES)):
@@ -2509,7 +2587,7 @@ async def build_video(
                 muxed.append(mixed_path)
                 tracker.tts_done = max(tracker.tts_done, n)
                 tracker.video_done = n
-                if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
+                if prompt_image and n < total and file_ready(clip_path, min_bytes=MP4_MIN_BYTES) and not autorolik:
                     if same_still:
                         prompt_image = anchor_image
                     elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
@@ -2542,14 +2620,83 @@ async def build_video(
                 stage=live.STAGE_TTS,
                 scene=n,
             )
+            scene_route = mode
+            scene_lock = bool(photo_lock)
+            scene_image = prompt_image
+            scene_elements: list[str] | None = None
+            scene_refs = refs
+            scene_engine = primary_engine
+            scene_cam = camera
+            scene_mot = motion
+            scene_visual = str(scene.get("visual_prompt") or "")
+            if autorolik:
+                from autorolik import (
+                    kling_api_prompt,
+                    parse_bool as autorolik_face,
+                    pick_element_uri,
+                    route_for_scene,
+                    scene_camera,
+                )
+
+                face = autorolik_face(scene.get("face_scene"))
+                scene_route = route_for_scene(scene)
+                scene_engines = chain_for(scene_route)
+                scene_engine = scene_engines[0] if scene_engines else ("kling" if face else "seedance")
+                scene_cam = scene_camera(scene)
+                scene_mot = ""
+                if face:
+                    pick = pick_element_uri(scene, element_uris)
+                    scene_image = pick or scene_image
+                    scene_lock = True
+                    scene_elements = [scene_image] if scene_image else None
+                    scene_refs = [scene_image] if scene_image else []
+                    scene_visual = kling_api_prompt(
+                        scene_visual, element_index=int(scene.get("element_index") or 1)
+                    )
+                else:
+                    scene_lock = False
+                    scene_elements = None
+                    wide_png = work_dir / f"wide_still_{i}.png"
+                    if file_ready(wide_png, min_bytes=1000):
+                        scene_image = await file_to_data_uri(
+                            wide_png, work_dir / f"wide_ref_{i}.jpg"
+                        )
+                    else:
+                        await report(
+                            f"WIDE still без лица · сцена {n} из {total}",
+                            stage=live.STAGE_STILL,
+                            scene=n,
+                        )
+                        still_url = await _text_to_image_url(
+                            session,
+                            compose_runway_prompt(
+                                continuity,
+                                scene_visual,
+                                scene_cam,
+                                "",
+                                style=style,
+                                photo_lock=False,
+                                character_lock=False,
+                            ),
+                            ratio,
+                            work_dir / f"wide_still_{i}.hint",
+                            model=still_model_for_quality(quality),
+                            route_mode="autorolik_wide",
+                        )
+                        await _download(session, still_url, wide_png)
+                        scene_image = await file_to_data_uri(
+                            wide_png, work_dir / f"wide_ref_{i}.jpg"
+                        )
+                    scene_refs = [scene_image] if scene_image else []
             prompt = video_prompt_for(
-                primary_engine,
+                scene_engine,
                 continuity,
-                scene["visual_prompt"],
-                camera,
-                motion,
+                scene_visual,
+                scene_cam,
+                scene_mot,
                 style=style,
-                photo_lock=photo_lock,
+                photo_lock=scene_lock,
+                character_lock=scene_lock if autorolik else True,
             )
             if file_ready(clip_path, min_bytes=MP4_MIN_BYTES):
                 log.info("resume clip %s/%s", n, total)
@@ -2559,9 +2706,12 @@ async def build_video(
                 clip_sec = pick_clip_duration(
                     audio_sec or 10.0, prefer_short=dynamic_pacing
                 )
-                vendor = "fal.ai" if same_still else "Runway"
+                vendor = "fal.ai" if same_still or autorolik else "Runway"
+                tag = ""
+                if autorolik:
+                    tag = " FACE/Kling" if scene_lock else " WIDE/Seedance"
                 await report(
-                    f"Сцена {n} из {total} рендерится в {vendor}",
+                    f"Сцена {n} из {total} рендерится в {vendor}{tag}",
                     stage=live.STAGE_RUNWAY,
                     scene=n,
                 )
@@ -2572,14 +2722,15 @@ async def build_video(
                         clip_sec,
                         clip_path,
                         ratio=ratio,
-                        prompt_image=prompt_image,
+                        prompt_image=scene_image,
                         clip_index=n,
                         clip_total=total,
                         seed=job_seed,
                         quality=quality,
-                        route_mode=mode,
-                        photo_lock=bool(photo_lock),
-                        references=refs,
+                        route_mode=scene_route,
+                        photo_lock=bool(scene_lock),
+                        references=scene_refs,
+                        elements=scene_elements,
                     )
                 except PipelineError:
                     raise
@@ -2587,7 +2738,8 @@ async def build_video(
             # fal.ai Kling/Seedance: тот же first-frame на каждую сцену (как Seedance I2V).
             # Seedance I2V last-frame JPEG → INPUT_VALIDATION; тот же still
             # на каждую сцену лучше держит персонажа (и это единственный слот).
-            if prompt_image and n < total:
+            # Авторолик: не тащим FACE-фото в WIDE и не клеим last-frame между типами сцен.
+            if prompt_image and n < total and not autorolik:
                 if same_still:
                     prompt_image = anchor_image
                 elif i2v_model in RUNWAY_SEEDANCE_MODELS and anchor_image:
@@ -2619,6 +2771,17 @@ async def build_video(
         if watermark:
             await report("Водяной знак", stage=live.STAGE_MUX)
             out = await apply_watermark(out, work_dir / "final_wm.mp4")
+        if needs_ai_generated_mark(
+            photo_lock=bool(photo_lock),
+            element_images=element_images,
+            script=script,
+            route_mode=mode,
+        ):
+            await report("Пометка AI generated…", stage=live.STAGE_MUX)
+            out, script = await apply_ai_generated_disclosure(
+                out, work_dir / "final_ai.mp4", script, required=True
+            )
+            save_script(work_dir, script)
         tracker.mux_done = True
         await report("Файл собран", stage=live.STAGE_MUX)
         return out, script

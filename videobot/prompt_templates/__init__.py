@@ -14,16 +14,35 @@ def video_prompt_for(
     *,
     style: str = "cinematic",
     photo_lock: bool = False,
+    character_lock: bool = True,
 ) -> str:
     name = (engine or "").strip().lower()
     if name == "kling":
         return kling_video_prompt(
-            continuity, scene_visual, camera, motion, style=style, photo_lock=photo_lock
+            continuity,
+            scene_visual,
+            camera,
+            motion,
+            style=style,
+            photo_lock=photo_lock,
+            character_lock=character_lock,
         )
     if name == "seedance":
         return seedance_video_prompt(
-            continuity, scene_visual, camera, motion, style=style, photo_lock=photo_lock
+            continuity,
+            scene_visual,
+            camera,
+            motion,
+            style=style,
+            photo_lock=photo_lock,
+            character_lock=character_lock,
         )
     return runway_video_prompt(
-        continuity, scene_visual, camera, motion, style=style, photo_lock=photo_lock
+        continuity,
+        scene_visual,
+        camera,
+        motion,
+        style=style,
+        photo_lock=photo_lock,
+        character_lock=character_lock,
     )

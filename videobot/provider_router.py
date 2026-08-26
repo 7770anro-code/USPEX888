@@ -21,6 +21,8 @@ ROUTING: dict[str, list[str]] = {
     "synthetic_multi_scene": ["seedance", "kling", "legacy_runway"],
     "night_pipeline": ["seedance", "kling", "legacy_runway"],
     "montage_generate": ["seedance", "kling", "legacy_runway"],
+    "autorolik_face": ["kling", "seedance", "legacy_runway"],
+    "autorolik_wide": ["seedance", "kling", "legacy_runway"],
 }
 
 MODE_DEFAULT = "synthetic_multi_scene"
@@ -63,12 +65,17 @@ async def render_clip(
     route_mode: str = MODE_DEFAULT,
     photo_lock: bool = False,
     references: list[str] | None = None,
+    elements: list[str] | None = None,
 ) -> Path:
     """Все кнопки генерации идут сюда, не в конкретный вендор."""
     last: PipelineError | None = None
+    skip_runway = False
     for engine in chain_for(route_mode):
         try:
             if engine == "legacy_runway":
+                if skip_runway:
+                    log.warning("skip legacy_runway after fal validation error")
+                    continue
                 if not config.RUNWAY_API_KEY:
                     continue
                 return await RunwayProvider(session).render_clip(
@@ -88,6 +95,9 @@ async def render_clip(
             client = FalClient(session, engine=engine)
             frame = prompt_image or ""
             if engine == "seedance":
+                if photo_lock or elements or route_mode in ("autorolik_face", "real_photo"):
+                    log.warning("skip seedance for FACE/photo_lock — partner rejects likenesses")
+                    continue
                 return await client.generate_seedance(
                     session,
                     prompt,
@@ -105,9 +115,18 @@ async def render_clip(
                 seconds,
                 dest,
                 photo_lock=photo_lock,
+                elements=elements,
             )
         except PipelineError as exc:
             last = exc
+            detail = str(exc.detail or exc.user_message or "")
+            status = getattr(exc, "status", None)
+            if engine in ("kling", "seedance") and (
+                status == 422
+                or "value_error" in detail
+                or "frontal_image_url" in detail
+            ):
+                skip_runway = True
             if getattr(exc, "code", "") in ("credits", "moderation", "moderation_person"):
                 log.warning("provider %s user-facing fail, try next: %s", engine, exc.code)
                 if getattr(exc, "code", "") == "moderation_person":

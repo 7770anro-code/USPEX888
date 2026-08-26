@@ -43,13 +43,19 @@ def smoke_routing() -> None:
     for mode, chain in ROUTING.items():
         assert chain[-1] == "legacy_runway", mode
         assert "kling" in chain and "seedance" in chain
+    assert ROUTING["autorolik_face"][0] == "kling"
+    assert ROUTING["autorolik_wide"][0] == "seedance"
     assert chain_for("real_photo")[0] == "kling"
     assert chain_for("night_pipeline")[0] == "seedance"
+    assert chain_for("autorolik_face")[0] == "kling"
+    assert chain_for("autorolik_wide")[0] == "seedance"
     night_src = Path(__file__).with_name("night_video.py").read_text(encoding="utf-8")
     assert 'route_mode="night_pipeline"' in night_src
     kling = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
     assert kling["generate_audio"] is False
     assert kling["elements"]
+    assert kling["elements"][0]["frontal_image_url"] == "https://example.com/a.jpg"
+    assert kling["elements"][0]["reference_image_urls"] == ["https://example.com/a.jpg"]
     seed = seedance_i2v_payload("walk", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False
@@ -65,17 +71,19 @@ def smoke_routing() -> None:
 
 def smoke_miniapp() -> None:
     from webapp_server import build_app
+    from test_parse import test_webapp_init_data_hmac_includes_signature
 
     app = build_app(bot=None)
     paths = set()
     for route in app.router.routes():
         info = route.resource.get_info() if route.resource else {}
         paths.add(info.get("path") or info.get("formatter") or "")
-    for need in ("/api/quick", "/api/vibe", "/api/tryon", "/api/clone", "/health"):
+    for need in ("/api/quick", "/api/vibe", "/api/tryon", "/api/clone", "/api/autorolik", "/health"):
         assert need in paths, need
     html = Path(__file__).with_name("webapp").joinpath("index.html").read_text(encoding="utf-8")
-    assert html.count('class="sub"') == 6
-    _ok("miniapp", "6 карточек, HMAC API")
+    assert html.count('class="sub"') == 7
+    test_webapp_init_data_hmac_includes_signature()
+    _ok("miniapp", "7 карточек, HMAC включает signature, Авторолик")
 
 
 async def smoke_idea_script() -> None:

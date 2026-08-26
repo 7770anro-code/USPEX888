@@ -34,6 +34,7 @@ from pipeline import (
     PipelineError,
     RUNWAY_CREDITS_MSG,
     DYNAMIC_SCENE_COUNT,
+    apply_ai_generated_disclosure,
     build_video,
     compact_runway_models,
     ensure_ffmpeg,
@@ -44,6 +45,7 @@ from pipeline import (
     is_runway_credits_fail,
     script_too_long_for_custom,
     target_scene_count,
+    with_ai_generated_caption,
 )
 from presets import (
     CAMERA,
@@ -168,10 +170,15 @@ HOW_IT_WORKS = (
     "авто «описать вайб» — оригинальная синтетика тем же пайплайном, что ночь "
     "(IDEA_SYSTEM → SCRIPT_SYSTEM_SYNTH → Kling/Seedance), чужие ролики не скачиваю.\n"
     "8) Мультсериал «Гибриды» (владелец): reveal-формат, серии продолжают сюжет, слот NIGHT_ACC4, пост да/нет в /night.\n"
-    "9) Меню Mini App: «🎬 Открыть меню» — шесть категорий (создать / монтаж / улучшить / "
+    "9) «🎞 Авторолик»: до 6 фото друзей + согласие → 4–8 сцен хайпового монтажа UKRAINIAN CORE. "
+    "FACE (крупный план друга) — Kling @ElementN; WIDE (дрон над городом, колонна в тумане, "
+    "решётка фар, силуэты в контровом) — Seedance, лицо не главное, камеры больше. "
+    "Сначала подтверждаешь или правишь сценарий в чате, потом съёмка.\n"
+    "10) Меню Mini App: «🎬 Открыть меню» — семь категорий (создать / авторолик / монтаж / улучшить / "
     "примерка / мой голос / мои видео). Без HTTPS (WEBAPP_PUBLIC_URL) те же кнопки живут в обычном меню.\n\n"
     "⚠️ Фото живого человека — только своё или с согласия. "
     "Без кнопки «Подтверждаю: моё фото / есть согласие» я фото не использую. "
+    "На роликах с фото человека (и в ночном пайплайне) в углу кадра и в подписи будет «AI generated». "
     "Клон голоса — отдельная кнопка «Разрешаю клонировать голос»."
 )
 
@@ -208,6 +215,11 @@ class Flow(StatesGroup):
     edit_auto_vibe = State()
     serial_note = State()
     revise_notes = State()
+    auto_consent = State()
+    auto_photos = State()
+    auto_topic = State()
+    auto_review = State()
+    auto_edit = State()
 
 
 def _extra_voices(chat_id: int | None) -> list[dict[str, str]]:
@@ -245,6 +257,7 @@ def main_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="⚡️ Видео за 1 клик", callback_data="menu:quick")],
             [InlineKeyboardButton(text="🎬 Своё фото + текст + голос", callback_data="menu:custom")],
+            [InlineKeyboardButton(text="🎞 Авторолик", callback_data="menu:auto")],
             [InlineKeyboardButton(text="🧟 Оживить фото", callback_data="menu:acttwo")],
             [InlineKeyboardButton(text="🎙 Клонировать мой голос", callback_data="menu:clone")],
             [InlineKeyboardButton(text="🗑 Удалить мой голос", callback_data="menu:unclone")],
@@ -612,6 +625,17 @@ def credits_pause_text(chat_id: int, *, headline: str = "") -> str:
         f"{format_resume_progress(work)}\n\n"
         "Прогресс на диске. После пополнения баланса нажмите «Продолжить съёмку» — "
         "сценарий и озвучку заново не спишем, доснимем с места остановки."
+    )
+
+
+def shoot_fail_text(chat_id: int, *, headline: str) -> str:
+    work = resume_work_dir(chat_id)
+    head = (headline or "Съёмка остановилась.").strip()
+    return (
+        f"{head}\n\n"
+        f"{format_resume_progress(work)}\n\n"
+        "Прогресс на диске. Нажми «Продолжить съёмку» — сценарий и озвучку заново не спишем, "
+        "доснимем с места остановки. В Mini App заново заходить не нужно."
     )
 
 
@@ -1371,13 +1395,23 @@ async def _start_act_two(msg: Message, state: FSMContext) -> None:
     )
 
 
+async def _drop_remote_voice(session: aiohttp.ClientSession, voice_id: str) -> None:
+    """ElevenLabs IVC удаляем. MiniMax (mm:) живёт на fal — чужой DELETE не зовём."""
+    from fal_models import is_minimax_voice
+
+    vid = (voice_id or "").strip()
+    if not vid or is_minimax_voice(vid):
+        return
+    await delete_eleven_voice(session, vid)
+
+
 async def _delete_cloned_voice(msg: Message) -> None:
     vid = delete_cloned_voice(msg.chat.id)
     if not vid:
         await msg.answer("Клонированного голоса пока нет.", reply_markup=main_menu())
         return
     async with aiohttp.ClientSession() as session:
-        await delete_eleven_voice(session, vid)
+        await _drop_remote_voice(session, vid)
     await msg.answer("Клон голоса удалён.", reply_markup=main_menu())
 
 
@@ -1442,6 +1476,9 @@ async def on_menu(query: CallbackQuery, state: FSMContext) -> None:
             "Это слова, которые зритель услышит. Можно абзацами — я разрежу на клипы.\n"
             "Ориентир: не длиннее ~230 слов, иначе озвучка не влезет в 6 клипов."
         )
+        return
+    if data == "menu:auto":
+        await _start_autorolik(msg, state)
         return
     if data == "menu:acttwo":
         await _start_act_two(msg, state)
@@ -1631,7 +1668,7 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
         await query.answer()
     except Exception:
         pass
-    if await state.get_state() != Flow.custom_consent.state:
+    if await state.get_state() not in (Flow.custom_consent.state, Flow.auto_consent.state):
         if query.message:
             await query.message.answer("Сначала пришли фото и нажми согласие заново. /start", reply_markup=main_menu())
         return
@@ -1641,6 +1678,19 @@ async def on_consent(query: CallbackQuery, state: FSMContext) -> None:
             await query.message.answer("Ок, без фото не продолжаю. Можно начать заново.", reply_markup=main_menu())
         return
     job = await _job(state)
+    if job.get("mode") == "autorolik":
+        job["consent_verified"] = True
+        await _save_job(state, job)
+        await state.set_state(Flow.auto_photos)
+        if query.message:
+            from autorolik import photos_kb
+
+            await query.message.answer(
+                "Пришли до 6 фото друзей — по одному или файлом. "
+                "Когда хватит, жми «Дальше».",
+                reply_markup=photos_kb(count=0),
+            )
+        return
     if not job.get("photo_file_id"):
         await state.clear()
         if query.message:
@@ -1896,6 +1946,244 @@ async def on_job(query: CallbackQuery, state: FSMContext) -> None:
     await _run_job(msg, **run_kw)
 
 
+def _autorolik_voice(user_id: int) -> tuple[str, str]:
+    cloned = get_cloned_voice(int(user_id))
+    if cloned and cloned.get("id"):
+        return str(cloned["id"]), str(cloned.get("name") or "Мой голос")
+    voice = voice_by_index(1)
+    return voice["id"], voice["name"]
+
+
+async def _start_autorolik(msg: Message, state: FSMContext) -> None:
+    await state.clear()
+    if credits_paused(resume_work_dir(msg.chat.id)):
+        await msg.answer(
+            credits_pause_text(msg.chat.id),
+            reply_markup=credits_pause_kb(job_key_manual(msg.chat.id)),
+        )
+        return
+    job = await _new_job("autorolik", msg.chat.id)
+    job["photo_file_ids"] = []
+    job["dynamic_pacing"] = True
+    job["user_script"] = True
+    await _save_job(state, job)
+    await state.set_state(Flow.auto_consent)
+    await msg.answer(
+        "🎞 Авторолик — хайповый монтаж UKRAINIAN CORE.\n"
+        "До 6 фото друзей. Крупные планы лиц → Kling, широкие (дрон, колонна, фары, толпа) → Seedance.\n\n"
+        "Это согласие на все фото в ролике.",
+        reply_markup=consent_kb(),
+    )
+
+
+async def _autorolik_write_script(
+    message: Message,
+    state: FSMContext,
+    *,
+    notes: str = "",
+) -> None:
+    from autorolik import (
+        format_script_preview,
+        grok_autorolik,
+        load_pending,
+        review_kb,
+        save_pending,
+    )
+
+    job = await _job(state)
+    ids = list(job.get("photo_file_ids") or [])
+    pending = load_pending(message.chat.id) or {}
+    if not ids:
+        ids = list(pending.get("photo_file_ids") or [])
+        job["photo_file_ids"] = ids
+    if not ids:
+        await message.answer("Нужно хотя бы одно фото.", reply_markup=main_menu())
+        return
+    topic = str(job.get("idea") or pending.get("idea") or "").strip()
+    previous = pending.get("script") if notes else None
+    await message.answer("Пишу сценарий Авторолика (4–8 сцен, FACE/WIDE)…")
+    try:
+        timeout = aiohttp.ClientTimeout(total=120)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            script = await grok_autorolik(
+                session,
+                n_photos=len(ids),
+                idea=topic,
+                notes=notes,
+                previous=previous if isinstance(previous, dict) else None,
+            )
+    except PipelineError as exc:
+        await message.answer(exc.user_message, reply_markup=main_menu())
+        return
+    save_pending(
+        message.chat.id,
+        {
+            "script": script,
+            "photo_file_ids": ids,
+            "consent_verified": True,
+            "idea": topic,
+        },
+    )
+    job["script"] = script
+    job["consent_verified"] = True
+    await _save_job(state, job)
+    await state.set_state(Flow.auto_review)
+    await message.answer(format_script_preview(script), reply_markup=review_kb())
+
+
+async def _autorolik_shoot(message: Message, state: FSMContext, *, bot: Bot) -> None:
+    from autorolik import clear_pending, load_pending
+
+    pending = load_pending(message.chat.id) or {}
+    job = await _job(state)
+    script = pending.get("script") or job.get("script")
+    ids = [str(x) for x in (pending.get("photo_file_ids") or job.get("photo_file_ids") or []) if x]
+    if not isinstance(script, dict) or not ids:
+        await message.answer(
+            "Сценарий или фото не нашёл. Начни Авторолик заново.",
+            reply_markup=main_menu(),
+        )
+        return
+    consent = bool(job.get("consent_verified") or pending.get("consent_verified"))
+    if not consent:
+        await message.answer(CONSENT_REQUIRED_MSG, reply_markup=main_menu())
+        return
+    voice_id, voice_name = _autorolik_voice(message.chat.id)
+    scenes = script.get("scenes") or []
+    await state.clear()
+    await _run_job(
+        message,
+        idea=str(pending.get("idea") or job.get("idea") or script.get("title") or "авторолик"),
+        user_script=True,
+        voice_id=voice_id,
+        photo_file_id=ids[0],
+        bot=bot,
+        voice_name=voice_name,
+        consent_verified=True,
+        n_scenes=max(4, len(scenes)),
+        extra_brief="",
+        voice_settings=voice_settings_payload("sure", "norm"),
+        camera="",
+        motion="",
+        quality="optimal",
+        style="cinematic",
+        watermark=False,
+        hook=str(script.get("hook") or ""),
+        kind="autorolik",
+        wipe=True,
+        dynamic_pacing=True,
+        route_mode="autorolik_face",
+        photo_file_ids=ids,
+        script_override=script,
+    )
+    clear_pending(message.chat.id)
+
+
+async def on_auto_photo(message: Message, state: FSMContext) -> None:
+    from autorolik import MAX_PHOTOS, photos_kb
+
+    job = await _job(state)
+    ids = list(job.get("photo_file_ids") or [])
+    fid = None
+    if message.photo:
+        fid = message.photo[-1].file_id
+    else:
+        doc = message.document
+        mime = (doc.mime_type or "") if doc else ""
+        if doc and mime.startswith("image/"):
+            fid = doc.file_id
+    if not fid:
+        await message.answer(
+            "Пришли именно фото (картинкой или файлом).",
+            reply_markup=photos_kb(count=len(ids)),
+        )
+        return
+    if len(ids) >= MAX_PHOTOS:
+        await message.answer(
+            f"Уже {MAX_PHOTOS} фото — седьмое не беру. Жми «Дальше».",
+            reply_markup=photos_kb(count=len(ids)),
+        )
+        return
+    if fid not in ids:
+        ids.append(fid)
+    job["photo_file_ids"] = ids
+    await _save_job(state, job)
+    left = MAX_PHOTOS - len(ids)
+    extra = f"Можно ещё {left}." if left else "Лимит 6. Жми «Дальше»."
+    await message.answer(
+        f"Фото {len(ids)}/{MAX_PHOTOS}. {extra}",
+        reply_markup=photos_kb(count=len(ids)),
+    )
+
+
+async def on_auto_topic(message: Message, state: FSMContext) -> None:
+    job = await _job(state)
+    job["idea"] = (message.text or "").strip()[:1500]
+    await _save_job(state, job)
+    await _autorolik_write_script(message, state)
+
+
+async def on_auto_edit_notes(message: Message, state: FSMContext) -> None:
+    notes = (message.text or "").strip()
+    if len(notes) < 3:
+        await message.answer("Напиши правку парой слов — что поменять в сценах.")
+        return
+    await _autorolik_write_script(message, state, notes=notes)
+
+
+async def on_auto_callback(query: CallbackQuery, state: FSMContext) -> None:
+    data = query.data or ""
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    msg = query.message
+    if not isinstance(msg, Message):
+        return
+    from autorolik import photos_kb, topic_kb
+
+    key = data.split(":", 1)[-1] if ":" in data else ""
+    if key == "reset":
+        job = await _job(state)
+        job["photo_file_ids"] = []
+        await _save_job(state, job)
+        await state.set_state(Flow.auto_photos)
+        await msg.answer("Фото сбросил. Пришли заново, до 6 штук.", reply_markup=photos_kb(count=0))
+        return
+    if key == "next":
+        job = await _job(state)
+        ids = list(job.get("photo_file_ids") or [])
+        if not ids:
+            await msg.answer("Нужно хотя бы одно фото.", reply_markup=photos_kb(count=0))
+            return
+        await state.set_state(Flow.auto_topic)
+        await msg.answer(
+            "Тема или вайб текстом — или без темы, соберу сам.",
+            reply_markup=topic_kb(),
+        )
+        return
+    if key == "notopic":
+        job = await _job(state)
+        job["idea"] = ""
+        await _save_job(state, job)
+        await _autorolik_write_script(msg, state)
+        return
+    if key == "edit":
+        await state.set_state(Flow.auto_edit)
+        await msg.answer("Напиши, что поменять в сценарии — верну новый монтажный план.")
+        return
+    if key == "no":
+        from autorolik import clear_pending
+
+        clear_pending(msg.chat.id)
+        await state.clear()
+        await msg.answer("Ок, Авторолик отменил.", reply_markup=main_menu())
+        return
+    if key == "go":
+        await _autorolik_shoot(msg, state, bot=query.bot)
+        return
+
+
 async def _download_photo(bot: Bot, file_id: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     file = await bot.get_file(file_id)
@@ -1963,8 +2251,13 @@ async def _run_job(
     wipe: bool = False,
     dynamic_pacing: bool = False,
     route_mode: str | None = None,
+    photo_file_ids: list[str] | None = None,
+    script_override: dict[str, Any] | None = None,
 ) -> None:
-    blocked = photo_start_blocked(photo_file_id, consent_verified)
+    ids = [str(x) for x in (photo_file_ids or []) if x]
+    if photo_file_id and str(photo_file_id) not in ids:
+        ids = [str(photo_file_id)] + ids
+    blocked = photo_start_blocked(ids[0] if ids else None, consent_verified)
     if blocked:
         await message.answer(blocked, reply_markup=main_menu())
         return
@@ -1997,7 +2290,8 @@ async def _run_job(
             "idea": idea,
             "user_script": bool(user_script),
             "voice_id": voice_id or "",
-            "photo_file_id": photo_file_id or "",
+            "photo_file_id": (ids[0] if ids else "") or "",
+            "photo_file_ids": ids,
             "voice_name": voice_name,
             "consent_verified": bool(consent_verified),
             "n_scenes": int(n_scenes or 5),
@@ -2030,11 +2324,15 @@ async def _run_job(
 
         try:
             photo_path = None
-            if photo_file_id and consent_verified:
-                photo_path = work / "user_photo.jpg"
+            element_paths: list[Path] = []
+            if ids and consent_verified:
                 work.mkdir(parents=True, exist_ok=True)
-                if not photo_path.is_file():
-                    await _download_photo(bot, photo_file_id, photo_path)
+                for i, fid in enumerate(ids, start=1):
+                    dest = work / f"user_photo_{i}.jpg"
+                    if not dest.is_file():
+                        await _download_photo(bot, fid, dest)
+                    element_paths.append(dest)
+                photo_path = element_paths[0]
             with job_scope(job_key):
                 video_path, script = await build_video(
                     idea,
@@ -2056,6 +2354,8 @@ async def _run_job(
                     dynamic_pacing=dynamic_pacing,
                     route_mode=route_mode
                     or ("real_photo" if photo_path else "synthetic_multi_scene"),
+                    script_override=script_override,
+                    element_images=element_paths or None,
                 )
             preview = format_script(script)
             try:
@@ -2072,6 +2372,8 @@ async def _run_job(
                 caption += "\nпервый кадр: Nano Banana → I2V"
             if models_line:
                 caption += f"\n{models_line}"
+            if script.get("ai_generated"):
+                caption = with_ai_generated_caption(caption)
             title = str(script.get("title") or "video")
             keep = save_last_video(message.chat.id, video_path, title)
             save_last_job(
@@ -2126,14 +2428,12 @@ async def _run_job(
         except PipelineError as exc:
             log.warning("pipeline: %s | %s", exc.user_message, exc.detail)
             finish_job(job_key, failed=True, label=exc.user_message)
+            mark_credits_pause(work)
             if getattr(exc, "code", "") == "credits" or is_runway_credits_fail(exc.detail):
-                mark_credits_pause(work)
-                await message.answer(
-                    credits_pause_text(message.chat.id, headline=exc.user_message),
-                    reply_markup=credits_pause_kb(job_key),
-                )
+                text = credits_pause_text(message.chat.id, headline=exc.user_message)
             else:
-                await message.answer(exc.user_message, reply_markup=main_menu())
+                text = shoot_fail_text(message.chat.id, headline=exc.user_message)
+            await message.answer(text, reply_markup=credits_pause_kb(job_key))
         except Exception:
             log.exception("unhandled")
             finish_job(job_key, failed=True, label="Сломалось на моей стороне")
@@ -2236,7 +2536,7 @@ async def on_w2_menu(query: CallbackQuery, state: FSMContext) -> None:
         ids = clear_user_voices(msg.chat.id)
         async with aiohttp.ClientSession() as session:
             for vid in ids:
-                await delete_eleven_voice(session, vid)
+                await _drop_remote_voice(session, vid)
         await state.clear()
         await msg.answer("Свои голоса убрал.", reply_markup=main_menu())
         return
@@ -2365,7 +2665,7 @@ async def on_w2_clone_audio(message: Message, state: FSMContext) -> None:
         async with aiohttp.ClientSession() as session:
             voice_id = await clone_user_audio(session, src, name="Мой голос")
             if old and old.get("id") and old["id"] != voice_id:
-                await delete_eleven_voice(session, old["id"])
+                await _drop_remote_voice(session, old["id"])
         set_cloned_voice(message.chat.id, voice_id, "Мой голос")
         await state.clear()
         await status.edit_text("Голос склонирован и сохранён.")
@@ -2559,9 +2859,20 @@ async def on_w2_act_video(message: Message, state: FSMContext) -> None:
                 dest,
                 used_image=True,
             )
+            dest, marked = await apply_ai_generated_disclosure(
+                dest,
+                work / "act_ai.mp4",
+                {"caption": "Оживлённое фото", "kind": "act_two"},
+                required=True,
+            )
             keep = save_last_video(message.chat.id, dest, "Оживлённое фото")
             clear_last_job(message.chat.id)
-            await _send_video(message, keep, "Оживлённое фото", filename="act_tiktok.mp4")
+            await _send_video(
+                message,
+                keep,
+                with_ai_generated_caption(str(marked.get("caption") or "Оживлённое фото")),
+                filename="act_tiktok.mp4",
+            )
         await state.clear()
         await status.edit_text("Готово.")
         await message.answer("Можно улучшить качество этого ролика.", reply_markup=result_kb(can_finalize=False))
@@ -2833,6 +3144,18 @@ async def on_plain_text(message: Message, state: FSMContext) -> None:
 
 async def on_other(message: Message, state: FSMContext) -> None:
     current = await state.get_state()
+    if current == Flow.auto_photos.state:
+        await on_auto_photo(message, state)
+        return
+    if current == Flow.auto_topic.state:
+        await message.answer("Напиши тему текстом или нажми «Без темы».")
+        return
+    if current == Flow.auto_edit.state:
+        await message.answer("Напиши правки текстом — что поменять в сценах.")
+        return
+    if current == Flow.auto_review.state:
+        await message.answer("Нажми «Снять», «Правки» или «Отмена».")
+        return
     if current == Flow.revise_notes.state:
         await message.answer("Напиши правки текстом — что поменять в ролике.")
         return
@@ -2918,6 +3241,8 @@ async def main() -> None:
     dp.callback_query.register(on_preset_pick, Flow.preset_topic, F.data.startswith("preset:"))
     dp.callback_query.register(on_photo_skip, Flow.custom_photo, F.data == "photo:skip")
     dp.callback_query.register(on_consent, Flow.custom_consent, F.data.startswith("consent:"))
+    dp.callback_query.register(on_consent, Flow.auto_consent, F.data.startswith("consent:"))
+    dp.callback_query.register(on_auto_callback, F.data.startswith("auto:"))
     dp.callback_query.register(on_voice_skip, Flow.custom_voice, F.data == "vskip:default")
     dp.callback_query.register(on_voice_page, Flow.custom_voice, F.data.startswith("vpage:"))
     dp.callback_query.register(on_voice_pick, Flow.custom_voice, F.data.startswith("voice:"))
@@ -2949,6 +3274,10 @@ async def main() -> None:
     dp.message.register(on_edit_auto_vibe, Flow.edit_auto_vibe, F.text)
     dp.message.register(on_serial_note, Flow.serial_note, F.text)
     dp.message.register(on_revise_notes, Flow.revise_notes, F.text)
+    dp.message.register(on_auto_topic, Flow.auto_topic, F.text)
+    dp.message.register(on_auto_edit_notes, Flow.auto_edit, F.text)
+    dp.message.register(on_auto_photo, Flow.auto_photos, F.photo)
+    dp.message.register(on_auto_photo, Flow.auto_photos, F.document)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.photo)
     dp.message.register(on_custom_photo, Flow.custom_photo, F.document)
     dp.message.register(on_act_photo, Flow.act_photo, F.photo)

@@ -20,6 +20,7 @@
   const TIPS = {
     home: "Нажми карточку. Под ней написано, что она делает.",
     create: "Напиши тему двумя словами и жми «Снять».",
+    autorolik: "До 6 фото + галочка. Сценарий подтвердишь в чате.",
     cut: "Напиши вайб. Своё видео режется в чате бота.",
     improve: "Кинь файл: видео — 4K или слоу-мо, фото — починить.",
     tryon: "Фото тебя + фото одежды + галочка.",
@@ -151,6 +152,29 @@
     }
     const quality = (document.querySelector('input[name="quality"]:checked') || {}).value || "optimal";
     await postJob("/api/quick", { idea, quality, consent: consent ? "1" : "0" }, { photo });
+  });
+
+  bind("go-autorolik", async () => {
+    const files = [...(document.getElementById("auto-photos").files || [])];
+    if (!files.length) {
+      showStatus("Нужно хотя бы одно фото.", "err");
+      return;
+    }
+    if (files.length > 6) {
+      showStatus("Максимум 6 фото.", "err");
+      return;
+    }
+    const consent = document.getElementById("auto-consent").checked;
+    if (!consent) {
+      showStatus("Для фото людей нужна галочка согласия.", "err");
+      return;
+    }
+    const topic = document.getElementById("auto-topic").value.trim();
+    const photos = {};
+    files.forEach((f, i) => {
+      photos["photo" + (i + 1)] = f;
+    });
+    await postJob("/api/autorolik", { topic, consent: "1" }, photos);
   });
 
   bind("go-vibe", async () => {
