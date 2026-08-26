@@ -13,7 +13,7 @@
    - Качество в UI: **Быстро** = Seedance 2.5 I2V (`bytedance/seedance-2.5/image-to-video`); **Оптимально** = Kling 3.0 Pro I2V (`fal-ai/kling-video/v3/pro/image-to-video`).
    - Вертикаль `9:16`. Duration — **строка**. `generate_audio=false` (нативная речь плохо с рус/укр). TTS клеим сами.
    - Kling Element Reference: `elements=[{frontal_image_url}]` + `@Element1` в промпте (взаимно исключается с `generate_audio`).
-   - Seedance multi-ref: `bytedance/seedance-2.5/reference-to-video`, `@Image1` в промпте (ночь и мультисцен).
+   - Seedance multi-ref: `bytedance/seedance-2.5/reference-to-video`, `@Image1` в промпте (ночь и мультисцен). WIDE likeness 422 → та же сцена Kling I2V: still как `start_image_url`, `@Image1` из промпта снимается.
    - Без фото: still через Flux Schnell (`fal-ai/flux/schnell`), затем тот же first-frame на каждую сцену.
    - Своё фото: если задан `GEMINI_API_KEY` (Google AI Studio, `gemini-2.5-flash-image` / Nano Banana), кадр сначала чистится там, и в Kling/Seedance I2V идёт уже этот still. Без ключа фото идёт как есть.
    - Lip-sync после TTS: `fal-ai/kling-video/lipsync/audio-to-video` (клип 2–10 с). Ошибка → старый ffmpeg mux.

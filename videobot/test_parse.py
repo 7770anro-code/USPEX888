@@ -1333,7 +1333,7 @@ def test_fal_resume_completed_uses_status_media() -> None:
 
 
 def test_seedance_wide_likeness_retries_kling() -> None:
-    """WIDE 422 likeness Seedance → та же сцена Kling I2V, не raise. FACE Kling likeness — ошибка."""
+    """WIDE 422 likeness Seedance → Kling I2V без @Image1, still как start_image. FACE Kling likeness — ошибка."""
     import asyncio
     import tempfile
     from pathlib import Path
@@ -1341,15 +1341,28 @@ def test_seedance_wide_likeness_retries_kling() -> None:
 
     import config
     from pipeline import PipelineError
+    from prompt_templates import video_prompt_for
+    from prompt_templates.kling import ELEMENT_TOKEN, strip_seedance_image_refs
     from provider_router import render_clip
 
+    still = "https://example.com/wide_still.jpg"
+    face = "https://example.com/face.jpg"
+    seed_prompt = video_prompt_for(
+        "seedance",
+        "wide street",
+        "establishing no face",
+        photo_lock=False,
+        character_lock=False,
+    )
+    assert "@Image1" in seed_prompt
+    assert "@Image" not in strip_seedance_image_refs(seed_prompt)
     person = PipelineError(
-        "fal.ai отклонил фото живого человека (политика партнёра).",
+        "fal.ai отклонил кадр с живым человеком (политика партнёра).",
         "HTTP 422 partner_validation_failed likeness",
         code="moderation_person",
     )
 
-    async def _wide() -> None:
+    async def _wide(route_mode: str) -> None:
         tmp = tempfile.mkdtemp()
         dest = Path(tmp) / "c3.mp4"
         inst = AsyncMock()
@@ -1366,17 +1379,30 @@ def test_seedance_wide_likeness_retries_kling() -> None:
             with patch("provider_router.FalClient", return_value=inst):
                 out = await render_clip(
                     None,
-                    "wide street no face",
+                    seed_prompt,
                     5,
                     dest,
-                    prompt_image="https://example.com/still.jpg",
-                    route_mode="autorolik_wide",
+                    prompt_image=still,
+                    route_mode=route_mode,
                     photo_lock=False,
                 )
             assert out == dest
             assert dest.stat().st_size >= 10_000
             assert inst.generate_seedance.await_count == 1
             assert inst.generate_kling.await_count == 1
+            seed_args = inst.generate_seedance.await_args.args
+            assert seed_args[1] == seed_prompt
+            assert "@Image1" in seed_args[1]
+            assert seed_args[2] == still
+            kling_args, kling_kw = inst.generate_kling.await_args
+            kling_prompt = kling_args[1]
+            kling_frame = kling_args[2]
+            assert "@Image" not in kling_prompt
+            assert ELEMENT_TOKEN not in kling_prompt
+            assert "wide street" in kling_prompt or "establishing" in kling_prompt
+            assert kling_frame == still
+            assert kling_kw.get("photo_lock") is False
+            assert not kling_kw.get("elements")
         finally:
             config.FAL_KEY = old
             import shutil
@@ -1399,23 +1425,29 @@ def test_seedance_wide_likeness_retries_kling() -> None:
                         "face close-up",
                         5,
                         dest,
-                        prompt_image="https://example.com/face.jpg",
+                        prompt_image=face,
                         route_mode="autorolik_face",
                         photo_lock=True,
-                        elements=["https://example.com/face.jpg"],
+                        elements=[face],
                     )
                     raise AssertionError("FACE Kling likeness must raise")
                 except PipelineError as exc:
                     assert exc.code == "moderation_person"
             assert inst.generate_seedance.await_count == 0
             assert inst.generate_kling.await_count == 1
+            face_args, face_kw = inst.generate_kling.await_args
+            assert face_args[2] == face
+            assert face_kw.get("photo_lock") is True
+            assert face_kw.get("elements") == [face]
         finally:
             config.FAL_KEY = old
             import shutil
 
             shutil.rmtree(tmp, ignore_errors=True)
 
-    asyncio.run(_wide())
+    asyncio.run(_wide("autorolik_wide"))
+    asyncio.run(_wide("synthetic_multi_scene"))
+    asyncio.run(_wide("night_pipeline"))
     asyncio.run(_face_kling_still_raises())
 
 
@@ -2433,6 +2465,22 @@ def test_fal_kling_and_miniapp() -> None:
     assert kling["duration"] == "5"
     assert kling["generate_audio"] is False
     assert kling["start_image_url"].startswith("https://")
+    from prompt_templates import video_prompt_for
+    from prompt_templates.kling import ELEMENT_TOKEN, strip_seedance_image_refs
+
+    seed_wide = video_prompt_for(
+        "seedance", "amber dusk", "drone over city", photo_lock=False, character_lock=False
+    )
+    assert "@Image1" in seed_wide
+    kling_wide = kling_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert kling_wide["start_image_url"] == "https://example.com/wide_still.jpg"
+    assert "@Image" not in kling_wide["prompt"]
+    assert ELEMENT_TOKEN not in kling_wide["prompt"]
+    assert "elements" not in kling_wide
+    assert "drone over city" in kling_wide["prompt"] or "amber dusk" in kling_wide["prompt"]
+    assert strip_seedance_image_refs("@Element1 is the same person. walk") == (
+        "@Element1 is the same person. walk"
+    )
     seed = seedance_i2v_payload("a quiet street", "https://example.com/a.jpg", 5)
     assert seed["duration"] == "5"
     assert seed["generate_audio"] is False
@@ -2474,6 +2522,8 @@ def test_fal_kling_and_miniapp() -> None:
     )
     assert person.code == "moderation_person"
     assert "живого человека" in person.user_message
+    assert "Kling I2V" in person.user_message
+    assert "Нажми" not in person.user_message
     assert "не смог выполнить задачу" not in person.user_message
     kling_el = fal_fail_error(
         'HTTP 422: {"detail":[{"type":"value_error","loc":["body","elements",0],'
@@ -2718,6 +2768,10 @@ def test_fal_kling_and_miniapp() -> None:
     assert "to_fal_https_url" in kling_fn
     assert "converted_map" in kling_fn
     assert "fal_try_resume" in kling_fn
+    assert "strip_seedance_image_refs" in kling_fn
+    assert "start_image_url" in kling_fn or "start_image_url" in inspect.getsource(
+        FalClient._kling_body
+    )
     assert kling_fn.index("fal_try_resume") < kling_fn.index("to_fal_https_url")
     seed_fn = inspect.getsource(FalClient.generate_seedance)
     assert "to_fal_https_url" in seed_fn
@@ -2748,6 +2802,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "слишком долго" in router_src
     assert "fal_keep_sidecar" in router_src
     assert "seedance likeness — retry this clip with Kling" in router_src
+    assert "strip_seedance_image_refs" in router_src
     data_uri = "data:image/jpeg;base64,xx"
     leaked = kling_i2v_payload("walk", data_uri, 5, elements=[data_uri])
     assert leaked["elements"][0]["frontal_image_url"].startswith("data:")

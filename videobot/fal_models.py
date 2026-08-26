@@ -81,7 +81,10 @@ def kling_i2v_payload(
     photo_lock: bool = False,
     elements: list[str] | None = None,
 ) -> dict[str, Any]:
-    text = (prompt or "").strip() or "cinematic motion, photoreal, vertical 9:16"
+    from prompt_templates.kling import strip_seedance_image_refs
+
+    # WIDE fallback: промпт собран под Seedance (@Image1), картинка — start_image.
+    text = strip_seedance_image_refs(prompt) or "cinematic motion, photoreal, vertical 9:16"
     body: dict[str, Any] = {
         "prompt": text,
         "start_image_url": image_url,

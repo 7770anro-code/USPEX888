@@ -135,9 +135,18 @@ async def render_clip(
                     multi_ref=route_mode in ("night_pipeline", "synthetic_multi_scene", "montage_generate")
                     and bool(references and len(references) > 1),
                 )
+            from prompt_templates.kling import strip_seedance_image_refs
+
+            # Kling I2V: still/фото = start_image_url. @ImageN — слоты Seedance, не Kling.
+            kling_prompt = strip_seedance_image_refs(prompt)
+            if kling_prompt != (prompt or "").strip():
+                log.warning(
+                    "kling I2V: stripped Seedance @Image tokens; start_image=%s",
+                    "yes" if frame else "missing",
+                )
             return await client.generate_kling(
                 session,
-                prompt,
+                kling_prompt,
                 frame,
                 seconds,
                 dest,

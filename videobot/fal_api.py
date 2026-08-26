@@ -21,8 +21,9 @@ FAL_CREDITS_MSG = (
     "и попробуйте снова. Ключ: https://fal.ai/dashboard/keys"
 )
 FAL_PERSON_MSG = (
-    "fal.ai отклонил фото живого человека (политика партнёра). "
-    "Лица друзей снимает Kling Element, не Seedance. Нажми «Снять» ещё раз."
+    "fal.ai отклонил кадр живого человека (политика партнёра). "
+    "Общий план сам уходит на Kling I2V (кадр как start_image); "
+    "лица друзей — Kling Element. Если ошибка осталась, это отказ Kling, не Seedance."
 )
 FAL_STORAGE_INIT = "https://rest.alpha.fal.ai/storage/upload/initiate"
 

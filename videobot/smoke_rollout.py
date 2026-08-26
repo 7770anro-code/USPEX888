@@ -67,6 +67,16 @@ def smoke_routing() -> None:
     assert kling["elements"]
     assert kling["elements"][0]["frontal_image_url"] == "https://example.com/a.jpg"
     assert kling["elements"][0]["reference_image_urls"] == ["https://example.com/a.jpg"]
+    from prompt_templates import video_prompt_for
+
+    seed_wide = video_prompt_for(
+        "seedance", "city dusk", "drone", photo_lock=False, character_lock=False
+    )
+    assert "@Image1" in seed_wide
+    k_wide = kling_i2v_payload(seed_wide, "https://example.com/wide_still.jpg", 5)
+    assert "@Image" not in k_wide["prompt"]
+    assert k_wide["start_image_url"] == "https://example.com/wide_still.jpg"
+    assert "elements" not in k_wide
     from fal_api import fal_try_resume, keep_fal_sidecar
     from pipeline import PipelineError
 
