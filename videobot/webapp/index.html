@@ -53,6 +53,16 @@
         <span class="ttl">Мои видео</span>
         <span class="sub">Последний готовый ролик в этот чат.</span>
       </button>
+      <button class="card owner-only" data-go="nightlib" type="button" hidden>
+        <span class="ico">🌙</span>
+        <span class="ttl">Ночной автоконтур</span>
+        <span class="sub">Все ролики night_loop / motiv — отдельно.</span>
+      </button>
+      <button class="card owner-only" data-go="manuallib" type="button" hidden>
+        <span class="ico">📁</span>
+        <span class="ttl">Мои съёмки</span>
+        <span class="sub">Авторолик и ручные. Не мешаются с ночными.</span>
+      </button>
     </section>
 
     <section id="panel-create" class="panel">
@@ -186,6 +196,20 @@
       <h2>Мои видео</h2>
       <p class="hint">Пришлю последний готовый файл в чат.</p>
       <button class="go" id="go-history" type="button">Прислать последний</button>
+    </section>
+
+    <section id="panel-nightlib" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Ночной автоконтур</h2>
+      <p class="hint">Ночной пайплайн сам кладёт сюда готовый ролик. Забирать вручную не нужно. Ручные сюда не попадают.</p>
+      <ul id="night-list" class="lib-list"></ul>
+    </section>
+
+    <section id="panel-manuallib" class="panel">
+      <button class="back" data-back type="button">← Меню</button>
+      <h2>Мои съёмки</h2>
+      <p class="hint">После съёмки ролик сам попадает сюда. Ночной пайплайн сюда не заходит.</p>
+      <ul id="manual-list" class="lib-list"></ul>
     </section>
 
     <p id="status" class="status" hidden></p>

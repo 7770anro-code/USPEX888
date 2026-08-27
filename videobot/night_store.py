@@ -356,6 +356,20 @@ def mark_video_ready(job_id: int, video_path: str, *, runway_credits: int, eleve
         worker_id="",
         last_error="",
     )
+    # Папка владельца наполняется сама: не ходим на VPS и не копируем руками.
+    try:
+        from library import archive_night_video
+
+        job = get_job(int(job_id)) or {}
+        archive_night_video(
+            Path(video_path),
+            run_date=str(job.get("run_date") or ""),
+            account=str(job.get("account_id") or ""),
+            job_id=str(job_id),
+            title=str(job.get("title") or ""),
+        )
+    except Exception:
+        log.warning("night library auto-archive failed job=%s", job_id)
 
 
 def save_run(run_id: str, run_date: str, status: str, report: str) -> None:

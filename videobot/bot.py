@@ -1274,9 +1274,101 @@ async def cmd_night_mode(message: Message, state: FSMContext) -> None:
         + "\n\n/night — отчёт и кнопки да/нет\n"
         + "/night_mode confirm — только с подтверждением (default)\n"
         + "/night_mode auto — без подтверждения (позже, после App Review)\n"
+        + "/night_archive — папка роликов ночного автоконтура\n"
+        + "/my_archive — папка ручных съёмок (Авторолик и т.д.)\n"
         + "/serial — мультсериал (следующая серия / пакет / правка)",
         reply_markup=main_menu(),
     )
+
+
+def _library_owner_only(chat_id: int) -> bool:
+    from library import is_owner_user
+
+    return is_owner_user(int(chat_id))
+
+
+def library_pick_kb(kind: str, items: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    prefix = "libn:" if kind == "night" else "libm:"
+    rows: list[list[InlineKeyboardButton]] = []
+    for item in items[:8]:
+        item_id = str(item.get("id") or "")
+        cb = prefix + item_id
+        if len(cb.encode("utf-8")) > 64:
+            continue
+        label = str(item.get("title") or item.get("name") or item_id)[:42]
+        rows.append([InlineKeyboardButton(text=label, callback_data=cb)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def cmd_night_archive(message: Message, state: FSMContext) -> None:
+    if not _library_owner_only(message.chat.id):
+        await message.answer("Эта папка только для владельца автоконтура.")
+        return
+    from library import list_night_videos
+
+    items = list_night_videos(limit=8)
+    if not items:
+        await message.answer(
+            "Папка ночного автоконтура пока пуста. Новые ролики появятся сюда сами."
+        )
+        return
+    lines = ["Ночной автоконтур — готовые ролики (не смешиваются с ручными):"]
+    for item in items:
+        lines.append(f"• {item.get('when')} · {item.get('title')} · {item.get('size_label')}")
+    await message.answer(
+        "\n".join(lines)[:3900],
+        reply_markup=library_pick_kb("night", items),
+    )
+
+
+async def cmd_my_archive(message: Message, state: FSMContext) -> None:
+    if not _library_owner_only(message.chat.id):
+        await message.answer("Эта папка только для владельца автоконтура.")
+        return
+    from library import list_manual_videos
+
+    items = list_manual_videos(int(message.chat.id), limit=8)
+    if not items:
+        await message.answer(
+            "Папка ручных съёмок пока пуста. Авторолик и кастом после готовности сложатся сами."
+        )
+        return
+    lines = ["Ручные съёмки — Авторолик, фото+голос, монтаж (не ночной пайплайн):"]
+    for item in items:
+        lines.append(f"• {item.get('when')} · {item.get('title')} · {item.get('size_label')}")
+    await message.answer(
+        "\n".join(lines)[:3900],
+        reply_markup=library_pick_kb("manual", items),
+    )
+
+
+async def on_library_callback(query: CallbackQuery) -> None:
+    uid = int(query.from_user.id) if query.from_user else 0
+    if not _library_owner_only(uid):
+        await query.answer("Только владелец.")
+        return
+    data = query.data or ""
+    from library import resolve_library_file
+    from studio import send_chat_video
+
+    if data.startswith("libn:"):
+        kind, item_id = "night", data[5:]
+        caption = "Ночной автоконтур"
+    elif data.startswith("libm:"):
+        kind, item_id = "manual", data[5:]
+        caption = "Ручная съёмка"
+    else:
+        await query.answer()
+        return
+    path = resolve_library_file(kind, uid, item_id)
+    if path is None:
+        await query.answer("Файл не найден.", show_alert=True)
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+    await send_chat_video(query.bot, uid, path, f"{caption} · {path.stem}")
 
 
 async def cmd_serial(message: Message, state: FSMContext) -> None:
@@ -3334,10 +3426,14 @@ async def main() -> None:
     dp.message.register(cmd_cancel, Command("cancel"))
     dp.message.register(cmd_night, Command("night"))
     dp.message.register(cmd_night_mode, Command("night_mode"))
+    dp.message.register(cmd_night_archive, Command("night_archive"))
+    dp.message.register(cmd_my_archive, Command("my_archive"))
     dp.message.register(cmd_serial, Command("serial"))
     dp.message.register(cmd_edit, Command("edit"))
     dp.message.register(cmd_edit, Command("cut"))
     dp.callback_query.register(on_night_callback, F.data.startswith("night:"))
+    dp.callback_query.register(on_library_callback, F.data.startswith("libn:"))
+    dp.callback_query.register(on_library_callback, F.data.startswith("libm:"))
     dp.callback_query.register(on_serial_callback, F.data.startswith("serial:"))
     dp.callback_query.register(on_edit_callback, F.data.startswith("edit:"))
     dp.callback_query.register(on_menu, F.data.startswith("menu:"))

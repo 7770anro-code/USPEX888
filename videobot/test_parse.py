@@ -1813,6 +1813,9 @@ def test_night_policy_defaults() -> None:
     assert "{job['id']}.mp4" in inspect.getsource(_render_job)
     assert "job_scope" in inspect.getsource(_render_job)
     assert "live_markup_dict" in inspect.getsource(_render_job)
+    from night_store import mark_video_ready as _mark_ready
+
+    assert "archive_night_video" in inspect.getsource(_mark_ready)
     from bot import on_live_refresh, main as bot_main
 
     assert "live:" in inspect.getsource(bot_main)
@@ -2827,6 +2830,8 @@ def test_fal_kling_and_miniapp() -> None:
     assert "MenuButtonWebApp" in main_src
     assert "WEBAPP_PUBLIC_URL" in main_src
     assert "Открыть меню" in main_src
+    assert "night_archive" in main_src
+    assert "my_archive" in main_src
     app = build_app(bot=None)
     paths = set()
     for route in app.router.routes():
@@ -2850,6 +2855,10 @@ def test_fal_kling_and_miniapp() -> None:
     assert "/api/restore" in paths
     assert "/api/history" in paths
     assert "/api/vibe" in paths
+    assert "/api/me" in paths
+    assert "/api/library/night" in paths
+    assert "/api/library/manual" in paths
+    assert "/api/library/send" in paths
 
     async def _unsigned_post_is_403() -> None:
         from aiohttp.test_utils import TestClient, TestServer
@@ -2867,6 +2876,14 @@ def test_fal_kling_and_miniapp() -> None:
             assert resp4.status == 403
             resp5 = await client.post("/api/autorolik/script")
             assert resp5.status == 403
+            resp6 = await client.get("/api/me")
+            assert resp6.status == 403
+            resp7 = await client.post("/api/library/night")
+            assert resp7.status == 403
+            resp8 = await client.post("/api/library/manual")
+            assert resp8.status == 403
+            resp9 = await client.post("/api/library/send")
+            assert resp9.status == 403
 
     asyncio.run(_unsigned_post_is_403())
 
@@ -2876,12 +2893,23 @@ def test_fal_kling_and_miniapp() -> None:
     assert "go-slowmo" in html
     assert "go-history" in html
     assert "data-go=\"improve\"" in html
+    assert "data-go=\"nightlib\"" in html
+    assert "data-go=\"manuallib\"" in html
+    assert "owner-only" in html
+    assert "Ночной автоконтур" in html
+    assert "Забирать вручную не нужно" in html
+    assert "Мои съёмки" in html
     assert "Мой голос" in html
     assert "Topaz" in html
     js = Path(__file__).with_name("webapp").joinpath("app.js").read_text(encoding="utf-8")
     assert "data-go" in js
     assert "/api/interpolate" in js
     assert "/api/history" in js
+    assert "/api/library/night" in js
+    assert "/api/library/manual" in js
+    assert "/api/library/send" in js
+    assert "revealOwnerCards" in js
+    assert "/api/me" in js
     assert "/api/autorolik" in js
     assert "/api/autorolik/status" in js
     assert "/api/autorolik/shoot" in js
@@ -2904,7 +2932,8 @@ def test_fal_kling_and_miniapp() -> None:
     assert 'TIPS' in js or "home:" in js
     assert "Нажми карточку" in js
     assert "sendData" not in js
-    assert html.count('class="sub"') == 7
+    assert html.count('class="sub"') == 9
+    assert html.count("owner-only") == 2
     assert "go-autorolik" in html
     assert "go-auto-shoot" in html
     assert "go-auto-edit" in html
@@ -3429,6 +3458,150 @@ def test_ai_generated_disclosure() -> None:
     asyncio.run(_burn())
 
 
+def test_owner_library_folders() -> None:
+    """Ночь и ручные ролики — разные папки; API только владельцу; path traversal закрыт."""
+    import asyncio
+    import shutil
+    import tempfile
+    import time
+    from pathlib import Path
+
+    import config
+    import library
+    import store
+    from aiohttp import FormData
+    from aiohttp.test_utils import TestClient, TestServer
+    from webapp_server import build_app
+
+    tmp = tempfile.mkdtemp()
+    old_data = config.DATA_DIR
+    old_out = config.NIGHT_OUTBOX
+    old_owner = config.NIGHT_OWNER_CHAT_ID
+    old_token = config.VIDEOBOT_TELEGRAM_TOKEN
+    config.DATA_DIR = tmp
+    config.NIGHT_OUTBOX = str(Path(tmp) / "outbox")
+    config.NIGHT_OWNER_CHAT_ID = 0
+    store.reset_for_tests()
+    blob = b"x" * (library.MIN_VIDEO_BYTES + 32)
+    try:
+        assert library.is_owner_user(7) is False
+        config.NIGHT_OWNER_CHAT_ID = 6748280112
+        assert library.is_owner_user(6748280112) is True
+        assert library.is_owner_user(7) is False
+
+        night_src = Path(config.NIGHT_OUTBOX) / "2026-08-27" / "motiv" / "13.mp4"
+        night_src.parent.mkdir(parents=True)
+        night_src.write_bytes(blob)
+        dest = library.archive_night_video(
+            night_src,
+            run_date="2026-08-27",
+            account="motiv",
+            job_id="13",
+            title="Носки голосуют",
+        )
+        assert dest is not None and dest.is_file()
+        night_items = library.list_night_videos()
+        assert any("13" in item["id"] for item in night_items)
+        assert any("Носки" in item["title"] for item in night_items)
+
+        extra = Path(config.NIGHT_OUTBOX) / "2026-08-26" / "motiv" / "12.mp4"
+        extra.parent.mkdir(parents=True)
+        extra.write_bytes(blob)
+        night_ids = {item["id"] for item in library.list_night_videos()}
+        assert any("12" in name for name in night_ids)
+
+        from night_store import create_job, mark_video_ready
+
+        jid = create_job(
+            {
+                "run_date": "2026-08-27",
+                "account_id": "motiv",
+                "kind": "motivational",
+                "title": "Автодоставка",
+            }
+        )
+        ready = Path(config.NIGHT_OUTBOX) / "2026-08-27" / "motiv" / f"{jid}.mp4"
+        ready.parent.mkdir(parents=True, exist_ok=True)
+        ready.write_bytes(blob)
+        mark_video_ready(jid, str(ready), runway_credits=0, eleven_chars=0)
+        auto_items = library.list_night_videos()
+        assert any(str(jid) in item["id"] for item in auto_items)
+        assert any("Автодоставка" in item["title"] for item in auto_items)
+
+        src = Path(tmp) / "hand.mp4"
+        src.write_bytes(blob)
+        store.save_last_video(6748280112, src, "Авторолик тест")
+        manuals = library.list_manual_videos(6748280112)
+        assert manuals
+        man_ids = {item["id"] for item in manuals}
+        assert night_ids.isdisjoint(man_ids)
+        assert library.list_manual_videos(7) == []
+
+        assert library.resolve_library_file("night", 6748280112, "../secret.mp4") is None
+        assert library.resolve_library_file("manual", 6748280112, "../secret.mp4") is None
+        night_name = next(item["id"] for item in library.list_night_videos() if "13" in item["id"])
+        assert library.resolve_library_file("night", 6748280112, night_name) is not None
+        assert library.resolve_library_file("manual", 7, manuals[0]["id"]) is None
+        assert library.resolve_library_file("manual", 6748280112, manuals[0]["id"]) is not None
+
+        token = "123456:TESTTOKEN"
+        config.VIDEOBOT_TELEGRAM_TOKEN = token
+
+        def _init_for(uid: int) -> str:
+            pairs = {
+                "auth_date": str(int(time.time())),
+                "query_id": "AA",
+                "user": '{"id":%s,"first_name":"Ann"}' % uid,
+            }
+            return _sign_init_data(pairs, token)
+
+        class _StubBot:
+            async def send_message(self, *_a, **_k):
+                return None
+
+            async def send_video(self, *_a, **_k):
+                return None
+
+            async def send_document(self, *_a, **_k):
+                return None
+
+        async def _owner_api() -> None:
+            app = build_app(bot=_StubBot())
+            async with TestClient(TestServer(app)) as client:
+                stranger = await client.get(
+                    "/api/me", headers={"X-Telegram-Init-Data": _init_for(7)}
+                )
+                assert stranger.status == 200
+                assert (await stranger.json()).get("owner") is False
+                owner = await client.get(
+                    "/api/me", headers={"X-Telegram-Init-Data": _init_for(6748280112)}
+                )
+                assert owner.status == 200
+                assert (await owner.json()).get("owner") is True
+
+                body = FormData()
+                body.add_field("initData", _init_for(7))
+                denied = await client.post("/api/library/night", data=body)
+                assert denied.status == 403
+
+                ok_body = FormData()
+                ok_body.add_field("initData", _init_for(6748280112))
+                listed = await client.post("/api/library/night", data=ok_body)
+                assert listed.status == 200
+                payload = await listed.json()
+                assert payload.get("ok") is True
+                assert payload.get("items")
+
+        asyncio.run(_owner_api())
+    finally:
+        config.DATA_DIR = old_data
+        config.NIGHT_OUTBOX = old_out
+        config.NIGHT_OWNER_CHAT_ID = old_owner
+        config.VIDEOBOT_TELEGRAM_TOKEN = old_token
+        store.reset_for_tests()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def _sign_init_data(pairs: dict[str, str], token: str) -> str:
     import hmac
     import hashlib
@@ -3872,4 +4045,5 @@ if __name__ == "__main__":
     test_webapp_autorolik_formdata_hmac()
     test_autorolik_upload_disconnect()
     test_telegram_photo_compress_and_error_text()
+    test_owner_library_folders()
     print("ok")
