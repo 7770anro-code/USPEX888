@@ -254,18 +254,6 @@ async def _render_one(
         status="wait_confirm" if require_confirm() else "video_ready",
         last_error="",
     )
-    try:
-        from library import archive_night_video
-
-        archive_night_video(
-            dest,
-            run_date=str(run_date),
-            account=str(acc.id),
-            job_id=f"serial_{n}",
-            title=str(plan.get("title") or f"Серия {n}"),
-        )
-    except Exception:
-        log.warning("serial library archive failed episode=%s", n)
     log.info("serial episode %s ready job=%s path=%s", n, jid, dest)
     return {
         "episode_id": ep_id,

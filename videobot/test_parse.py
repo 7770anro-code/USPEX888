@@ -1813,6 +1813,9 @@ def test_night_policy_defaults() -> None:
     assert "{job['id']}.mp4" in inspect.getsource(_render_job)
     assert "job_scope" in inspect.getsource(_render_job)
     assert "live_markup_dict" in inspect.getsource(_render_job)
+    from night_store import mark_video_ready as _mark_ready
+
+    assert "archive_night_video" in inspect.getsource(_mark_ready)
     from bot import on_live_refresh, main as bot_main
 
     assert "live:" in inspect.getsource(bot_main)
@@ -2894,6 +2897,7 @@ def test_fal_kling_and_miniapp() -> None:
     assert "data-go=\"manuallib\"" in html
     assert "owner-only" in html
     assert "Ночной автоконтур" in html
+    assert "Забирать вручную не нужно" in html
     assert "Мои съёмки" in html
     assert "Мой голос" in html
     assert "Topaz" in html
@@ -3505,6 +3509,24 @@ def test_owner_library_folders() -> None:
         extra.write_bytes(blob)
         night_ids = {item["id"] for item in library.list_night_videos()}
         assert any("12" in name for name in night_ids)
+
+        from night_store import create_job, mark_video_ready
+
+        jid = create_job(
+            {
+                "run_date": "2026-08-27",
+                "account_id": "motiv",
+                "kind": "motivational",
+                "title": "Автодоставка",
+            }
+        )
+        ready = Path(config.NIGHT_OUTBOX) / "2026-08-27" / "motiv" / f"{jid}.mp4"
+        ready.parent.mkdir(parents=True, exist_ok=True)
+        ready.write_bytes(blob)
+        mark_video_ready(jid, str(ready), runway_credits=0, eleven_chars=0)
+        auto_items = library.list_night_videos()
+        assert any(str(jid) in item["id"] for item in auto_items)
+        assert any("Автодоставка" in item["title"] for item in auto_items)
 
         src = Path(tmp) / "hand.mp4"
         src.write_bytes(blob)

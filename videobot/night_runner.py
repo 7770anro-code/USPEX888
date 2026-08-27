@@ -163,18 +163,6 @@ async def _render_job(job: dict, account, idea: dict, *, n_scenes: int) -> None:
                 format_status(get_job(job_key)),
                 reply_markup=None,
             )
-        try:
-            from library import archive_night_video
-
-            archive_night_video(
-                Path(video),
-                run_date=day,
-                account=str(account.id),
-                job_id=str(job["id"]),
-                title=str(idea.get("title") or ""),
-            )
-        except Exception:
-            log.warning("night library archive failed job=%s", job["id"])
         log.info("job %s video_ready %s", job["id"], video)
     except CircuitOpen as exc:
         finish_job(job_key, failed=True, label=str(exc))
