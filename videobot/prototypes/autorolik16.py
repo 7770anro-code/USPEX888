@@ -61,16 +61,26 @@ def _strip_el(text: str) -> str:
     return re.sub(r"\s+", " ", ELEMENT_RE.sub("the person", text or "")).strip()
 
 
+def _is_topup_lock(exc: BaseException) -> bool:
+    blob = f"{getattr(exc, 'detail', '')} {exc}".lower()
+    return "top_up" in blob or ("user is locked" in blob and "exhausted" not in blob)
+
+
 def _is_credits(exc: BaseException) -> bool:
     from pipeline import PipelineError, is_runway_credits_fail
 
     if not isinstance(exc, PipelineError):
         return False
+    if _is_topup_lock(exc):
+        return False
     if getattr(exc, "code", "") == "credits":
+        blob = f"{exc.detail or ''} {exc}".lower()
+        if "top_up" in blob:
+            return False
         return True
     blob = f"{exc.detail or ''} {exc}".lower()
     return is_runway_credits_fail(exc.detail) or any(
-        w in blob for w in ("exhausted balance", "user is locked", "insufficient", "out of credit")
+        w in blob for w in ("exhausted balance", "insufficient credits", "out of credit")
     )
 
 
@@ -80,14 +90,53 @@ async def _https(session, path: Path) -> str:
     return await to_fal_https_url(session, await path_to_fal_url(session, path))
 
 
+async def _wait_unlocked(session, side_path: Path, *, tries: int = 40, delay: float = 30.0) -> None:
+    """TOP_UP lock после пополнения: не трогаем sidecar, только peek."""
+    from fal_api import fal_peek_status, read_fal_side
+    from pipeline import PipelineError
+
+    if not side_path.is_file():
+        return
+    saved = read_fal_side(side_path)
+    rid = (saved.get("request_id") or "").strip()
+    model = (saved.get("model_id") or "").strip()
+    if not rid or not model:
+        return
+    for i in range(tries):
+        try:
+            await fal_peek_status(session, model, rid, used_image=True)
+            log.info("fal unlocked after %s peeks", i)
+            return
+        except PipelineError as exc:
+            if _is_topup_lock(exc) or (getattr(exc, "status", None) == 403 and "locked" in (exc.detail or "").lower()):
+                log.warning("fal TOP_UP lock peek %s/%s", i + 1, tries)
+                await asyncio.sleep(delay)
+                continue
+            raise
+    raise RuntimeError("fal.ai всё ещё locked (TOP_UP) после ожидания")
+
+
 async def _run(session, model: str, payload: dict, dest: Path | None = None) -> tuple[str, dict]:
     from fal_api import extract_fal_media_url, fal_download_media, fal_run
+    from pipeline import PipelineError
 
-    data = await fal_run(session, model, payload, used_image=True, dest_id=dest)
-    url = extract_fal_media_url(data)
-    if dest is not None and url:
-        await fal_download_media(session, data, dest)
-    return url, data
+    last: Exception | None = None
+    for attempt in range(8):
+        try:
+            data = await fal_run(session, model, payload, used_image=True, dest_id=dest)
+            url = extract_fal_media_url(data)
+            if dest is not None and url:
+                await fal_download_media(session, data, dest)
+            return url, data
+        except PipelineError as exc:
+            last = exc
+            if _is_topup_lock(exc):
+                log.warning("TOP_UP lock on %s attempt %s", model, attempt + 1)
+                await asyncio.sleep(30)
+                continue
+            raise
+    assert last is not None
+    raise last
 
 
 def _slate(dest: Path, label: str) -> None:
@@ -233,6 +282,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=180)
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            await _wait_unlocked(session, out / "c0.mp4.fal_id")
+        except Exception as exc:
+            report["notes"].append(f"TOP_UP wait fail: {exc}")
+            (out / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+            log.error("still locked: %s", exc)
+            print("TOPUP_LOCKED")
+            print("EST_USD 0.18")
+            return 3
         https: dict[int, str] = {}
         stills: dict[int, str] = {}
         needed = set()
@@ -263,7 +321,10 @@ async def main_async(args: argparse.Namespace) -> int:
             reuse = args.p1_still if idx == 1 and args.p1_still and Path(args.p1_still).is_file() else None
             dest = out / f"still_p{idx}.jpg"
             try:
-                if reuse:
+                if dest.is_file() and dest.stat().st_size > 1000:
+                    stills[idx] = await _https(session, dest)
+                    log.info("reuse local still p%s", idx)
+                elif reuse:
                     stills[idx] = await _https(session, Path(reuse))
                     log.info("reuse p1 still")
                 else:
@@ -289,6 +350,13 @@ async def main_async(args: argparse.Namespace) -> int:
             vis = str(sc.get("visual_prompt") or "")
             row: dict = {"n": n, "face": face, "status": "ok", "model": "", "video": "", "detail": ""}
             dest = out / f"c{i}.mp4"
+            if dest.is_file() and dest.stat().st_size > 10000:
+                row["status"] = "skip_exists"
+                row["model"] = "local"
+                log.info("scene %s skip existing %s", n, dest.name)
+                clips.append(out / f"n{i}.mp4" if (out / f"n{i}.mp4").is_file() else dest)
+                report["scenes"].append(row)
+                continue
             try:
                 if face:
                     ei = int(sc.get("element_index") or 1)
