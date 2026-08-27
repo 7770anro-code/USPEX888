@@ -2933,6 +2933,7 @@ def test_fal_kling_and_miniapp() -> None:
         encode_minimax_voice,
         is_minimax_voice,
         kling_i2v_payload,
+        kling_same_person_element,
         minimax_tts_payload,
         seedance_ref_payload,
     )
@@ -2941,6 +2942,41 @@ def test_fal_kling_and_miniapp() -> None:
     from provider_router import ROUTING, chain_for
     from providers.fal_client import FalClient, _split_fal_task
 
+    one = kling_same_person_element("https://example.com/a.jpg")
+    assert one["frontal_image_url"] == "https://example.com/a.jpg"
+    assert one["reference_image_urls"] == ["https://example.com/a.jpg"]
+    multi = kling_same_person_element(
+        "https://example.com/a.jpg",
+        ["https://example.com/b.jpg", "https://example.com/a.jpg", "https://example.com/c.jpg", "https://example.com/d.jpg"],
+    )
+    assert multi["frontal_image_url"] == "https://example.com/a.jpg"
+    assert multi["reference_image_urls"] == [
+        "https://example.com/b.jpg",
+        "https://example.com/c.jpg",
+        "https://example.com/d.jpg",
+    ]
+    import importlib.util
+
+    restage_path = Path(__file__).with_name("prototypes") / "kling_restage_ab.py"
+    spec = importlib.util.spec_from_file_location("kling_restage_ab", restage_path)
+    restage = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    spec.loader.exec_module(restage)
+    assert restage.NEG_DEFAULT == "blur, distort, and low quality"
+    assert "distorted face" in restage.NEG_FACE
+    assert restage.SEEDANCE_REF_FAST == "bytedance/seedance-2.0/fast/reference-to-video"
+    batch_path = Path(__file__).with_name("prototypes") / "seedance_face_batch.py"
+    bspec = importlib.util.spec_from_file_location("seedance_face_batch", batch_path)
+    batch = importlib.util.module_from_spec(bspec)
+    assert bspec is not None and bspec.loader is not None
+    bspec.loader.exec_module(batch)
+    ids = [j["id"] for j in batch.jobs_spec()]
+    assert ids == ["9", "8", "11", "13a", "13b", "13c"]
+    assert batch.jobs_spec()[2]["photo_keys"] == ["p3"]
+    cinematic_el = restage._element("https://example.com/still.jpg", ["https://example.com/selfie.jpg"])
+    assert cinematic_el["frontal_image_url"] == "https://example.com/still.jpg"
+    assert cinematic_el["reference_image_urls"] == ["https://example.com/selfie.jpg"]
+    # Прод пока кладёт каждый URL как отдельный Element — это другие персонажи, не доп. ракурсы.
     locked = kling_i2v_payload("walk", "https://example.com/a.jpg", 5, photo_lock=True)
     assert locked["generate_audio"] is False
     assert locked["elements"] == [
