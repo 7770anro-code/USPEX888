@@ -530,6 +530,85 @@ async def handle_history(request: web.Request) -> web.Response:
     )
 
 
+def _owner_or_403(user: dict[str, Any]) -> web.Response | None:
+    from library import is_owner_user
+
+    if is_owner_user(int(user["id"])):
+        return None
+    return json_error("Эта папка только для владельца.", 403)
+
+
+async def handle_me(request: web.Request) -> web.Response:
+    user = _user_from_header(request)
+    if user is None:
+        if request.method == "POST":
+            form = await request.post()
+            try:
+                user = _user_from_request(request, form)
+            except WebAppAuthError as exc:
+                return json_error(str(exc), 403)
+        else:
+            return json_error("Нет подписи Mini App.", 403)
+    from library import is_owner_user
+
+    return web.json_response(
+        {"ok": True, "id": int(user["id"]), "owner": is_owner_user(int(user["id"]))}
+    )
+
+
+async def handle_library_night(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    denied = _owner_or_403(user)
+    if denied is not None:
+        return denied
+    from library import list_night_videos
+
+    return web.json_response({"ok": True, "items": list_night_videos()})
+
+
+async def handle_library_manual(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    denied = _owner_or_403(user)
+    if denied is not None:
+        return denied
+    from library import list_manual_videos
+
+    return web.json_response({"ok": True, "items": list_manual_videos(int(user["id"]))})
+
+
+async def handle_library_send(request: web.Request) -> web.Response:
+    form = await request.post()
+    try:
+        user = _user_from_request(request, form)
+    except WebAppAuthError as exc:
+        return json_error(str(exc), 403)
+    denied = _owner_or_403(user)
+    if denied is not None:
+        return denied
+    from library import resolve_library_file
+
+    kind = str(form.get("kind") or "").strip().lower()
+    item_id = str(form.get("id") or "").strip()
+    path = resolve_library_file(kind, int(user["id"]), item_id)
+    if path is None:
+        return json_error("Файл не найден.")
+    label = "Ночной автоконтур" if kind in ("night", "n") else "Ручная съёмка"
+    caption = f"{label} · {path.stem}"
+    bot = request.app["bot"]
+    _spawn(_run_safe(bot, user["id"], "library_send", path, caption))
+    return web.json_response(
+        {"ok": True, "message": "Шлю ролик в чат с ботом.", "close": False}
+    )
+
+
 async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
     from studio import (
         job_error_text,
@@ -545,6 +624,7 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
         run_studio_upscale,
         run_studio_vibe,
         send_chat_text,
+        send_chat_video,
     )
 
     live_phase = ""
@@ -597,6 +677,9 @@ async def _run_safe(bot: Any, user_id: int, kind: str, *args: Any) -> None:
             await run_studio_autorolik_shoot(bot, user_id)
         elif kind == "history":
             await run_studio_history(bot, user_id)
+        elif kind == "library_send":
+            path, caption = args
+            await send_chat_video(bot, user_id, path, str(caption))
     except (PipelineError, Exception) as exc:
         log.warning("studio %s user=%s: %s", kind, user_id, job_error_text(exc))
         if kind == "autorolik_shoot":
@@ -636,6 +719,11 @@ def build_app(bot: Any) -> web.Application:
     app.router.add_post("/api/autorolik/shoot", handle_autorolik_shoot)
     app.router.add_post("/api/autorolik/cancel", handle_autorolik_cancel)
     app.router.add_post("/api/history", handle_history)
+    app.router.add_get("/api/me", handle_me)
+    app.router.add_post("/api/me", handle_me)
+    app.router.add_post("/api/library/night", handle_library_night)
+    app.router.add_post("/api/library/manual", handle_library_manual)
+    app.router.add_post("/api/library/send", handle_library_send)
     return app
 
 

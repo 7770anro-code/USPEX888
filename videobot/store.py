@@ -200,6 +200,12 @@ def save_last_video(user_id: int, src: Path, title: str = "") -> Path:
             (int(user_id), str(dest), str(title or ""), _now()),
         )
         conn.commit()
+    try:
+        from library import archive_manual_video
+
+        archive_manual_video(int(user_id), dest, title)
+    except Exception:
+        log.warning("manual library archive failed user=%s", user_id)
     return dest
 
 

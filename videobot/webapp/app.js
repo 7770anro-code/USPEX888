@@ -26,6 +26,8 @@
     tryon: "Фото тебя + фото одежды + галочка.",
     voice: "Голосовое 10+ секунд и галочка.",
     mine: "Пришлю последний ролик сюда, в чат.",
+    nightlib: "Ночные ролики сами падают сюда. Можно прислать любой в чат.",
+    manuallib: "Ручные съёмки отдельно от ночного автоконтура.",
   };
   let tipTimer = 0;
 
@@ -90,6 +92,12 @@
     showTipOnce(name);
     if (name === "autorolik") {
       restoreAutorolik();
+    }
+    if (name === "nightlib") {
+      loadLibrary("night");
+    }
+    if (name === "manuallib") {
+      loadLibrary("manual");
     }
   }
 
@@ -649,4 +657,95 @@
   bind("go-history", async () => {
     await postJob("/api/history");
   });
+
+  async function fetchJson(path, extra) {
+    if (!initData) {
+      showStatus("Открой меню из Telegram — иначе нет подписи Mini App.", "err");
+      return null;
+    }
+    let resp;
+    try {
+      resp = await fetch(path, { method: "POST", body: autoForm(extra), headers: authHeaders() });
+    } catch (_err) {
+      showStatus("Сеть оборвалась. Открой папку ещё раз.", "err");
+      return null;
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      showStatus(data.error || "Не вышло открыть папку.", "err");
+      return null;
+    }
+    return data;
+  }
+
+  async function revealOwnerCards() {
+    if (!initData) return;
+    try {
+      const resp = await fetch("/api/me", { headers: authHeaders() });
+      const data = await resp.json().catch(() => ({}));
+      if (data && data.owner) {
+        document.querySelectorAll(".owner-only").forEach((el) => {
+          el.hidden = false;
+        });
+      }
+    } catch (_e) {
+      /* без подписи карточки остаются скрытыми */
+    }
+  }
+
+  function renderLibraryList(listEl, kind, items) {
+    listEl.innerHTML = "";
+    if (!items.length) {
+      const empty = document.createElement("li");
+      empty.className = "lib-empty";
+      empty.textContent = "Пока пусто. Новые ролики появятся сами.";
+      listEl.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const li = document.createElement("li");
+      li.className = "lib-item";
+      const meta = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = item.title || item.name || "Ролик";
+      const sub = document.createElement("span");
+      sub.className = "lib-meta";
+      sub.textContent = [item.when, item.size_label].filter(Boolean).join(" · ");
+      meta.appendChild(title);
+      meta.appendChild(sub);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "go alt";
+      btn.textContent = "В чат";
+      btn.addEventListener("click", () => {
+        postJob("/api/library/send", { kind: kind, id: item.id });
+      });
+      li.appendChild(meta);
+      li.appendChild(btn);
+      listEl.appendChild(li);
+    });
+  }
+
+  async function loadLibrary(kind) {
+    const list = document.getElementById(kind === "night" ? "night-list" : "manual-list");
+    if (!list) return;
+    list.innerHTML = "";
+    const wait = document.createElement("li");
+    wait.className = "lib-empty";
+    wait.textContent = "Загружаю…";
+    list.appendChild(wait);
+    const path = kind === "night" ? "/api/library/night" : "/api/library/manual";
+    const data = await fetchJson(path);
+    if (!data) {
+      list.innerHTML = "";
+      const err = document.createElement("li");
+      err.className = "lib-empty";
+      err.textContent = "Не удалось открыть папку.";
+      list.appendChild(err);
+      return;
+    }
+    renderLibraryList(list, kind, data.items || []);
+  }
+
+  revealOwnerCards();
 })();

@@ -294,3 +294,40 @@ legend {
   font-size: 1.1rem;
 }
 .tip[hidden] { display: none; }
+.owner-only[hidden] { display: none; }
+.lib-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.lib-empty {
+  color: var(--muted);
+  font: 0.88rem/1.35 ui-sans-serif, system-ui, sans-serif;
+  padding: 0.4rem 0;
+}
+.lib-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.55rem;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  padding: 0.7rem 0.75rem;
+  margin-bottom: 0.45rem;
+}
+.lib-item strong {
+  display: block;
+  font: 650 0.9rem/1.25 ui-sans-serif, system-ui, sans-serif;
+}
+.lib-meta {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font: 0.75rem/1.3 ui-sans-serif, system-ui, sans-serif;
+}
+.lib-item .go {
+  width: auto;
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+}
